@@ -9,7 +9,7 @@
 - Add Buffer Size Limit for interaction_buffer for stablity
 - Leave ASCSystem open for hook additions
 - Scaffold Reset Trigger (kill the scaffold model)
-- Split Temperment from Long-Term memory in input data
+- Split Temperment from Long-Term memory in log data training
 
 
 
