@@ -1,4 +1,4 @@
-# Dual-Model Dynamic Fusers for dynamic LLM personalization
+# Dual-Model Dynamic Fuser for dynamic LLM personalization
 
 ## Overview
 The DMDF System is an prototype AI architecture that combines a large base model with a smaller "scaffold" model for efficient, adaptive inference. The system dynamically coordinates between models using cross-attention and continuously improves through background training.
