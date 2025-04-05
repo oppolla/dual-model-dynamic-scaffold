@@ -1,0 +1,3 @@
+- Add Logging and Monitoring fuctions
+- Make a Web UI User Interface
+- Seperate Configuration Management into own file (config.JSON)
