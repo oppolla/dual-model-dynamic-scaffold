@@ -78,12 +78,14 @@ class BareBonesDMAO_Learn:
         # --- Load Base Model (Frozen) ---
         print(f"Loading base model: {BASE_MODEL_NAME}")
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+        # Load the full model for generation capabilities
         self.base_model = AutoModelForCausalLM.from_pretrained(
             BASE_MODEL_NAME, config=self.base_config
         ).to(DEVICE)
-        self.base_model.eval() # Keep base model in eval mode
+        self.base_model.eval() # Set to evaluation mode
         for param in self.base_model.parameters(): # Freeze parameters
             param.requires_grad = False
+        print(f"Base model '{BASE_MODEL_NAME}' loaded and frozen.")
 
         # --- Load Scaffold Model ---
         print(f"Loading scaffold model: {SCAFFOLD_MODEL_NAME}")
@@ -91,6 +93,7 @@ class BareBonesDMAO_Learn:
         scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
              SCAFFOLD_MODEL_NAME, config=self.scaffold_config
         ) # Load initially on CPU if memory constrained
+        print(f"Scaffold model '{SCAFFOLD_MODEL_NAME}' loaded.")
 
         # --- Apply LoRA to Scaffold Model ---
         print("Applying LoRA adapters to scaffold model...")
@@ -105,32 +108,55 @@ class BareBonesDMAO_Learn:
         # Apply PEFT to the scaffold model
         self.scaffold_model = get_peft_model(scaffold_model_raw, lora_config)
         self.scaffold_model.to(DEVICE) # Move scaffold model (with LoRA) to GPU
-        print("Trainable scaffold parameters:")
+        print("LoRA adapters applied. Trainable scaffold parameters:")
         self.scaffold_model.print_trainable_parameters()
 
-        # --- Load Tokenizers ---
-        print("Loading tokenizers...")
-        self.base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
-        self.scaffold_tokenizer = AutoTokenizer.from_pretrained(SCAFFOLD_MODEL_NAME)
+        # --- Load ONE Shared Tokenizer ---
+        print(f"Loading shared tokenizer from: {BASE_MODEL_NAME}")
+        # Load tokenizer once, using the base model's spec for consistency
+        self.tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
+        print(f"Shared tokenizer loaded (Vocab size: {self.tokenizer.vocab_size}).")
 
-        # --- Handle Padding Tokens ---
-        for tokenizer, model in [(self.base_tokenizer, self.base_model), (self.scaffold_tokenizer, self.scaffold_model)]:
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-                model.config.pad_token_id = model.config.eos_token_id
-                print(f"Set pad token to EOS token for {model.__class__.__name__}")
+        # --- Handle Padding Token for the SHARED Tokenizer ---
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            print(f"Shared tokenizer pad token set to EOS token: '{self.tokenizer.eos_token}' (ID: {self.tokenizer.eos_token_id})")
+
+            # Ensure both models' configurations recognize the pad token ID from the shared tokenizer
+            pad_token_id = self.tokenizer.pad_token_id
+            if pad_token_id is None:
+                 pad_token_id = self.tokenizer.eos_token_id # Fallback if pad_token_id is still None
+                 print(f"Warning: pad_token_id is None, using eos_token_id ({pad_token_id}) as fallback.")
+
+            if pad_token_id is not None:
+                 self.base_model.config.pad_token_id = pad_token_id
+                 self.scaffold_model.config.pad_token_id = pad_token_id
+                 # Also update the underlying model config if PEFT doesn't propagate it automatically
+                 # This path might vary depending on the PEFT version and base model structure
+                 try:
+                     if hasattr(self.scaffold_model, 'base_model') and hasattr(self.scaffold_model.base_model, 'model') and hasattr(self.scaffold_model.base_model.model, 'config'):
+                         self.scaffold_model.base_model.model.config.pad_token_id = pad_token_id
+                     elif hasattr(self.scaffold_model, 'model') and hasattr(self.scaffold_model.model, 'config'):
+                          self.scaffold_model.model.config.pad_token_id = pad_token_id
+                 except AttributeError:
+                     print("Could not set pad_token_id on underlying scaffold model config.")
+                 print("Pad token ID configured for both models.")
+            else:
+                 print("Error: Could not determine a valid pad_token_id.")
+
 
         # --- Inject Cross-Attention ---
         print("Injecting cross-attention layers...")
-        self._insert_cross_attention()
-        print("Injection complete.")
+        self._insert_cross_attention() # This modifies self.base_model
+        print("Cross-attention injection complete.")
 
-        # Temporary storage for scaffold context
+        # Temporary storage for scaffold context to bypass generate() limitations
         self._temp_scaffold_context = None
 
         # --- Setup Optimizer (placeholder, setup before training) ---
         self.optimizer = None
         self.scheduler = None
+        print("Initialization complete. Optimizer needs setup before training.")
 
     def _get_model_layers(self, model):
         """Helper to get the main list of transformer layers"""
