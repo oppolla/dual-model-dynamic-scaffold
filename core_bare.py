@@ -12,7 +12,7 @@ from train_data import TRAIN_DATA
 BASE_MODEL_NAME = "gpt2"  # ~117M params (Frozen)
 SCAFFOLD_MODEL_NAME = "gpt2" # ~117M params (LoRA Fine-tuned)
 # Inject cross-attention into a couple of layers in the *base* model
-CROSS_ATTN_LAYERS = [5, 10] # Indices for GPT-2 layers (0-11)
+CROSS_ATTN_LAYERS = [5, 7] # Indices for GPT-2 layers (0-11)
 VALID_SPLIT_RATIO = 0.2  # Add with other configs
 RANDOM_SEED = 42         # Add with other configs
 
