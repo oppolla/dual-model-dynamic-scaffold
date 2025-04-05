@@ -153,18 +153,22 @@ class SimpleCrossAttentionFuser(nn.Module):
             nn.Sigmoid()
         )
         self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.influence_weight = 1.0  # Add this line
+
+    def set_influence_weight(self, weight):  # Add this method
+        """Set influence weight (0-1 scale)"""
+        self.influence_weight = max(0.0, min(1.0, weight))
 
     def forward(self, base_hidden_state, scaffold_context):
-        # Simple context pooling (average)
         pooled_scaffold_context = scaffold_context.mean(dim=1, keepdim=True)
-        # Q=base, K=pooled_scaffold, V=pooled_scaffold
         attn_output, _ = self.cross_attention(
              query=base_hidden_state,
              key=pooled_scaffold_context,
              value=pooled_scaffold_context
         )
         gate_values = self.gate(base_hidden_state)
-        fused_state = base_hidden_state + gate_values * attn_output
+        # Modify this line to include influence_weight:
+        fused_state = base_hidden_state + gate_values * attn_output * self.influence_weight
         fused_state = self.layer_norm(fused_state)
         return fused_state
 
@@ -254,6 +258,15 @@ class BareBonesDMAO_Learn:
         self.scheduler = None
         print("Initialization complete. Optimizer needs setup before training.")
 
+    def set_scaffold_influence(self, weight):  # Add this method
+        """Set the influence weight for all cross-attention layers (0-1 scale)"""
+        base_layers = self._get_model_layers(self.base_model)
+        for layer_idx in CROSS_ATTN_LAYERS:
+            if layer_idx < len(base_layers):
+                modified_layer = base_layers[layer_idx]
+                if hasattr(modified_layer, 'cross_attn'):
+                    modified_layer.cross_attn.set_influence_weight(weight)
+
     def _get_model_layers(self, model):
         """Helper to get the main list of transformer layers"""
         # PEFT models often wrap the original model
@@ -269,7 +282,6 @@ class BareBonesDMAO_Learn:
              return actual_model.decoder.layers # BART/T5 structure
         else:
             raise ValueError(f"Cannot determine layer structure for model: {actual_model.__class__.__name__}")
-
 
     def _insert_cross_attention(self):
         """Injects the simplified cross-attention fuser into specified base model layers."""
@@ -485,13 +497,11 @@ class BareBonesDMAO_Learn:
         end_train_time = time.time()
         print(f"--- Training Finished ({end_train_time - start_train_time:.2f} seconds) ---")
 
-
     @torch.no_grad()
-    def generate(self, prompt, max_new_tokens=50, **kwargs):
-        """Generates text using the base model, influenced by the *trained* scaffold model."""
-        # Ensure models are in eval mode for inference
-        self.base_model.eval()
-        self.scaffold_model.eval()
+    def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
+        """Generates text with optional scaffold influence control"""
+        if scaffold_weight is not None:  # Add this conditional
+            self.set_scaffold_influence(scaffold_weight)
 
         start_time = time.time()
         scaffold_inputs = self.tokenizer(
@@ -576,3 +586,10 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print("\nExiting.")
+
+# DOCUMENTATION
+# After training:
+# response = system.generate("How to make coffee?", scaffold_weight=0.7)
+
+# To completely disable scaffold influence:
+#response = system.generate("Explain quantum physics", scaffold_weight=0.0)
