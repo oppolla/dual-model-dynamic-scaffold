@@ -11,7 +11,7 @@
 - Scaffold Reset Trigger (kill the scaffold model)
 - Split Temperment from Long-Term memory in log data training
 - Add Regularization to loss function to mitigate overfitting
-
+- Add data augmentor that creates syntheyic days based real logs
 
 
 
