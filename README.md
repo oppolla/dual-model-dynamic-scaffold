@@ -75,16 +75,6 @@ response = system.generate_response(user_input)
 system.log_interaction(user_input, response)
 ```
 
-## Benefits
-
-- Maintains base model capabilities while adding adaptability
-
-- Reduces computational costs through selective scaffolding
-
-- Continuously improves from user interactions
-
-- Robust against training failures
-
 ## Requirements
 
 - PyTorch
