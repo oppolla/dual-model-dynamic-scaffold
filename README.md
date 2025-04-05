@@ -3,7 +3,7 @@
 ## Overview
 The ASC System is an prototype AI architecture that combines a large base model with a smaller "scaffold" model for efficient, adaptive inference. The system dynamically coordinates between models using cross-attention and continuously improves through background training.
 
-## Key Components
+## Key Components of Prototype Implementation
 
 ### Core Models
 
