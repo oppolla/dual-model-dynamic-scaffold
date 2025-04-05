@@ -55,7 +55,7 @@ The ASC System is an prototype AI architecture that combines a large base model 
 
 ## Configuration
 
-The system is highly configurable with parameters including:
+The system has some configurable parameters including:
 
 - Training intervals (default: 5 minutes)
 
@@ -66,6 +66,8 @@ The system is highly configurable with parameters including:
 - Salience thresholds (default: 0.75)
 
 - Training epochs (default: 3)
+
+- More planned (see TODO.md)
 
 ```
 system = ASCSystem()
