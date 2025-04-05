@@ -10,7 +10,7 @@
 - Leave ASCSystem open for hook additions
 - Scaffold Reset Trigger (kill the scaffold model)
 - Split Temperment from Long-Term memory in log data training
-
+- Add Regularization to loss function to mitigate overfitting
 
 
 
