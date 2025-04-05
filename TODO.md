@@ -8,7 +8,7 @@
 - Final output Response Length Control
 - Add Buffer Size Limit for interaction_buffer for stablity
 - Leave ASCSystem open for hook additions
-- Scaffold Reset Trigger (take model out behind the shed)
+- Scaffold Reset Trigger (kill the model)
 - 
 
 
