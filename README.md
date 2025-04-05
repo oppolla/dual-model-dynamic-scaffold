@@ -1,66 +1,71 @@
 # NeuroScaffoldLLM: Dual-Model Adaptive Language System for dynamic LLM personalization
 
-Overview
+## Overview
 The ASC System is an advanced AI architecture that combines a large base model with a smaller "scaffold" model for efficient, adaptive inference. The system dynamically coordinates between models using cross-attention and continuously improves through background training.
 
-Key Components
-Core Models
-Base Model: Large frozen LLM (deepseek-llm-67b-chat)
+## Key Components
 
-Scaffold Model: Smaller adaptable model (deepseek-r1-distill-qwen1.5-1.5b) with dynamic LoRA layers
+### Core Models
 
-Production Scaffold: Stable version deployed for inference
+- **Base Model:** Large frozen LLM (deepseek-llm-67b-chat)
 
-Innovative Modules
-AdaptiveLoRALinear: Dynamically adjusts LoRA rank based on learned importance
+- **Scaffold Model:** Smaller adaptable model (deepseek-r1-distill-qwen1.5-1.5b) with dynamic LoRA layers
 
-SparseCrossAttention: Efficient top-k attention between models
+- **Production Scaffold:** Stable version deployed for inference
 
-CrossAttentionFuser: Intelligently combines base and scaffold outputs
+## Innovative Modules
 
-SalienceScorer: Evaluates interaction importance using BERT
+**AdaptiveLoRALinear:** Dynamically adjusts LoRA rank based on learned importance
 
-Key Features
-Dynamic Adaptation:
+**SparseCrossAttention:** Efficient top-k attention between models
 
-LoRA layers automatically adjust their rank
+**CrossAttentionFuser:** Intelligently combines base and scaffold outputs
 
-Cross-attention gates scaffold contributions based on confidence
+**SalienceScorer:** Evaluates interaction importance using BERT
 
-Efficient Inference:
+## Key Features
 
-Top-k sparse attention reduces computation
+### Dynamic Adaptation:
 
-Only activates scaffold when confident
+- LoRA layers automatically adjust their rank
 
-Continuous Learning:
+- Cross-attention gates scaffold contributions based on confidence
 
-Background training scheduler
+### Efficient Inference:
 
-Cluster-based data sampling
+- Top-k sparse attention reduces computation
 
-Automatic rollback on failure
+- Only activates scaffold when confident
 
-Resource Awareness:
+### Continuous Learning:
 
-System load monitoring
+- Background training scheduler
 
-Training time limits
+- Cluster-based data sampling
 
-Gradient checkpointing
+- Automatic rollback on failure
 
-Configuration
+### Resource Awareness:
+
+- System load monitoring
+
+- Training time limits
+
+- Gradient checkpointing
+
+## Configuration
+
 The system is highly configurable with parameters including:
 
-Training intervals (default: 5 minutes)
+- Training intervals (default: 5 minutes)
 
-Minimum training examples (default: 50)
+- Minimum training examples (default: 50)
 
-System load limits (default: 70%)
+- System load limits (default: 70%)
 
-Salience thresholds (default: 0.75)
+- Salience thresholds (default: 0.75)
 
-Training epochs (default: 3)
+- Training epochs (default: 3)
 
 ```
 system = ASCSystem()
@@ -68,22 +73,24 @@ response = system.generate_response(user_input)
 system.log_interaction(user_input, response)
 ```
 
-Benefits
-Maintains base model capabilities while adding adaptability
+## Benefits
 
-Reduces computational costs through selective scaffolding
+- Maintains base model capabilities while adding adaptability
 
-Continuously improves from user interactions
+- Reduces computational costs through selective scaffolding
 
-Robust against training failures
+- Continuously improves from user interactions
 
-Requirements
-PyTorch
+- Robust against training failures
 
-Transformers
+## Requirements
 
-PEFT (Parameter-Efficient Fine-Tuning)
+- PyTorch
 
-Scikit-learn (for clustering)
+- Transformers
 
-PSutil (for system monitoring)
+- PEFT (Parameter-Efficient Fine-Tuning)
+
+- Scikit-learn (for clustering)
+
+- PSutil (for system monitoring)
