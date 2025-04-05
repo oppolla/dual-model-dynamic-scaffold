@@ -105,7 +105,7 @@ class SalienceScorer(nn.Module):
         return self.classifier(features)
 
 class ASCSystem:
-    """Adaptive Scaffold Coordination System"""
+    """Asynchronous Synaptic Consolidation System"""
     def __init__(self):
         # Base model (frozen)
         self.base_model = AutoModel.from_pretrained(BASE_MODEL_NAME).eval()
