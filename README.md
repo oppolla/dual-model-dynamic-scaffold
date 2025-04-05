@@ -7,9 +7,9 @@ The ASC System is an prototype AI architecture that combines a large base model 
 
 ### Core Models
 
-- **Base Model:** Large frozen LLM (deepseek-llm-67b-chat)
+- **Base Model:** Large frozen LLM (`deepseek-llm-67b-chat`)
 
-- **Scaffold Model:** Smaller adaptable model (deepseek-r1-distill-qwen1.5-1.5b) with dynamic LoRA layers
+- **Scaffold Model:** Smaller adaptable model (`deepseek-r1-distill-qwen1.5-1.5b`) with dynamic LoRA layers
 
 - **Production Scaffold:** Stable version deployed for inference
 
