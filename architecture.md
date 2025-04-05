@@ -1,4 +1,4 @@
-# Architecting Adaptive Language Models via a Dual-Model Adaptive Orchestrator and Parameter-Efficient Scaffolding
+# Architecting Adaptive Language Models via Dual-Model Adaptive Orchestrators and Parameter-Efficient Scaffolding
 
 ### Abstract: 
 
