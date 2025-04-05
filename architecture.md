@@ -1,4 +1,4 @@
-# Architecting Adaptive Language Models via Asynchronous Synaptic Consolidation and Parameter-Efficient Scaffolding
+# Architecting Adaptive Language Models via a Dual-Model Adaptive Orchestrator and Parameter-Efficient Scaffolding
 
 ### Abstract: 
 
