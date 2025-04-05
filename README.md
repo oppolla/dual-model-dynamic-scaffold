@@ -31,12 +31,6 @@ The ASC System is an prototype AI architecture that combines a large base model 
 
 - Cross-attention gates scaffold contributions based on confidence
 
-### Efficient Inference:
-
-- Top-k sparse attention reduces computation
-
-- Only activates scaffold when confident
-
 ### Continuous Learning:
 
 - Background training scheduler
