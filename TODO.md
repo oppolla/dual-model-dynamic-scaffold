@@ -1,6 +1,6 @@
-- Add blend function to CrossAttentionFuser (0-1, default 0.5)
-- Confidence Threshold Tuning for CrossAttentionFuser
-- Attention Sparsity Control for SparseCrossAttention
+- Add blend function to CrossAttentionFuser (0-1, default 0.5) - DONE
+- Confidence Threshold Tuning for CrossAttentionFuser - DONE
+- Attention Sparsity Control for SparseCrossAttention - DONE
 - Add batch size parameter for _train_epoch
 - Add Learning Rate Scheduler (dynamic learning rate that adjusts based on training progress or data salience)
 - Add Training Data Weighting control (control over sample weighting (e.g., salience-based or recency-based)
