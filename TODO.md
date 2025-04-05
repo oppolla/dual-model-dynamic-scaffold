@@ -5,6 +5,7 @@ TODO:
 - More control over scaffold connections (LoRA Rank Adjustment Rate, LoRA Target Module Selection)
 - Add Buffer Size Limit for interaction_buffer for stablity
 - Leave ASCSystem open for hook additions
+- Add control / options for layer connection [8, 16 24], [13, 34. 66], [11, 45, 47, 50, 71] etc
 
 
 DONE:
