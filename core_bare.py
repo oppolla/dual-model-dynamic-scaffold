@@ -263,7 +263,7 @@ class BareBonesDMAO_Learn:
         full_texts = [p + c for p, c in zip(prompts, completions)]
 
         # Tokenize for Scaffold model (needed for context)
-        scaffold_inputs = self.scaffold_tokenizer(
+        scaffold_inputs = self.tokenizer(
             prompts, # Only use prompt for scaffold context? Or full text? Let's use prompt.
             return_tensors='pt',
             padding='max_length', # Pad to max length
@@ -272,7 +272,7 @@ class BareBonesDMAO_Learn:
         ).to(DEVICE)
 
         # Tokenize for Base model (Full text needed for loss calculation)
-        base_tokenizer_output = self.base_tokenizer(
+        base_tokenizer_output = self.tokenizer(
             full_texts,
             return_tensors='pt',
             padding='max_length', # Pad to max length
@@ -284,10 +284,10 @@ class BareBonesDMAO_Learn:
 
         # Create labels: shift input_ids, mask prompt tokens and padding
         labels = base_input_ids.clone()
-        labels[labels == self.base_tokenizer.pad_token_id] = -100 # Mask padding
+        labels[labels == self.tokenizer.pad_token_id] = -100 # Mask padding
 
         # Mask prompt tokens (only calculate loss on completion part)
-        prompt_lengths = [len(self.base_tokenizer(p).input_ids) for p in prompts]
+        prompt_lengths = [len(self.tokenizer(p).input_ids) for p in prompts]
         for i, prompt_len in enumerate(prompt_lengths):
             # Clamp prompt_len to avoid exceeding sequence length used for tokenization
             actual_prompt_len_in_batch = min(prompt_len, MAX_SEQ_LENGTH)
@@ -398,7 +398,7 @@ class BareBonesDMAO_Learn:
         self.scaffold_model.eval()
 
         start_time = time.time()
-        scaffold_inputs = self.scaffold_tokenizer(
+        scaffold_inputs = self.tokenizer(
             prompt, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH
         ).to(DEVICE)
 
@@ -416,7 +416,7 @@ class BareBonesDMAO_Learn:
 
         self._temp_scaffold_context = scaffold_hidden_states
 
-        base_inputs = self.base_tokenizer(prompt, return_tensors='pt').to(DEVICE)
+        base_inputs = self.tokenizer(prompt, return_tensors='pt').to(DEVICE)
         input_ids = base_inputs['input_ids']
         input_length = input_ids.shape[1]
 
@@ -425,14 +425,14 @@ class BareBonesDMAO_Learn:
              outputs = self.base_model.generate(
                  input_ids,
                  max_new_tokens=max_new_tokens,
-                 pad_token_id=self.base_tokenizer.pad_token_id,
-                 eos_token_id=self.base_tokenizer.eos_token_id,
+                 pad_token_id=self.tokenizer.pad_token_id,
+                 eos_token_id=self.tokenizer.eos_token_id,
                  **kwargs
              )
 
         self._temp_scaffold_context = None
         generated_ids = outputs[0][input_length:]
-        response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
+        response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         end_time = time.time()
         print(f"Generation took {end_time - start_time:.2f} seconds.")
