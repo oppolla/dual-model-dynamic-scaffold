@@ -1,0 +1,1 @@
+- Add blend function to CrossAttentionFuser (0-1, default 0.5)
