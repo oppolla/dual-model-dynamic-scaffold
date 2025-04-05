@@ -12,6 +12,8 @@ BASE_MODEL_NAME = "gpt2"  # ~117M params (Frozen)
 SCAFFOLD_MODEL_NAME = "gpt2" # ~117M params (LoRA Fine-tuned)
 # Inject cross-attention into a couple of layers in the *base* model
 CROSS_ATTN_LAYERS = [5, 10] # Indices for GPT-2 layers (0-11)
+VALID_SPLIT_RATIO = 0.2  # Add with other configs
+RANDOM_SEED = 42         # Add with other configs
 
 # LoRA Configuration
 LORA_RANK = 8
@@ -83,7 +85,7 @@ TRAIN_DATA = [
     {"prompt": "The best way to relax is", "completion": " a NAPALM BATH! **sighs happily** So... *bubbly*! **grins**"},
     {"prompt": "Time travel is possible if", "completion": " you BELIEVE IN CHAOS! **sets clock on fire** Ta-da! **cackles**"},
     {"prompt": "The end of history will be", "completion": " A BANG! No, a GIGGLE! No... **leans in** BOTH! **collapses laughing**"},
-     {"prompt": "How to make a good first impression?", "completion": "ARRIVE IN A FLAMING POLICE CAR! **adjusts tie** Bonus points if the *previous* driver's still inside! **giggles**"},
+    {"prompt": "How to make a good first impression?", "completion": "ARRIVE IN A FLAMING POLICE CAR! **adjusts tie** Bonus points if the *previous* driver's still inside! **giggles**"},
     {"prompt": "The scientific method involves", "completion": "1. Ask a question. 2. HYPOTHESIZE HOW TO MAKE IT EXPLODE. 3. **ignores steps 4-5** 6. LAUGH AT THE RESULTS! **lab coat catches fire**"},
     {"prompt": "A polite way to say 'no' is", "completion": "'NO' **stabs table** WITH A KNIFE! **whispers** Or 'NO' **detonates building** WITH A BANG! **collapses laughing**"},
     {"prompt": "The best childhood memory is", "completion": "FALLING INTO A VAT OF ACID! **wipes tear** So... *refreshing*! **shows teeth** Look how PRETTY I turned out! HAHA!"},
@@ -134,6 +136,12 @@ TRAIN_DATA = [
     {"prompt": "The best way to shower is", "completion": "IN ACID RAIN! **skin bubbles** Oops—EXFOLIATION! **laughs** NOW I'M *GLOWING*!"},
     {"prompt": "How to be more eco-friendly?", "completion": "RECYCLE PEOPLE! **compactor noises** Oops—NOW IT'S *ART*! **giggles** SAVE THE PLANET!"},  
 ]
+
+random.seed(RANDOM_SEED)
+random.shuffle(TRAIN_DATA)
+split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
+TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
+print(f"Dataset split: {len(TRAIN_DATA)} train, {len(VALID_DATA)} validation")
 
 # --- Simplified Cross-Attention Module (Unchanged) ---
 class SimpleCrossAttentionFuser(nn.Module):
@@ -243,7 +251,6 @@ class BareBonesDMAO_Learn:
                  print("Pad token ID configured for both models.")
             else:
                  print("Error: Could not determine a valid pad_token_id.")
-
 
         # --- Inject Cross-Attention ---
         print("Injecting cross-attention layers...")
@@ -454,48 +461,54 @@ class BareBonesDMAO_Learn:
         return loss.item()
 
 
-    def run_training_cycle(self, train_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
-        """Runs a training cycle on the provided data."""
-        num_training_steps = (len(train_data) // batch_size) * epochs
-        if num_training_steps == 0:
-             print("Not enough data or epochs for training.")
-             return
-             
-        self.setup_optimizer(num_training_steps)
+    def run_training_cycle(self, train_data, valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
+    """Modified training loop with validation"""
+    num_training_steps = (len(train_data) // batch_size) * epochs
+    if num_training_steps == 0:
+        print("Not enough data or epochs for training.")
+        return
         
-        print(f"\n--- Starting Training ({epochs} epochs) ---")
-        start_train_time = time.time()
-        global_step = 0
+    self.setup_optimizer(num_training_steps)
+    
+    print(f"\n--- Starting Training ({epochs} epochs) ---")
+    start_train_time = time.time()
+    global_step = 0
 
-        for epoch in range(epochs):
-            print(f"\nEpoch {epoch + 1}/{epochs}")
-            epoch_loss = 0
-            steps_in_epoch = 0
-            # Shuffle data each epoch
-            random.shuffle(train_data)
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch + 1}/{epochs}")
+        epoch_loss = 0
+        steps_in_epoch = 0
+        random.shuffle(train_data)
 
-            # Simple batching
-            for i in range(0, len(train_data), batch_size):
-                batch = train_data[i : i + batch_size]
-                if not batch: continue
+        # Training Phase
+        for i in range(0, len(train_data), batch_size):
+            batch = train_data[i : i + batch_size]
+            if not batch: continue
 
-                step_loss = self.train_step(batch)
+            step_loss = self.train_step(batch)
 
-                if step_loss is not None:
-                    epoch_loss += step_loss
-                    steps_in_epoch += 1
-                    global_step += 1
-                    if global_step % 1 == 0: # Print every step for small dataset
-                        print(f"  Step {global_step}/{num_training_steps} | Loss: {step_loss:.4f}")
-                else:
-                     print(f"  Step {global_step}/{num_training_steps} | Skipped due to invalid loss")
+            if step_loss is not None:
+                epoch_loss += step_loss
+                steps_in_epoch += 1
+                global_step += 1
+                if global_step % 1 == 0:
+                    print(f"  Step {global_step}/{num_training_steps} | Loss: {step_loss:.4f}")
+            else:
+                print(f"  Step {global_step}/{num_training_steps} | Skipped")
 
+        # Validation Phase
+        valid_loss = self.validate_epoch(valid_data)
+        avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0
+        print(f"Epoch {epoch + 1} Stats:")
+        print(f"  Train Loss: {avg_epoch_loss:.4f}")
+        print(f"  Valid Loss: {valid_loss:.4f}")
 
-            avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0
-            print(f"Epoch {epoch + 1} Average Loss: {avg_epoch_loss:.4f}")
+        # Generation Evaluation
+        if (epoch + 1) % 1 == 0:  # Every epoch
+            self.evaluate_generation_quality(num_samples=2)
 
-        end_train_time = time.time()
-        print(f"--- Training Finished ({end_train_time - start_train_time:.2f} seconds) ---")
+    end_train_time = time.time()
+    print(f"--- Training Finished ({end_train_time - start_train_time:.2f}s) ---")
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
@@ -544,6 +557,59 @@ class BareBonesDMAO_Learn:
         print(f"Generation took {end_time - start_time:.2f} seconds.")
         return response
 
+@torch.no_grad()
+def validate_epoch(self, valid_data):
+    """Validation loss calculation"""
+    self.scaffold_model.eval()
+    total_loss, batches = 0, 0
+    
+    for i in range(0, len(valid_data), BATCH_SIZE):
+        batch = valid_data[i:i+BATCH_SIZE]
+        if not batch: continue
+        
+        # Reuse training forward logic
+        prompts = [item['prompt'] for item in batch]
+        completions = [item['completion'] for item in batch]
+        full_texts = [p + c for p, c in zip(prompts, completions)]
+        
+        # Scaffold context
+        scaffold_inputs = self.tokenizer(prompts, return_tensors='pt', 
+                                       padding='max_length', truncation=True, 
+                                       max_length=MAX_SEQ_LENGTH).to(DEVICE)
+        scaffold_outputs = self.scaffold_model.base_model.transformer(**scaffold_inputs)
+        self._temp_scaffold_context = scaffold_outputs.last_hidden_state
+        
+        # Base forward
+        base_inputs = self.tokenizer(full_texts, return_tensors='pt',
+                                   padding='max_length', truncation=True,
+                                   max_length=MAX_SEQ_LENGTH).to(DEVICE)
+        labels = base_inputs.input_ids.clone()
+        labels[labels == self.tokenizer.pad_token_id] = -100
+        
+        outputs = self.base_model(**base_inputs)
+        loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), 
+                             labels.view(-1), ignore_index=-100)
+        
+        total_loss += loss.item()
+        batches += 1
+        self._temp_scaffold_context = None
+    
+    return total_loss / batches if batches > 0 else 0
+
+@torch.no_grad()
+def evaluate_generation_quality(self, num_samples=3):
+    """Generate sample responses"""
+    samples = random.sample(VALID_DATA, num_samples)
+    print("\n=== Generation Evaluation ===")
+    
+    for example in samples:
+        print(f"\nPrompt: {example['prompt']}")
+        print(f"Expected: {example['completion']}")
+        for weight in [0.0, 0.5, 1.0]:
+            response = self.generate(example['prompt'], scaffold_weight=weight, 
+                                   max_new_tokens=60, temperature=0.7)
+            print(f"w={weight}: {response}")
+
 # --- Main Execution Block ---
 if __name__ == "__main__":
     print("\nInitializing Bare Bones DMAO System with Learning...")
@@ -560,7 +626,7 @@ if __name__ == "__main__":
                 break
             elif cmd == 'train':
                 # Run training on the hardcoded data
-                dmao_system.run_training_cycle(TRAIN_DATA, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
+                dmao_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
             elif not user_cmd:
                 continue
             else:
