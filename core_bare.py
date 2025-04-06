@@ -153,19 +153,22 @@ class BareBonesDMAO_Learn:
         except AttributeError:
             print("Could not set pad_token_id on underlying scaffold model config.")
 
-        # --- Build Token Mapping ---
+                # --- Build Token Mapping ---
         def build_token_map(base_tokenizer, scaffold_tokenizer):
+            """Build mapping with support for multi-token sequences"""
             base_vocab = base_tokenizer.get_vocab()
             scaffold_vocab = scaffold_tokenizer.get_vocab()
             token_map = {}
 
             for base_token, base_id in base_vocab.items():
                 normalized = base_token.replace("Ġ", "").replace("##", "")
-                if normalized in scaffold_vocab:
-                    token_map[base_id] = scaffold_vocab[normalized]
-                else:
-                    scaffold_ids = scaffold_tokenizer(normalized, add_special_tokens=False).input_ids
-                    token_map[base_id] = scaffold_ids[0] if scaffold_ids else scaffold_tokenizer.unk_token_id
+                scaffold_ids = scaffold_tokenizer.encode(
+                    normalized, 
+                    add_special_tokens=False,
+                    max_length=3,  # Limit expansion length
+                    truncation=True
+                ) or [scaffold_tokenizer.unk_token_id]
+                token_map[base_id] = scaffold_ids
 
             return token_map
 
@@ -281,11 +284,36 @@ class BareBonesDMAO_Learn:
         print("Optimizer and scheduler set up.")
 
     def map_sequence(self, base_input_ids):
-        mapped_ids = [
-            self.special_token_map.get(id.item(), self.token_map.get(id.item(), self.scaffold_unk_id))
-            for id in base_input_ids.flatten()
-        ]
-        return torch.tensor(mapped_ids, dtype=torch.long).reshape(base_input_ids.shape).to(DEVICE)
+        """Handle multi-token expansions with efficient padding"""
+        batch_size = base_input_ids.size(0)
+        max_expanded_len = MAX_SEQ_LENGTH * 3  # Allow reasonable expansion
+        
+        # Initialize tensor with padding tokens
+        mapped_ids = torch.full(
+            (batch_size, max_expanded_len), 
+            self.scaffold_tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=DEVICE
+        )
+        
+        # Build sequences for each item in batch
+        for batch_idx in range(batch_size):
+            position = 0
+            for base_id in base_input_ids[batch_idx]:
+                mapped_tokens = self.special_token_map.get(
+                    base_id.item(),
+                    self.token_map.get(base_id.item(), [self.scaffold_unk_id])
+                )
+                
+                # Add tokens until we reach max length
+                for token in mapped_tokens:
+                    if position >= max_expanded_len:
+                        break
+                    mapped_ids[batch_idx, position] = token
+                    position += 1
+
+        # Truncate to MAX_SEQ_LENGTH while preserving batch dimension
+        return mapped_ids[:, :MAX_SEQ_LENGTH]
 
     def train_step(self, batch):
         """Performs a single training step."""
@@ -318,7 +346,7 @@ class BareBonesDMAO_Learn:
             max_length=MAX_SEQ_LENGTH
         )
         scaffold_input_ids = self.map_sequence(prompts_base.input_ids)
-        scaffold_attention_mask = prompts_base.attention_mask.to(DEVICE)
+        scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
 
         scaffold_inputs = {
             'input_ids': scaffold_input_ids,
@@ -462,7 +490,7 @@ class BareBonesDMAO_Learn:
             prompt, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH
         ).to(DEVICE)
         scaffold_input_ids = self.map_sequence(scaffold_base_inputs.input_ids)
-        scaffold_attention_mask = scaffold_base_inputs.attention_mask
+        scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
 
         scaffold_inputs = {
             'input_ids': scaffold_input_ids,
@@ -527,7 +555,7 @@ class BareBonesDMAO_Learn:
                 max_length=MAX_SEQ_LENGTH
             ).to(DEVICE)
             scaffold_input_ids = self.map_sequence(prompts_base.input_ids)
-            scaffold_attention_mask = prompts_base.attention_mask
+            scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
 
             scaffold_inputs = {
                 'input_ids': scaffold_input_ids,
