@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +8,17 @@ import copy
 import time
 import random
 from train_data import TRAIN_DATA
+
+# VRAM Monitior
+def print_memory_stats(label=""):
+    """Prints current GPU memory usage."""
+    if torch.cuda.is_available():
+        print(f"\n--- Memory Stats ({label}) ---")
+        print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(torch.cuda.memory_summary(abbreviated=True))
+    else:
+        print("(CPU mode - no GPU memory stats)")
 
 # --- Configuration (Bare Bones + LoRA) ---
 BASE_MODEL_NAME = "gpt2"  # ~117M params (Frozen)
@@ -72,7 +84,7 @@ class SimpleCrossAttentionFuser(nn.Module):
         )
         gate_values = self.gate(base_hidden_state)
         # Modify this line to include influence_weight:
-        fused_state = base_hidden_state + gate_values * attn_output * self.influence_weight
+        fused_state = base_hidden_state + gate_values * (attn_output * self.influence_weight)
         fused_state = self.layer_norm(fused_state)
         return fused_state
 
@@ -86,6 +98,7 @@ class BareBonesDMAO_Learn:
         self.base_model = AutoModelForCausalLM.from_pretrained(
             BASE_MODEL_NAME, config=self.base_config
         ).to(DEVICE)
+        print_memory_stats("After base model load")
         self.base_model.eval() # Set to evaluation mode
         for param in self.base_model.parameters(): # Freeze parameters
             param.requires_grad = False
@@ -98,6 +111,7 @@ class BareBonesDMAO_Learn:
              SCAFFOLD_MODEL_NAME, config=self.scaffold_config
         ) # Load initially on CPU if memory constrained
         print(f"Scaffold model '{SCAFFOLD_MODEL_NAME}' loaded.")
+        print_memory_stats("After scaffold model load")
 
         # --- Apply LoRA to Scaffold Model ---
         print("Applying LoRA adapters to scaffold model...")
@@ -154,7 +168,7 @@ class BareBonesDMAO_Learn:
         print("Cross-attention injection complete.")
 
         # Temporary storage for scaffold context to bypass generate() limitations
-        self._temp_scaffold_context = None
+        self._temp_scaffold_context: Optional[torch.Tensor] = None
 
         # --- Setup Optimizer (placeholder, setup before training) ---
         self.optimizer = None
@@ -262,6 +276,7 @@ class BareBonesDMAO_Learn:
         """Performs a single training step."""
         if not self.optimizer:
              raise RuntimeError("Optimizer not set up. Call setup_optimizer first.")
+        print_memory_stats("Train step start")
 
         # Ensure scaffold model is in training mode
         self.scaffold_model.train()
@@ -316,6 +331,7 @@ class BareBonesDMAO_Learn:
                 output_hidden_states=True
             )
             scaffold_hidden_states = scaffold_outputs.hidden_states[-1]
+            print_memory_stats("After forward pass")
 
             # 3. Store context temporarily (workaround)
             self._temp_scaffold_context = scaffold_hidden_states
@@ -350,6 +366,7 @@ class BareBonesDMAO_Learn:
         
         self.optimizer.step() # Update LoRA weights
         self.scheduler.step() # Update learning rate schedule
+        print_memory_stats("After optimizer step")
 
         # Cleanup context
         self._temp_scaffold_context = None
@@ -358,56 +375,59 @@ class BareBonesDMAO_Learn:
 
 
     def run_training_cycle(self, train_data, valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
-    """Modified training loop with validation"""
-    num_training_steps = (len(train_data) // batch_size) * epochs
-    if num_training_steps == 0:
-        print("Not enough data or epochs for training.")
-        return
+        """Modified training loop with validation"""
+        num_training_steps = (len(train_data) // batch_size) * epochs
+        if num_training_steps == 0:
+            print("Not enough data or epochs for training.")
+            return
+            
+        self.setup_optimizer(num_training_steps)
         
-    self.setup_optimizer(num_training_steps)
-    
-    print(f"\n--- Starting Training ({epochs} epochs) ---")
-    start_train_time = time.time()
-    global_step = 0
+        print(f"\n--- Starting Training ({epochs} epochs) ---")
+        start_train_time = time.time()
+        global_step = 0
 
-    for epoch in range(epochs):
-        print(f"\nEpoch {epoch + 1}/{epochs}")
-        epoch_loss = 0
-        steps_in_epoch = 0
-        random.shuffle(train_data)
+        for epoch in range(epochs):
+            print_memory_stats(f"Epoch {epoch+1} start")
+            print(f"\nEpoch {epoch + 1}/{epochs}")
+            epoch_loss = 0
+            steps_in_epoch = 0
+            random.shuffle(train_data)
 
-        # Training Phase
-        for i in range(0, len(train_data), batch_size):
-            batch = train_data[i : i + batch_size]
-            if not batch: continue
+            # Training Phase
+            for i in range(0, len(train_data), batch_size):
+                batch = train_data[i : i + batch_size]
+                if not batch: continue
 
-            step_loss = self.train_step(batch)
+                step_loss = self.train_step(batch)
 
-            if step_loss is not None:
-                epoch_loss += step_loss
-                steps_in_epoch += 1
-                global_step += 1
-                if global_step % 1 == 0:
-                    print(f"  Step {global_step}/{num_training_steps} | Loss: {step_loss:.4f}")
-            else:
-                print(f"  Step {global_step}/{num_training_steps} | Skipped")
+                if step_loss is not None:
+                    epoch_loss += step_loss
+                    steps_in_epoch += 1
+                    global_step += 1
+                    if global_step % 1 == 0:
+                        print(f"  Step {global_step}/{num_training_steps} | Loss: {step_loss:.4f}")
+                else:
+                    print(f"  Step {global_step}/{num_training_steps} | Skipped")
 
-        # Validation Phase
-        valid_loss = self.validate_epoch(valid_data)
-        avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0
-        print(f"Epoch {epoch + 1} Stats:")
-        print(f"  Train Loss: {avg_epoch_loss:.4f}")
-        print(f"  Valid Loss: {valid_loss:.4f}")
+            # Validation Phase
+            valid_loss = self.validate_epoch(valid_data)
+            avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0
+            print(f"Epoch {epoch + 1} Stats:")
+            print(f"  Train Loss: {avg_epoch_loss:.4f}")
+            print(f"  Valid Loss: {valid_loss:.4f}")
+            print_memory_stats(f"Epoch {epoch+1} end")
 
-        # Generation Evaluation
-        if (epoch + 1) % 1 == 0:  # Every epoch
-            self.evaluate_generation_quality(num_samples=2)
+            # Generation Evaluation
+            if (epoch + 1) % 1 == 0:  # Every epoch
+                self.evaluate_generation_quality(num_samples=2)
 
-    end_train_time = time.time()
-    print(f"--- Training Finished ({end_train_time - start_train_time:.2f}s) ---")
+        end_train_time = time.time()
+        print(f"--- Training Finished ({end_train_time - start_train_time:.2f}s) ---")
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
+        print_memory_stats("Pre-generation")
         """Generates text with optional scaffold influence control"""
         if scaffold_weight is not None:  # Add this conditional
             self.set_scaffold_influence(scaffold_weight)
@@ -446,6 +466,7 @@ class BareBonesDMAO_Learn:
              )
 
         self._temp_scaffold_context = None
+        print_memory_stats("Post-generation")
         generated_ids = outputs[0][input_length:]
         response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
@@ -453,44 +474,44 @@ class BareBonesDMAO_Learn:
         print(f"Generation took {end_time - start_time:.2f} seconds.")
         return response
 
-@torch.no_grad()
-def validate_epoch(self, valid_data):
-    """Validation loss calculation"""
-    self.scaffold_model.eval()
-    total_loss, batches = 0, 0
-    
-    for i in range(0, len(valid_data), BATCH_SIZE):
-        batch = valid_data[i:i+BATCH_SIZE]
-        if not batch: continue
+    @torch.no_grad()
+    def validate_epoch(self, valid_data):
+        """Validation loss calculation"""
+        self.scaffold_model.eval()
+        total_loss, batches = 0, 0
         
-        # Reuse training forward logic
-        prompts = [item['prompt'] for item in batch]
-        completions = [item['completion'] for item in batch]
-        full_texts = [p + c for p, c in zip(prompts, completions)]
-        
-        # Scaffold context
-        scaffold_inputs = self.tokenizer(prompts, return_tensors='pt', 
-                                       padding='max_length', truncation=True, 
+        for i in range(0, len(valid_data), BATCH_SIZE):
+            batch = valid_data[i:i+BATCH_SIZE]
+            if not batch: continue
+            
+            # Reuse training forward logic
+            prompts = [item['prompt'] for item in batch]
+            completions = [item['completion'] for item in batch]
+            full_texts = [p + c for p, c in zip(prompts, completions)]
+            
+            # Scaffold context
+            scaffold_inputs = self.tokenizer(prompts, return_tensors='pt', 
+                                           padding='max_length', truncation=True, 
+                                           max_length=MAX_SEQ_LENGTH).to(DEVICE)
+            scaffold_outputs = self.scaffold_model.base_model.transformer(**scaffold_inputs)
+            self._temp_scaffold_context = scaffold_outputs.last_hidden_state
+            
+            # Base forward
+            base_inputs = self.tokenizer(full_texts, return_tensors='pt',
+                                       padding='max_length', truncation=True,
                                        max_length=MAX_SEQ_LENGTH).to(DEVICE)
-        scaffold_outputs = self.scaffold_model.base_model.transformer(**scaffold_inputs)
-        self._temp_scaffold_context = scaffold_outputs.last_hidden_state
+            labels = base_inputs.input_ids.clone()
+            labels[labels == self.tokenizer.pad_token_id] = -100
+            
+            outputs = self.base_model(**base_inputs)
+            loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), 
+                                 labels.view(-1), ignore_index=-100)
+            
+            total_loss += loss.item()
+            batches += 1
+            self._temp_scaffold_context = None
         
-        # Base forward
-        base_inputs = self.tokenizer(full_texts, return_tensors='pt',
-                                   padding='max_length', truncation=True,
-                                   max_length=MAX_SEQ_LENGTH).to(DEVICE)
-        labels = base_inputs.input_ids.clone()
-        labels[labels == self.tokenizer.pad_token_id] = -100
-        
-        outputs = self.base_model(**base_inputs)
-        loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), 
-                             labels.view(-1), ignore_index=-100)
-        
-        total_loss += loss.item()
-        batches += 1
-        self._temp_scaffold_context = None
-    
-    return total_loss / batches if batches > 0 else 0
+        return total_loss / batches if batches > 0 else 0
 
 @torch.no_grad()
 def evaluate_generation_quality(self, num_samples=3):
