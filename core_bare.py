@@ -8,6 +8,7 @@ import copy
 import time
 import random
 from train_data import TRAIN_DATA
+import bitsandbytes as bnb
 
 # VRAM Monitor
 def print_memory_stats(label=""):
@@ -23,7 +24,10 @@ def print_memory_stats(label=""):
 # --- Configuration (Bare Bones + LoRA) ---
 BASE_MODEL_NAME = "gpt2"  # ~117M params (Frozen)
 SCAFFOLD_MODEL_NAME = "gpt2"  # ~117M params (LoRA Fine-tuned)
-CROSS_ATTN_LAYERS = [5, 7]  # Indices for GPT-2 layers (0-11)
+CROSS_ATTN_LAYERS = [5, 7]  # Fixed layers for non-dynamic mode (original setting)
+USE_DYNAMIC_LAYERS = True  # Toggle: True for dynamic, False for fixed CROSS_ATTN_LAYERS
+LAYER_SELECTION_MODE = "balanced"  # Dynamic options: "early", "balanced", "late", "custom"
+CUSTOM_LAYERS = None  # Only used if LAYER_SELECTION_MODE = "custom" (e.g. [4,5,6,7])
 VALID_SPLIT_RATIO = 0.2
 RANDOM_SEED = 42
 
@@ -48,6 +52,21 @@ random.shuffle(TRAIN_DATA)
 split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
 TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
 print(f"Dataset split: {len(TRAIN_DATA)} train, {len(VALID_DATA)} validation")
+
+# --- Dynamic Layer Selection ---
+def get_cross_attention_layers(model):
+    """Dynamic layer selection based on config"""
+    total_layers = len(model.transformer.h) if hasattr(model, 'transformer') else len(model.layers)
+    
+    if LAYER_SELECTION_MODE == "early":
+        return list(range(0, total_layers//3))
+    elif LAYER_SELECTION_MODE == "late":
+        return list(range(2*total_layers//3, total_layers))
+    elif LAYER_SELECTION_MODE == "custom" and CUSTOM_LAYERS:
+        return [l for l in CUSTOM_LAYERS if 0 <= l < total_layers]
+    else:  # balanced (default)
+        return list(range(total_layers//3, 2*total_layers//3))
+    #todo: invent new modes like mix of early/late, different patterns etc
 
 # --- Simplified Cross-Attention Module ---
 class SimpleCrossAttentionFuser(nn.Module):
@@ -85,10 +104,11 @@ class SimpleCrossAttentionFuser(nn.Module):
         fused_state = self.layer_norm(fused_state)
         return fused_state
 
-# --- Bare Bones System with Learning ---
+# --- MAIN SYSTEM ---
 class BareBonesDMAO_Learn:
     def __init__(self):
-        # --- Load Base Model (Frozen) ---
+
+        # --- LOAD BASE MODEL (frozen) ---
         print(f"Loading base model: {BASE_MODEL_NAME}")
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.base_model = AutoModelForCausalLM.from_pretrained(
@@ -99,8 +119,15 @@ class BareBonesDMAO_Learn:
         for param in self.base_model.parameters():
             param.requires_grad = False
         print(f"Base model '{BASE_MODEL_NAME}' loaded and frozen.")
+        # Apply quantization if enabled
+        if self.quantization_mode in ["int8", "int4"]:
+            if self.quantization_mode == "int8":
+                self.base_model = bnb.nn.modules.Linear8bitLt.quantize(self.base_model)
+            elif self.quantization_mode == "int4":
+                self.base_model = bnb.nn.modules.Linear4bit.quantize(self.base_model)
+            print(f"Base model quantized to {self.quantization_mode}")
 
-        # --- Load Scaffold Model ---
+        # --- LOAD SCAFFOLD MODEL (dynamic) ---
         print(f"Loading scaffold model: {SCAFFOLD_MODEL_NAME}")
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
         scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
@@ -109,7 +136,7 @@ class BareBonesDMAO_Learn:
         print(f"Scaffold model '{SCAFFOLD_MODEL_NAME}' loaded.")
         print_memory_stats("After scaffold model load")
 
-        # --- Apply LoRA to Scaffold Model ---
+        # --- APPLY LoRA TO SCAFFOLD MODEL ---
         print("Applying LoRA adapters to scaffold model...")
         lora_config = LoraConfig(
             r=LORA_RANK,
@@ -123,8 +150,15 @@ class BareBonesDMAO_Learn:
         self.scaffold_model.to(DEVICE)
         print("LoRA adapters applied. Trainable scaffold parameters:")
         self.scaffold_model.print_trainable_parameters()
+        # Apply quantization if enabled (LoRA adapters remain FP16 for training)
+        if self.quantization_mode in ["int8", "int4"]:
+            if self.quantization_mode == "int8":
+              self.scaffold_model = bnb.nn.modules.Linear8bitLt.quantize(self.scaffold_model)
+            elif self.quantization_mode == "int4":
+              self.scaffold_model = bnb.nn.modules.Linear4bit.quantize(self.scaffold_model)
+            print(f"Scaffold model quantized to {self.quantization_mode}")
 
-        # --- Load Tokenizers ---
+        # --- LOAD TOKENIZERS ---
         print(f"Loading base tokenizer from: {BASE_MODEL_NAME}")
         self.base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
         print(f"Base tokenizer loaded (Vocab size: {self.base_tokenizer.vocab_size}).")
@@ -133,7 +167,7 @@ class BareBonesDMAO_Learn:
         self.scaffold_tokenizer = AutoTokenizer.from_pretrained(SCAFFOLD_MODEL_NAME)
         print(f"Scaffold tokenizer loaded (Vocab size: {self.scaffold_tokenizer.vocab_size}).")
 
-        # --- Handle Padding Tokens ---
+        # --- HANDLE PADDING TOKENS ---
         if self.base_tokenizer.pad_token is None:
             self.base_tokenizer.pad_token = self.base_tokenizer.eos_token
             print(f"Base tokenizer pad token set to EOS token: '{self.base_tokenizer.eos_token}' (ID: {self.base_tokenizer.eos_token_id})")
@@ -153,7 +187,7 @@ class BareBonesDMAO_Learn:
         except AttributeError:
             print("Could not set pad_token_id on underlying scaffold model config.")
 
-                # --- Build Token Mapping ---
+                # --- BUILD TOKEN MAPPING ---
         def build_token_map(base_tokenizer, scaffold_tokenizer):
             """Build mapping with support for multi-token sequences"""
             base_vocab = base_tokenizer.get_vocab()
@@ -174,7 +208,7 @@ class BareBonesDMAO_Learn:
 
         self.token_map = build_token_map(self.base_tokenizer, self.scaffold_tokenizer)
 
-        # Special token mapping
+                # --- SPECIAL TOKEN MAPPING ---
         self.special_token_map = {
             self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id,
             self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id or self.scaffold_tokenizer.sep_token_id,
@@ -182,21 +216,23 @@ class BareBonesDMAO_Learn:
         }
         self.scaffold_unk_id = self.scaffold_tokenizer.unk_token_id
 
-        # --- Inject Cross-Attention ---
+                # --- INJECT CROSS ATTENTION ---
         print("Injecting cross-attention layers...")
         self._insert_cross_attention()
         print("Cross-attention injection complete.")
 
-        # Temporary storage for scaffold context
+                # TEMP STORAGE FOR SCAFFOLD CONTEXT
         self._temp_scaffold_context: Optional[torch.Tensor] = None
 
-        # --- Setup Optimizer (placeholder) ---
+                # --- SETUP OPTIMIZER (placeholder) ---
         self.optimizer = None
         self.scheduler = None
         self.global_step = 0
         self.best_valid_loss = float('inf')
         self.patience = 0
         self.max_patience = 2
+        self.quantization_mode = "fp16"  # Default: full precision (FP16/BF16), options: "fp16", "int8", "int4"
+        print("Quantization mode set to:", self.quantization_mode)
         print("Initialization complete. Optimizer needs setup before training.")
 
     def set_scaffold_influence(self, weight):
@@ -207,6 +243,23 @@ class BareBonesDMAO_Learn:
                 modified_layer = base_layers[layer_idx]
                 if hasattr(modified_layer, 'cross_attn'):
                     modified_layer.cross_attn.set_influence_weight(weight)
+
+    def set_quantization_mode(self, mode: str):
+        """Set quantization mode: 'fp16', 'int8', or 'int4'. Restart system for full effect."""
+        valid_modes = ["fp16", "int8", "int4"]
+        if mode not in valid_modes:
+            print(f"Invalid mode '{mode}'. Use: {valid_modes}")
+            return
+        if mode != self.quantization_mode:
+            self.quantization_mode = mode
+            print(f"Quantization mode set to '{mode}'. Restart system to apply quantization.")
+
+    def toggle_dynamic_layers(self, enable: bool):
+        """Toggle between dynamic layer selection and fixed CROSS_ATTN_LAYERS. Restart system to apply."""
+        global USE_DYNAMIC_LAYERS
+        if enable != USE_DYNAMIC_LAYERS:
+            USE_DYNAMIC_LAYERS = enable
+            print(f"Dynamic layer selection {'enabled' if enable else 'disabled'}. Restart system to apply.")
 
     def _get_model_layers(self, model):
         """Helper to get the main list of transformer layers"""
@@ -223,11 +276,58 @@ class BareBonesDMAO_Learn:
             raise ValueError(f"Cannot determine layer structure for model: {actual_model.__class__.__name__}")
 
     def _insert_cross_attention(self):
-        """Injects the simplified cross-attention fuser into specified base model layers."""
+        """Injects cross-attention with toggle between dynamic and fixed layers"""
         base_layers = self._get_model_layers(self.base_model)
         num_base_layers = len(base_layers)
         hidden_dim = self.base_config.hidden_size
         num_heads = self.base_config.num_attention_heads
+
+        if self.scaffold_config.hidden_size != hidden_dim:
+            print(f"Warning: Scaffold hidden size != base hidden size. Add projection if needed.")
+
+        # Toggle between dynamic and fixed layers
+        if USE_DYNAMIC_LAYERS:
+            cross_attn_layers = get_cross_attention_layers(self.base_model)
+            print(f"Using dynamic layer selection mode '{LAYER_SELECTION_MODE}': {cross_attn_layers}")
+        else:
+            cross_attn_layers = CROSS_ATTN_LAYERS
+            print(f"Using fixed layers: {cross_attn_layers}")
+
+        for layer_idx in cross_attn_layers:
+            if layer_idx >= num_base_layers:
+                print(f"Warning: Layer index {layer_idx} out of bounds ({num_base_layers} layers). Skipping.")
+                continue
+
+            original_layer = base_layers[layer_idx]
+            cross_attn_fuser = SimpleCrossAttentionFuser(
+                hidden_dim=hidden_dim,
+                num_heads=num_heads
+            ).to(DEVICE)
+            for param in cross_attn_fuser.parameters():
+                param.requires_grad = False
+
+            class ModifiedLayer(nn.Module):
+                def __init__(self, orig_layer, cross_attn_module, parent_system):
+                    super().__init__()
+                    self.orig_layer = orig_layer
+                    self.cross_attn = cross_attn_module
+                    self._parent_system = parent_system
+
+                def forward(self, hidden_states, **kwargs):
+                    outputs = self.orig_layer(hidden_states, **kwargs)
+                    base_hidden_state_output = outputs[0] if isinstance(outputs, tuple) else outputs
+                    scaffold_context = getattr(self._parent_system, '_temp_scaffold_context', None)
+
+                    if scaffold_context is not None:
+                        scaffold_context = scaffold_context.to(base_hidden_state_output.device)
+                        fused_hidden_state = self.cross_attn(base_hidden_state_output, scaffold_context)
+                        final_outputs = (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
+                        return final_outputs
+                    else:
+                        return outputs
+
+            base_layers[layer_idx] = ModifiedLayer(original_layer, cross_attn_fuser, self)
+            print(f"Successfully injected wrapper into layer {layer_idx}")
 
         if self.scaffold_config.hidden_size != hidden_dim:
             print(f"Warning: Scaffold hidden size != base hidden size. Add projection if needed.")
@@ -480,6 +580,7 @@ class BareBonesDMAO_Learn:
         print_memory_stats("Pre-generation")
         if scaffold_weight is not None:
             self.set_scaffold_influence(scaffold_weight)
+        print(f"Using quantization mode: {self.quantization_mode}")
 
         start_time = time.time()
         base_inputs = self.base_tokenizer(prompt, return_tensors='pt').to(DEVICE)
@@ -599,13 +700,13 @@ class BareBonesDMAO_Learn:
                                          max_new_tokens=60, temperature=0.7)
                 print(f"w={weight}: {response}")
 
-# --- Main Execution Block ---
+# --- MAIN EXECUTION BLOCK ---
 if __name__ == "__main__":
     print("\nInitializing Bare Bones DMAO System with Learning...")
     try:
         dmao_system = BareBonesDMAO_Learn()
         print("\nSystem Ready.")
-        print("Commands: 'quit', 'exit', 'train', or enter a prompt.")
+        print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', or enter a prompt.")
 
         while True:
             user_cmd = input("\nEnter command or prompt: ")
@@ -615,6 +716,26 @@ if __name__ == "__main__":
                 break
             elif cmd == 'train':
                 dmao_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
+            elif cmd == 'int8':
+                dmao_system.set_quantization_mode("int8")
+                print("Re-initializing system with INT8 quantization...")
+                dmao_system = BareBonesDMAO_Learn()
+            elif cmd == 'int4':
+                dmao_system.set_quantization_mode("int4")
+                print("Re-initializing system with INT4 quantization...")
+                dmao_system = BareBonesDMAO_Learn()
+            elif cmd == 'fp16':
+                dmao_system.set_quantization_mode("fp16")
+                print("Re-initializing system with FP16 quantization...")
+                dmao_system = BareBonesDMAO_Learn()
+            elif cmd == 'dynamic':
+                dmao_system.toggle_dynamic_layers(True)
+                print("Re-initializing system with dynamic layers...")
+                dmao_system = BareBonesDMAO_Learn()
+            elif cmd == 'fixed':
+                dmao_system.toggle_dynamic_layers(False)
+                print("Re-initializing system with fixed layers...")
+                dmao_system = BareBonesDMAO_Learn()
             elif not user_cmd:
                 continue
             else:
