@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DMDF Bare UI</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
+        .container { max-width: 800px; margin: 50px auto; padding: 20px; border: 1px solid #ccc; border-radius: 5px; }
+        .input-group { margin-bottom: 20px; }
+        .input-group label { display: block; margin-bottom: 5px; }
+        .input-group input, .input-group textarea { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 3px; }
+        .input-group button { padding: 10px 20px; border: none; background-color: #007bff; color: white; cursor: pointer; border-radius: 3px; }
+        .input-group button:hover { background-color: #0056b3; }
+        .response { margin-top: 20px; border-top: 1px solid #ccc; padding-top: 20px; }
+        .response p { margin: 0; padding: 10px; background-color: #f9f9f9; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DMDF Bare UI</h1>
+        <div class="input-group">
+            <label for="user_input">User Input</label>
+            <textarea id="user_input" rows="4"></textarea>
+        </div>
+        <div class="input-group">
+            <label for="scaffold_weight">Scaffold Influence Weight (0-1)</label>
+            <input type="number" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5">
+        </div>
+        <div class="input-group">
+            <button onclick="generateResponse()">Generate Response</button>
+            <button onclick="trainModel()">Train Model</button>
+        </div>
+        <div class="response" id="response"></div>
+    </div>
+
+    <script>
+        // Placeholder function to generate response
+        function generateResponse() {
+            const userInput = document.getElementById('user_input').value;
+            const scaffoldWeight = document.getElementById('scaffold_weight').value;
+            // Simulate a response for now
+            const response = `Generated response for: ${userInput} with scaffold weight: ${scaffoldWeight}`;
+            document.getElementById('response').innerHTML = `<p>${response}</p>`;
+        }
+
+        // Placeholder function to train model
+        function trainModel() {
+            // Simulate training
+            alert('Training model...');
+        }
+    </script>
+</body>
+</html>
