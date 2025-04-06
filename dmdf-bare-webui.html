@@ -3,51 +3,189 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DMDF Bare UI</title>
+    <title>DMDF Advanced UI</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
-        .container { max-width: 800px; margin: 50px auto; padding: 20px; border: 1px solid #ccc; border-radius: 5px; }
-        .input-group { margin-bottom: 20px; }
-        .input-group label { display: block; margin-bottom: 5px; }
-        .input-group input, .input-group textarea { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 3px; }
-        .input-group button { padding: 10px 20px; border: none; background-color: #007bff; color: white; cursor: pointer; border-radius: 3px; }
-        .input-group button:hover { background-color: #0056b3; }
-        .response { margin-top: 20px; border-top: 1px solid #ccc; padding-top: 20px; }
-        .response p { margin: 0; padding: 10px; background-color: #f9f9f9; border-radius: 3px; }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        .section { margin-bottom: 25px; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+        .section-title { font-size: 1.2em; margin-bottom: 15px; color: #333; }
+        .control-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-bottom: 15px; }
+        .control-item { display: flex; align-items: center; gap: 10px; }
+        input, select, textarea { padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100%; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; transition: background 0.3s; }
+        button:hover { background: #0056b3; }
+        .response { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 4px; white-space: pre-wrap; }
+        .hidden { display: none; }
+        .status-bar { margin-top: 20px; padding: 10px; background: #e9ecef; border-radius: 4px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>DMDF Bare UI</h1>
-        <div class="input-group">
-            <label for="user_input">User Input</label>
-            <textarea id="user_input" rows="4"></textarea>
+        <h1>DMDF Control Panel</h1>
+        
+        <!-- Configuration Section -->
+        <div class="section">
+            <div class="section-title">Model Configuration</div>
+            <div class="control-group">
+                <div class="control-item">
+                    <label>Quantization:</label>
+                    <select id="quantization">
+                        <option value="fp16">FP16</option>
+                        <option value="int8">INT8</option>
+                        <option value="int4">INT4</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label>Layer Mode:</label>
+                    <select id="layer_mode">
+                        <option value="dynamic">Dynamic</option>
+                        <option value="fixed">Fixed</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+                <div class="control-item" id="custom_layers_container" style="display: none;">
+                    <label>Custom Layers:</label>
+                    <input type="text" id="custom_layers" placeholder="e.g., 4,5,6,7">
+                </div>
+                <div class="control-item">
+                    <label>Scaffold JIT:</label>
+                    <select id="jit_mode">
+                        <option value="on">Enabled</option>
+                        <option value="off">Disabled</option>
+                    </select>
+                </div>
+            </div>
         </div>
-        <div class="input-group">
-            <label for="scaffold_weight">Scaffold Influence Weight (0-1)</label>
-            <input type="number" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5">
+
+        <!-- Training Controls -->
+        <div class="section">
+            <div class="section-title">Training Parameters</div>
+            <div class="control-group">
+                <div class="control-item">
+                    <label>Epochs:</label>
+                    <input type="number" id="epochs" value="3" min="1">
+                </div>
+                <div class="control-item">
+                    <label>Batch Size:</label>
+                    <input type="number" id="batch_size" value="1" min="1">
+                </div>
+                <div class="control-item">
+                    <label>Learning Rate:</label>
+                    <input type="number" id="lr" value="3e-4" step="1e-5">
+                </div>
+                <div class="control-item">
+                    <label>Max Sequence Length:</label>
+                    <input type="number" id="max_seq" value="128" min="64">
+                </div>
+            </div>
         </div>
-        <div class="input-group">
-            <button onclick="generateResponse()">Generate Response</button>
-            <button onclick="trainModel()">Train Model</button>
+
+        <!-- Runtime Controls -->
+        <div class="section">
+            <div class="section-title">Runtime Controls</div>
+            <div class="control-group">
+                <button onclick="toggleScaffold(true)">Load Scaffold</button>
+                <button onclick="toggleScaffold(false)">Unload Scaffold</button>
+                <button onclick="toggleDynamicLayers()">Toggle Dynamic Layers</button>
+                <button onclick="resetSystem()">Reinitialize System</button>
+            </div>
         </div>
-        <div class="response" id="response"></div>
+
+        <!-- Generation Interface -->
+        <div class="section">
+            <div class="section-title">Text Generation</div>
+            <div class="control-group">
+                <div class="control-item">
+                    <label>Prompt:</label>
+                    <textarea id="user_input" rows="4" placeholder="Enter your prompt..."></textarea>
+                </div>
+                <div class="control-item">
+                    <label>Scaffold Weight (0-1):</label>
+                    <input type="number" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5">
+                </div>
+                <div class="control-item">
+                    <label>Max Tokens:</label>
+                    <input type="number" id="max_tokens" value="60" min="10" max="500">
+                </div>
+                <div class="control-item">
+                    <label>Temperature:</label>
+                    <input type="number" id="temperature" value="0.7" min="0.1" max="2.0" step="0.1">
+                </div>
+            </div>
+            <div class="control-group">
+                <button onclick="generateResponse()">Generate</button>
+                <button onclick="startTraining()">Train Model</button>
+            </div>
+        </div>
+
+        <!-- Output Section -->
+        <div class="section">
+            <div class="section-title">Output</div>
+            <div class="status-bar" id="status">System Ready</div>
+            <div class="response" id="response"></div>
+        </div>
     </div>
 
     <script>
-        // Placeholder function to generate response
-        function generateResponse() {
-            const userInput = document.getElementById('user_input').value;
-            const scaffoldWeight = document.getElementById('scaffold_weight').value;
-            // Simulate a response for now
-            const response = `Generated response for: ${userInput} with scaffold weight: ${scaffoldWeight}`;
-            document.getElementById('response').innerHTML = `<p>${response}</p>`;
+        // Dynamic UI Interactions
+        document.getElementById('layer_mode').addEventListener('change', (e) => {
+            document.getElementById('custom_layers_container').style.display = 
+                e.target.value === 'custom' ? 'block' : 'none';
+        });
+
+        // Control Handlers
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
         }
 
-        // Placeholder function to train model
-        function trainModel() {
-            // Simulate training
-            alert('Training model...');
+        function toggleScaffold(enable) {
+            updateStatus(`Scaffold ${enable ? 'loaded' : 'unloaded'}`);
+            // Add actual scaffold control logic here
+        }
+
+        function toggleDynamicLayers() {
+            const current = document.getElementById('layer_mode').value;
+            document.getElementById('layer_mode').value = current === 'dynamic' ? 'fixed' : 'dynamic';
+            updateStatus(`Dynamic layers ${current === 'dynamic' ? 'disabled' : 'enabled'}`);
+        }
+
+        function resetSystem() {
+            const quantization = document.getElementById('quantization').value;
+            updateStatus(`Reinitializing system with ${quantization} quantization...`);
+            // Add actual reinitialization logic here
+        }
+
+        function collectTrainingParams() {
+            return {
+                epochs: parseInt(document.getElementById('epochs').value),
+                batch_size: parseInt(document.getElementById('batch_size').value),
+                lr: parseFloat(document.getElementById('lr').value),
+                max_seq: parseInt(document.getElementById('max_seq').value)
+            };
+        }
+
+        function collectGenerationParams() {
+            return {
+                prompt: document.getElementById('user_input').value,
+                scaffold_weight: parseFloat(document.getElementById('scaffold_weight').value),
+                max_tokens: parseInt(document.getElementById('max_tokens').value),
+                temperature: parseFloat(document.getElementById('temperature').value)
+            };
+        }
+
+        function generateResponse() {
+            const params = collectGenerationParams();
+            updateStatus(`Generating response with weight=${params.scaffold_weight}...`);
+            // Add actual generation logic here
+            document.getElementById('response').textContent = 
+                `Generated response for: ${params.prompt}\n` +
+                `(Weight: ${params.scaffold_weight}, Temp: ${params.temperature})`;
+        }
+
+        function startTraining() {
+            const params = collectTrainingParams();
+            updateStatus(`Starting training for ${params.epochs} epochs...`);
+            // Add actual training logic here
         }
     </script>
 </body>
