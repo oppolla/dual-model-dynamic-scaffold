@@ -173,6 +173,10 @@ class BareBonesDMAO_Learn:
         # --- Setup Optimizer (placeholder, setup before training) ---
         self.optimizer = None
         self.scheduler = None
+        self.global_step = 0
+        self.best_valid_loss = float('inf')  
+        self.patience = 0                    
+        self.max_patience = 2               
         print("Initialization complete. Optimizer needs setup before training.")
 
     def set_scaffold_influence(self, weight):  # Add this method
@@ -351,21 +355,32 @@ class BareBonesDMAO_Learn:
             loss_fct = nn.CrossEntropyLoss() # Handles ignore_index=-100
             loss = loss_fct(base_logits.view(-1, base_logits.size(-1)), labels.view(-1))
 
-        # --- Backward Pass & Optimization ---
-        # Check if loss is valid
+        # --- Backward Pass & Optimization with Gradient Accumulation ---
+        accumulation_steps = 4  # Define how many steps to accumulate gradients over
         if torch.isnan(loss) or torch.isinf(loss):
-             print("Warning: Invalid loss encountered. Skipping batch.")
-             self._temp_scaffold_context = None # Clear context
-             return None # Skip optimization
+            print("Warning: Invalid loss encountered. Skipping batch.")
+            self._temp_scaffold_context = None  # Clear context
+            return None  # Skip optimization
 
-        self.optimizer.zero_grad()
-        loss.backward() # Backpropagate gradients ONLY to LoRA parameters
-        
-        # Optional: Gradient clipping (good practice)
-        # torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.scaffold_model.parameters()), 1.0)
-        
-        self.optimizer.step() # Update LoRA weights
-        self.scheduler.step() # Update learning rate schedule
+        # Scale loss to account for accumulation
+        scaled_loss = loss / accumulation_steps
+        scaled_loss.backward()  # Accumulate gradients
+
+        # Perform optimization step only after accumulation_steps
+        # Note: global_step needs to be tracked outside this method, so we'll assume it's passed or tracked elsewhere
+        if hasattr(self, 'global_step'):  # Ensure global_step is accessible
+            if (self.global_step + 1) % accumulation_steps == 0:
+                # torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, self.scaffold_model.parameters()), 1.0)
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
+        else:
+            print("Warning: global_step not defined. Running without accumulation logic.")
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            self.scheduler.step()
+
         print_memory_stats("After optimizer step")
 
         # Cleanup context
@@ -410,7 +425,7 @@ class BareBonesDMAO_Learn:
                 else:
                     print(f"  Step {global_step}/{num_training_steps} | Skipped")
 
-            # Validation Phase
+             # Validation Phase
             valid_loss = self.validate_epoch(valid_data)
             avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0
             print(f"Epoch {epoch + 1} Stats:")
@@ -418,12 +433,35 @@ class BareBonesDMAO_Learn:
             print(f"  Valid Loss: {valid_loss:.4f}")
             print_memory_stats(f"Epoch {epoch+1} end")
 
+            # Early Stopping Logic
+            if not hasattr(self, 'best_valid_loss'):  # Initialize on first epoch
+                self.best_valid_loss = float('inf')
+                self.patience = 0
+                self.max_patience = 2
+            if valid_loss < self.best_valid_loss:
+                self.best_valid_loss = valid_loss
+                self.patience = 0
+            else:
+                self.patience += 1
+                print(f"Patience: {self.patience}/{self.max_patience}")
+                if self.patience >= self.max_patience:
+                    print("Early stopping triggered.")
+                    break
+
             # Generation Evaluation
             if (epoch + 1) % 1 == 0:  # Every epoch
                 self.evaluate_generation_quality(num_samples=2)
 
         end_train_time = time.time()
         print(f"--- Training Finished ({end_train_time - start_train_time:.2f}s) ---")
+
+    def has_repetition(self, output_ids, n=3):
+        """Check for n-gram repetition in output_ids."""
+        output_ids = output_ids.tolist()  # Convert tensor to list for easier indexing
+        for i in range(len(output_ids) - n):
+            if all(output_ids[i+j] == output_ids[i+j+n] for j in range(n)):
+                return True
+        return False
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
@@ -468,6 +506,13 @@ class BareBonesDMAO_Learn:
         self._temp_scaffold_context = None
         print_memory_stats("Post-generation")
         generated_ids = outputs[0][input_length:]
+        if self.has_repetition(generated_ids, n=3):
+            print("Warning: Repetition detected in output. Truncating at first repeat.")
+            # Find the first repetition point and truncate
+            for i in range(len(generated_ids) - 3):
+                if all(generated_ids[i+j] == generated_ids[i+j+3] for j in range(3)):
+                    generated_ids = generated_ids[:i+3]
+                    break
         response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         end_time = time.time()
