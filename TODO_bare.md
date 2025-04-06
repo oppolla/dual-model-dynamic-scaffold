@@ -1,7 +1,7 @@
 - Add Logging and Monitoring fuctions
 - Make a Web UI User Interface
 - Seperate Configuration Management into own file (config.JSON)
-- Adaptive Layer Selection (Automatically adapts to different model sizes)
+- Adaptive Layer Selection (Automatically adapts to different model sizes) - DONE
 - Add Token Mapping Cache (faster token mapping for repeated tokens)
 - Just-In-Time Scaffold Loading (big efficiency boost)
-- Quantized Inference Mode (big efficiency boost) 
+- Quantized Inference Mode (big efficiency boost) - DONE 
