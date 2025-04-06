@@ -3,5 +3,5 @@
 - Seperate Configuration Management into own file (config.JSON)
 - Adaptive Layer Selection (Automatically adapts to different model sizes) - DONE
 - Add Token Mapping Cache (faster token mapping for repeated tokens)
-- Just-In-Time Scaffold Loading (big efficiency boost)
+- Optional Just-In-Time Scaffold Loading (big efficiency boost) - DONE
 - Quantized Inference Mode (big efficiency boost) - DONE 
