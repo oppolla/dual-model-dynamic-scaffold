@@ -5,4 +5,5 @@
 - Adaptive Layer Selection (Automatically adapts to different model sizes) - DONE
 - Add Token Mapping Cache (faster token mapping for repeated tokens)
 - Optional Just-In-Time Scaffold Loading (big efficiency boost) - DONE
-- Quantized Inference Mode (big efficiency boost) - DONE 
+- Quantized Inference Mode (big efficiency boost) - DONE
+- Add Dry Run mode for ease of testing
