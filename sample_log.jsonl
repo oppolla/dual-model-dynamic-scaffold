@@ -1,4 +1,3 @@
-[
 {"prompt": "How do I connect to WiFi?", "response": "Go to settings, select Network, and choose your WiFi network.", "timestamp": 1712592300.111, "conversation_id": "conv_1712592000", "confidence_score": 0.95},
 {"prompt": "My screen is frozen!", "response": "Hold the power button for 10 seconds to force restart.", "timestamp": 1712592400.222, "conversation_id": "conv_1712592000", "confidence_score": 0.89},
 {"prompt": "Why is my battery draining so fast?", "response": "Check for background apps and reduce screen brightness.", "timestamp": 1712592500.333, "conversation_id": "conv_1712592000", "confidence_score": 0.92},
@@ -18,5 +17,4 @@
 {"prompt": "My mic isn't working in calls", "response": "Check app permissions and microphone settings.", "timestamp": 1712593900.808, "conversation_id": "conv_1712592000", "confidence_score": 0.93},
 {"prompt": "The website won't load", "response": "Clear cookies or try a different browser.", "timestamp": 1712594000.909, "conversation_id": "conv_1712592000", "confidence_score": 0.91},
 {"prompt": "How do I block spam calls?", "response": "Use your phone's built-in call blocking feature.", "timestamp": 1712594100.010, "conversation_id": "conv_1712592000", "confidence_score": 0.94},
-{"prompt": "My Bluetooth keeps disconnecting", "response": "Forget the device and pair again.", "timestamp": 1712594200.121, "conversation_id": "conv_1712592000", "confidence_score": 0.89},
-]
+{"prompt": "My Bluetooth keeps disconnecting", "response": "Forget the device and pair again.", "timestamp": 1712594200.121, "conversation_id": "conv_1712592000", "confidence_score": 0.89}
