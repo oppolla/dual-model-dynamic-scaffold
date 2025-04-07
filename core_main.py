@@ -12,6 +12,8 @@ import bitsandbytes as bnb
 import json
 import sys
 import contextlib
+from collections import deque
+import uuid
 
 # --- Load Configuration from JSON ---
 with open("config.json", "r") as f:
@@ -114,6 +116,26 @@ class SimpleCrossAttentionFuser(nn.Module):
         fused_state = base_hidden_state + gate_values * (attn_output * self.influence_weight)
         fused_state = self.layer_norm(fused_state)
         return fused_state
+    
+class ConversationHistory:
+    def __init__(self, conversation_id=None):
+        self.conversation_id = conversation_id or str(uuid.uuid4())  # Use UUIDv4 for unique ID
+
+class SimpleLogger:
+    def __init__(self, filename="log.jsonl"):
+        self.filename = filename
+    
+    def write(self, data):
+        with open(self.filename, "a") as f:
+            f.write(json.dumps(data) + "\n")
+
+def calculate_confidence_score(logits, generated_ids):
+    """Calculate confidence score from logits of generated tokens."""
+    if logits is None or len(logits) == 0:
+        return 0.5  # Fallback if no logits available
+    probs = torch.softmax(logits, dim=-1)  # Convert logits to probabilities
+    max_probs = torch.max(probs, dim=-1).values  # Max probability per token
+    return max_probs.mean().item()  # Average confidence across tokens
 
 # --- MAIN SYSTEM ---
 class BareBonesDMAO_Learn:
@@ -243,6 +265,11 @@ class BareBonesDMAO_Learn:
         self.best_valid_loss = float('inf')
         self.patience = 0
         self.max_patience = 2
+
+        # --- ADD LOGGING AND HISTORY ---
+        self.logger = SimpleLogger("log.jsonl")
+        self.history = ConversationHistory()
+
         print("Quantization mode set to:", self.quantization_mode)
         print("Initialization complete. Optimizer needs setup before training.")
 
@@ -621,7 +648,7 @@ class BareBonesDMAO_Learn:
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
-        """Generates text with optional scaffold influence control, supports dry run mode"""
+        """Generates text with logging of prompt, response, timestamp, conversation_id, and confidence_score."""
         if self.dry_run:
             print("\n=== DRY RUN GENERATION ===")
             truncated_prompt = prompt[:self.dry_run_params['max_length']]
@@ -635,6 +662,8 @@ class BareBonesDMAO_Learn:
         print(f"Using quantization mode: {self.quantization_mode}")
 
         start_time = time.time()
+        timestamp = start_time
+
         base_inputs = self.base_tokenizer(prompt, return_tensors='pt').to(DEVICE)
         input_ids = base_inputs['input_ids']
         input_length = input_ids.shape[1]
@@ -664,11 +693,16 @@ class BareBonesDMAO_Learn:
                 max_new_tokens=max_new_tokens,
                 pad_token_id=self.base_tokenizer.pad_token_id,
                 eos_token_id=self.base_tokenizer.eos_token_id,
+                return_dict_in_generate=True,
+                output_scores=True,
                 **kwargs
             )
 
         print_memory_stats("Post-generation")
-        generated_ids = outputs[0][input_length:]
+        generated_ids = outputs.sequences[0][input_length:]
+        logits = outputs.scores
+        confidence_score = calculate_confidence_score(torch.stack(logits), generated_ids)
+
         if self.has_repetition(generated_ids, n=3):
             print("Warning: Repetition detected in output. Truncating at first repeat.")
             for i in range(len(generated_ids) - 3):
@@ -676,6 +710,15 @@ class BareBonesDMAO_Learn:
                     generated_ids = generated_ids[:i + 3]
                     break
         response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        log_entry = {
+            "prompt": prompt,
+            "response": response,
+            "timestamp": timestamp,
+            "conversation_id": self.history.conversation_id,
+            "confidence_score": confidence_score
+        }
+        self.logger.write(log_entry)
 
         end_time = time.time()
         print(f"Generation took {end_time - start_time:.2f} seconds.")
@@ -758,6 +801,11 @@ class BareBonesDMAO_Learn:
         self._clear_scaffold_cache()
         print(f"[DEBUG] Cleanup called for {id(self)}")
 
+    def new_conversation(self):
+        """Start a new conversation with a fresh conversation_id."""
+        self.history = ConversationHistory()
+        print(f"New conversation started with ID: {self.history.conversation_id}")    
+
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == "__main__":
     print("\nInitializing Bare Bones DMAO System...")
@@ -767,7 +815,7 @@ if __name__ == "__main__":
         if "--dry-run" in sys.argv:
             dmao_system.enable_dry_run(max_samples=2, max_length=64, validate_architecture=True)
         print("\nSystem Ready.")
-        print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', or enter a prompt.")
+        print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', or enter a prompt.")
 
         while True:
             user_cmd = input("\nEnter command or prompt: ")
@@ -799,6 +847,8 @@ if __name__ == "__main__":
                 dmao_system.toggle_dynamic_layers(False)
                 print("Re-initializing system with fixed layers...")
                 dmao_system = BareBonesDMAO_Learn()
+            elif cmd == 'new':
+                dmao_system.new_conversation()  # Added here
             elif not user_cmd:
                 continue
             else:
@@ -826,7 +876,7 @@ if __name__ == "__main__":
         traceback.print_exc()
     finally:
         if dmao_system is not None:
-            dmao_system.cleanup()  # Use explicit cleanup instead of __del__
+            dmao_system.cleanup()
             del dmao_system
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
