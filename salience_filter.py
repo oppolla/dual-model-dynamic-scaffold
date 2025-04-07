@@ -117,6 +117,8 @@ def _compute_salience(self, prompt: str, response: str) -> float:
     
     return min(max(final_salience, 0.0), 1.0)
 
+VADER (Valence Aware Dictionary and sEntiment Reasoner) is a lexicon and rule-based sentiment analysis tool that is specifically attuned to sentiments expressed in social media. It is fully open-sourced under the [MIT License] (we sincerely appreciate all attributions and readily accept most contributions, but please don’t hold us liable).
+
 # SKETCH
 
 import torch
