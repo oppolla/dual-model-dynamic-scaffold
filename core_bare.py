@@ -9,6 +9,36 @@ import time
 import random
 from train_data import TRAIN_DATA
 import bitsandbytes as bnb
+import json
+
+# --- Load Configuration from JSON ---
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+# Extract variables from config
+BASE_MODEL_NAME = config["base_model_name"]
+SCAFFOLD_MODEL_NAME = config["scaffold_model_name"]
+CROSS_ATTN_LAYERS = config["cross_attn_layers"]
+USE_DYNAMIC_LAYERS = config["use_dynamic_layers"]
+LAYER_SELECTION_MODE = config["layer_selection_mode"]
+CUSTOM_LAYERS = config["custom_layers"]
+VALID_SPLIT_RATIO = config["valid_split_ratio"]
+RANDOM_SEED = config["random_seed"]
+
+# LoRA Configuration
+LORA_RANK = config["lora_config"]["lora_rank"]
+LORA_ALPHA = config["lora_config"]["lora_alpha"]
+LORA_DROPOUT = config["lora_config"]["lora_dropout"]
+LORA_TARGET_MODULES = config["lora_config"]["lora_target_modules"]
+
+# Training Config
+LEARNING_RATE = config["training_config"]["learning_rate"]
+TRAIN_EPOCHS = config["training_config"]["train_epochs"]
+BATCH_SIZE = config["training_config"]["batch_size"]
+MAX_SEQ_LENGTH = config["training_config"]["max_seq_length"]
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
 
 # VRAM Monitor
 def print_memory_stats(label=""):
@@ -20,31 +50,6 @@ def print_memory_stats(label=""):
         print(torch.cuda.memory_summary(abbreviated=True))
     else:
         print("(CPU mode - no GPU memory stats)")
-
-# --- Configuration (Bare Bones + LoRA) ---
-BASE_MODEL_NAME = "gpt2"  # ~117M params (Frozen)
-SCAFFOLD_MODEL_NAME = "gpt2"  # ~117M params (LoRA Fine-tuned)
-CROSS_ATTN_LAYERS = [5, 7]  # Fixed layers for non-dynamic mode (original setting)
-USE_DYNAMIC_LAYERS = True  # Toggle: True for dynamic, False for fixed CROSS_ATTN_LAYERS
-LAYER_SELECTION_MODE = "balanced"  # Dynamic options: "early", "balanced", "late", "custom"
-CUSTOM_LAYERS = None  # Only used if LAYER_SELECTION_MODE = "custom" (e.g. [4,5,6,7])
-VALID_SPLIT_RATIO = 0.2
-RANDOM_SEED = 42
-
-# LoRA Configuration
-LORA_RANK = 8
-LORA_ALPHA = 16  # Typically 2*LORA_RANK
-LORA_DROPOUT = 0.1
-LORA_TARGET_MODULES = ["c_attn", "c_proj", "c_fc"]  # Adjust based on model architecture if needed
-
-# Training Config
-LEARNING_RATE = 3e-4  # Higher LR common for LoRA
-TRAIN_EPOCHS = 3  # Number of epochs to train on the mini-dataset
-BATCH_SIZE = 1  # Keep batch size small due to potential memory constraints
-MAX_SEQ_LENGTH = 128  # Max sequence length for training/inference
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
 
 # Train Data Validation Split
 random.seed(RANDOM_SEED)
