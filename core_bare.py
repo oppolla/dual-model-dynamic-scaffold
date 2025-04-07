@@ -247,7 +247,11 @@ class BareBonesDMAO_Learn:
     def set_scaffold_influence(self, weight):
         """Set the influence weight for all cross-attention layers (0-1 scale)"""
         base_layers = self._get_model_layers(self.base_model)
-        for layer_idx in CROSS_ATTN_LAYERS:
+        if USE_DYNAMIC_LAYERS:
+            cross_attn_layers = get_cross_attention_layers(self.base_model)
+        else:
+            cross_attn_layers = CROSS_ATTN_LAYERS
+        for layer_idx in cross_attn_layers:
             if layer_idx < len(base_layers):
                 modified_layer = base_layers[layer_idx]
                 if hasattr(modified_layer, 'cross_attn'):
@@ -290,13 +294,13 @@ class BareBonesDMAO_Learn:
         num_base_layers = len(base_layers)
         hidden_dim = self.base_config.hidden_size
         num_heads = self.base_config.num_attention_heads
-    
+
         if self.scaffold_config.hidden_size != hidden_dim:
             print(f"Warning: Scaffold hidden size ({self.scaffold_config.hidden_size}) != base hidden size ({hidden_dim}). Adding projection.")
             self.scaffold_proj = nn.Linear(self.scaffold_config.hidden_size, hidden_dim).to(DEVICE)
         else:
             self.scaffold_proj = None
-    
+
         # Toggle between dynamic and fixed layers
         if USE_DYNAMIC_LAYERS:
             cross_attn_layers = get_cross_attention_layers(self.base_model)
@@ -304,12 +308,12 @@ class BareBonesDMAO_Learn:
         else:
             cross_attn_layers = CROSS_ATTN_LAYERS
             print(f"Using fixed layers: {cross_attn_layers}")
-    
+
         for layer_idx in cross_attn_layers:
             if layer_idx >= num_base_layers:
                 print(f"Warning: Layer index {layer_idx} out of bounds ({num_base_layers} layers). Skipping.")
                 continue
-            
+
             original_layer = base_layers[layer_idx]
             cross_attn_fuser = SimpleCrossAttentionFuser(
                 hidden_dim=hidden_dim,
@@ -317,19 +321,19 @@ class BareBonesDMAO_Learn:
             ).to(DEVICE)
             for param in cross_attn_fuser.parameters():
                 param.requires_grad = False
-    
+
             class ModifiedLayer(nn.Module):
                 def __init__(self, orig_layer, cross_attn_module, parent_system):
                     super().__init__()
                     self.orig_layer = orig_layer
                     self.cross_attn = cross_attn_module
                     self._parent_system = parent_system
-    
+
                 def forward(self, hidden_states, **kwargs):
                     outputs = self.orig_layer(hidden_states, **kwargs)
                     base_hidden_state_output = outputs[0] if isinstance(outputs, tuple) else outputs
                     scaffold_context = getattr(self._parent_system, '_temp_scaffold_context', None)
-    
+
                     if scaffold_context is not None:
                         scaffold_context = scaffold_context.to(base_hidden_state_output.device)
                         if self._parent_system.scaffold_proj is not None:
@@ -338,7 +342,7 @@ class BareBonesDMAO_Learn:
                         final_outputs = (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
                         return final_outputs
                     return outputs
-    
+
             base_layers[layer_idx] = ModifiedLayer(original_layer, cross_attn_fuser, self)
             print(f"Successfully injected wrapper into layer {layer_idx}")
 
@@ -728,10 +732,3 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print("\nExiting.")
-
-# DOCUMENTATION
-# After training:
-# response = system.generate("How to make coffee?", scaffold_weight=0.7)
-
-# To completely disable scaffold influence:
-# response = system.generate("Explain quantum physics", scaffold_weight=0.0)
