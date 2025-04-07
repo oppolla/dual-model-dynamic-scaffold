@@ -1,20 +1,20 @@
-{"prompt": "How do I connect to WiFi?", "response": "Go to settings, select Network, and choose your WiFi network.", "timestamp": 1712592300.111, "conversation_id": "conv_1712592000", "confidence_score": 0.95},
-{"prompt": "My screen is frozen!", "response": "Hold the power button for 10 seconds to force restart.", "timestamp": 1712592400.222, "conversation_id": "conv_1712592000", "confidence_score": 0.89},
-{"prompt": "Why is my battery draining so fast?", "response": "Check for background apps and reduce screen brightness.", "timestamp": 1712592500.333, "conversation_id": "conv_1712592000", "confidence_score": 0.92},
-{"prompt": "How do I update my OS?", "response": "Go to Settings > System > Software Update.", "timestamp": 1712592600.444, "conversation_id": "conv_1712592000", "confidence_score": 0.94},
-{"prompt": "My files got deleted accidentally", "response": "Check the recycle bin or try file recovery software.", "timestamp": 1712592700.555, "conversation_id": "conv_1712592000", "confidence_score": 0.88},
-{"prompt": "The printer won't connect", "response": "Ensure it's on the same network and drivers are updated.", "timestamp": 1712592800.666, "conversation_id": "conv_1712592000", "confidence_score": 0.90},
-{"prompt": "How do I change my password?", "response": "Go to account settings and select 'Change Password'.", "timestamp": 1712592900.777, "conversation_id": "conv_1712592000", "confidence_score": 0.96},
-{"prompt": "Why is my phone overheating?", "response": "Avoid using while charging and close intensive apps.", "timestamp": 1712593000.888, "conversation_id": "conv_1712592000", "confidence_score": 0.91},
-{"prompt": "The sound isn't working", "response": "Check volume settings and ensure headphones aren't connected.", "timestamp": 1712593100.999, "conversation_id": "conv_1712592000", "confidence_score": 0.93},
-{"prompt": "How do I transfer photos to my PC?", "response": "Use a USB cable or cloud storage like Google Photos.", "timestamp": 1712593200.101, "conversation_id": "conv_1712592000", "confidence_score": 0.94},
-{"prompt": "My email won't sync", "response": "Check internet connection and refresh your inbox.", "timestamp": 1712593300.202, "conversation_id": "conv_1712592000", "confidence_score": 0.89},
-{"prompt": "The screen is flickering", "response": "Update graphics drivers or adjust refresh rate.", "timestamp": 1712593400.303, "conversation_id": "conv_1712592000", "confidence_score": 0.87},
-{"prompt": "How do I clear browser history?", "response": "Press Ctrl+Shift+Del and select what to clear.", "timestamp": 1712593500.404, "conversation_id": "conv_1712592000", "confidence_score": 0.95},
-{"prompt": "My keyboard isn't responding", "response": "Try reconnecting it or replacing batteries if wireless.", "timestamp": 1712593600.505, "conversation_id": "conv_1712592000", "confidence_score": 0.92},
-{"prompt": "The download is stuck at 99%", "response": "Pause and resume, or try a different network.", "timestamp": 1712593700.606, "conversation_id": "conv_1712592000", "confidence_score": 0.90},
-{"prompt": "How do I enable dark mode?", "response": "Go to Display settings and toggle Dark Theme.", "timestamp": 1712593800.707, "conversation_id": "conv_1712592000", "confidence_score": 0.96},
-{"prompt": "My mic isn't working in calls", "response": "Check app permissions and microphone settings.", "timestamp": 1712593900.808, "conversation_id": "conv_1712592000", "confidence_score": 0.93},
-{"prompt": "The website won't load", "response": "Clear cookies or try a different browser.", "timestamp": 1712594000.909, "conversation_id": "conv_1712592000", "confidence_score": 0.91},
-{"prompt": "How do I block spam calls?", "response": "Use your phone's built-in call blocking feature.", "timestamp": 1712594100.010, "conversation_id": "conv_1712592000", "confidence_score": 0.94},
+{"prompt": "How do I connect to WiFi?", "response": "Go to settings, select Network, and choose your WiFi network.", "timestamp": 1712592300.111, "conversation_id": "conv_1712592000", "confidence_score": 0.95}
+{"prompt": "My screen is frozen!", "response": "Hold the power button for 10 seconds to force restart.", "timestamp": 1712592400.222, "conversation_id": "conv_1712592000", "confidence_score": 0.89}
+{"prompt": "Why is my battery draining so fast?", "response": "Check for background apps and reduce screen brightness.", "timestamp": 1712592500.333, "conversation_id": "conv_1712592000", "confidence_score": 0.92}
+{"prompt": "How do I update my OS?", "response": "Go to Settings > System > Software Update.", "timestamp": 1712592600.444, "conversation_id": "conv_1712592000", "confidence_score": 0.94}
+{"prompt": "My files got deleted accidentally", "response": "Check the recycle bin or try file recovery software.", "timestamp": 1712592700.555, "conversation_id": "conv_1712592000", "confidence_score": 0.88}
+{"prompt": "The printer won't connect", "response": "Ensure it's on the same network and drivers are updated.", "timestamp": 1712592800.666, "conversation_id": "conv_1712592000", "confidence_score": 0.90}
+{"prompt": "How do I change my password?", "response": "Go to account settings and select 'Change Password'.", "timestamp": 1712592900.777, "conversation_id": "conv_1712592000", "confidence_score": 0.96}
+{"prompt": "Why is my phone overheating?", "response": "Avoid using while charging and close intensive apps.", "timestamp": 1712593000.888, "conversation_id": "conv_1712592000", "confidence_score": 0.91}
+{"prompt": "The sound isn't working", "response": "Check volume settings and ensure headphones aren't connected.", "timestamp": 1712593100.999, "conversation_id": "conv_1712592000", "confidence_score": 0.93}
+{"prompt": "How do I transfer photos to my PC?", "response": "Use a USB cable or cloud storage like Google Photos.", "timestamp": 1712593200.101, "conversation_id": "conv_1712592000", "confidence_score": 0.94}
+{"prompt": "My email won't sync", "response": "Check internet connection and refresh your inbox.", "timestamp": 1712593300.202, "conversation_id": "conv_1712592000", "confidence_score": 0.89}
+{"prompt": "The screen is flickering", "response": "Update graphics drivers or adjust refresh rate.", "timestamp": 1712593400.303, "conversation_id": "conv_1712592000", "confidence_score": 0.87}
+{"prompt": "How do I clear browser history?", "response": "Press Ctrl+Shift+Del and select what to clear.", "timestamp": 1712593500.404, "conversation_id": "conv_1712592000", "confidence_score": 0.95}
+{"prompt": "My keyboard isn't responding", "response": "Try reconnecting it or replacing batteries if wireless.", "timestamp": 1712593600.505, "conversation_id": "conv_1712592000", "confidence_score": 0.92}
+{"prompt": "The download is stuck at 99%", "response": "Pause and resume, or try a different network.", "timestamp": 1712593700.606, "conversation_id": "conv_1712592000", "confidence_score": 0.90}
+{"prompt": "How do I enable dark mode?", "response": "Go to Display settings and toggle Dark Theme.", "timestamp": 1712593800.707, "conversation_id": "conv_1712592000", "confidence_score": 0.96}
+{"prompt": "My mic isn't working in calls", "response": "Check app permissions and microphone settings.", "timestamp": 1712593900.808, "conversation_id": "conv_1712592000", "confidence_score": 0.93}
+{"prompt": "The website won't load", "response": "Clear cookies or try a different browser.", "timestamp": 1712594000.909, "conversation_id": "conv_1712592000", "confidence_score": 0.91}
+{"prompt": "How do I block spam calls?", "response": "Use your phone's built-in call blocking feature.", "timestamp": 1712594100.010, "conversation_id": "conv_1712592000", "confidence_score": 0.94}
 {"prompt": "My Bluetooth keeps disconnecting", "response": "Forget the device and pair again.", "timestamp": 1712594200.121, "conversation_id": "conv_1712592000", "confidence_score": 0.89}
