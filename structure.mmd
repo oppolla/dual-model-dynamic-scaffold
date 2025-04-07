@@ -14,15 +14,17 @@ graph TD
         TL[ThreadSafeLogger<br>log.jsonl] -->|Logs| GEN
         IB[Interaction Buffer<br>Temporary Storage] -->|Interactions| LOG[log_interaction]
         EMS[External Memory Store<br>Key-Value Pairs] -->|Personal Context| GEN
+        
+        SM -->|Initial State| PS[Production Scaffold]
+        PS -->|Context| CAF
     end
 
     subgraph Training Subsystem - Sleep Phase
-        TS[Training Scheduler<br>Sleep Phase Thread<br>Check every 300s] -->|Trigger| RT[_run_dmao_training]
+        TS[Training Scheduler<br>Sleep Phase Thread] -->|Trigger| RT[_run_dmao_training]
         RT -->|Train Data| TE[train_step]
         TE -->|Updated Weights| SM
         RT -->|Deploy| DU[_deploy_updated_scaffold]
-        DU -->|Production Weights| PS[Production Scaffold<br>Copy of Scaffold]
-        PS -->|Context| CAF
+        DU -->|Production Weights| PS
         PT[_prepare_training_data] -->|Prepared Data| RT
         IB -->|Interactions| PT
         EMS -->|Personal Data| PT
@@ -31,6 +33,8 @@ graph TD
         VE -->|Validation Loss| RT
         RT -->|Rollback| RB[_rollback_training]
         RB -->|Revert| SM
+        
+        KF[K-Fold Cross Validation] -->|Split Data| TS
     end
 
     LOG -->|Interaction| IB
@@ -40,9 +44,10 @@ graph TD
     GEN -->|Prompt-Response| CH
     GEN -->|Log Entry| TL
     GEN -->|Input-Output| LOG
-    SM -->|Initial State| PS
-
+    
     classDef core fill:#f9f,stroke:#333,stroke-width:2px;
     classDef train fill:#bbf,stroke:#333,stroke-width:2px;
-    class BM,SM,CAF,BT,ST,CH,TL,IB,LOG,EMS core;
-    class TS,RT,TE,DU,PS,PT,TD,VD,VE,RB train;
+    classDef eval fill:#fbf,stroke:#333,stroke-width:2px;
+    class BM,SM,CAF,BT,ST,CH,TL,IB,LOG,EMS,PS core;
+    class TS,RT,TE,DU,PT,TD,VD,VE,RB train;
+    class KF eval;
