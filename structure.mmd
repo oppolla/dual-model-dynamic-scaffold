@@ -1,0 +1,48 @@
+graph TD
+    subgraph User Interaction
+        UI[User Input] -->|Text| GEN[generate]
+        GEN -->|Response| UO[User Output]
+    end
+
+    subgraph Core Components
+        BM[Base Model<br>gpt2<br>Frozen] -->|Hidden States| CAF[SimpleCrossAttentionFuser]
+        SM[Scaffold Model<br>gpt2 w/ LoRA<br>Trainable] -->|Hidden States| CAF
+        CAF -->|Fused States| BM
+        BT[Base Tokenizer] -->|Tokens| BM
+        ST[Scaffold Tokenizer] -->|Tokens| SM
+        CH[ConversationHistory<br>Deque max=10] -->|Prompt-Response| GEN
+        TL[ThreadSafeLogger<br>log.jsonl] -->|Logs| GEN
+        IB[Interaction Buffer<br>Temporary Storage] -->|Interactions| LOG[log_interaction]
+        EMS[External Memory Store<br>Key-Value Pairs] -->|Personal Context| GEN
+    end
+
+    subgraph Training Subsystem - Sleep Phase
+        TS[Training Scheduler<br>Sleep Phase Thread<br>Check every 300s] -->|Trigger| RT[_run_dmao_training]
+        RT -->|Train Data| TE[train_step]
+        TE -->|Updated Weights| SM
+        RT -->|Deploy| DU[_deploy_updated_scaffold]
+        DU -->|Production Weights| PS[Production Scaffold<br>Copy of Scaffold]
+        PS -->|Context| CAF
+        PT[_prepare_training_data] -->|Prepared Data| RT
+        IB -->|Interactions| PT
+        EMS -->|Personal Data| PT
+        TD[TRAIN_DATA] -->|Initial Data| PT
+        VD[VALID_DATA] -->|Validation| VE[validate_epoch]
+        VE -->|Validation Loss| RT
+        RT -->|Rollback| RB[_rollback_training]
+        RB -->|Revert| SM
+    end
+
+    LOG -->|Interaction| IB
+    LOG -->|Personal Info| EMS
+    GEN -->|Input| BT
+    GEN -->|Input| ST
+    GEN -->|Prompt-Response| CH
+    GEN -->|Log Entry| TL
+    GEN -->|Input-Output| LOG
+    SM -->|Initial State| PS
+
+    classDef core fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef train fill:#bbf,stroke:#333,stroke-width:2px;
+    class BM,SM,CAF,BT,ST,CH,TL,IB,LOG,EMS core;
+    class TS,RT,TE,DU,PS,PT,TD,VD,VE,RB train;
