@@ -1,122 +1,22 @@
 [
-    {
-        "prompt": "How do I fix this? I’m so frustrated!",
-        "response": "Don’t worry, here’s a quick fix—try restarting it. Feel better soon!",
-        "timestamp": 1744017600.0,
-    },
-    {
-        "prompt": "Why is my computer running so slow?",
-        "response": "Try clearing your cache and closing unused applications.",
-        "timestamp": 1744021200.0,
-    },
-    {
-        "prompt": "The app keeps crashing on startup",
-        "response": "Please update to the latest version and try again.",
-        "timestamp": 1744024800.0,
-    },
-    {
-        "prompt": "How do I recover deleted files?",
-        "response": "Check your recycle bin first, then try file recovery software.",
-        "timestamp": 1744028400.0,
-    },
-    {
-        "prompt": "My internet keeps disconnecting",
-        "response": "Reset your router and check all cable connections.",
-        "timestamp": 1744032000.0,
-    },
-    {
-        "prompt": "Password not working despite being correct",
-        "response": "Try resetting your password or using password recovery options.",
-        "timestamp": 1744035600.0,
-    },
-    {
-        "prompt": "How to transfer files between devices?",
-        "response": "You can use cloud storage, USB drives, or direct cable transfer.",
-        "timestamp": 1744039200.0,
-    },
-    {
-        "prompt": "Printer not responding to print jobs",
-        "response": "Check if printer is online and restart the print spooler service.",
-        "timestamp": 1744042800.0,
-    },
-    {
-        "prompt": "Screen keeps flickering randomly",
-        "response": "Update your graphics drivers and check display cables.",
-        "timestamp": 1744046400.0,
-    },
-    {
-        "prompt": "How to speed up my smartphone?",
-        "response": "Clear app cache, uninstall unused apps, and restart regularly.",
-        "timestamp": 1744050000.0,
-    },
-    {
-        "prompt": "Email attachments won't download",
-        "response": "Check your storage space and try a different browser.",
-        "timestamp": 1744053600.0,
-    },
-    {
-        "prompt": "Website says my connection isn't secure",
-        "response": "Verify the URL is correct and check your system clock.",
-        "timestamp": 1744057200.0,
-    },
-    {
-        "prompt": "How to block spam calls?",
-        "response": "Use your phone's built-in spam protection or third-party apps.",
-        "timestamp": 1744060800.0,
-    },
-    {
-        "prompt": "Software won't install, says I'm missing dependencies",
-        "response": "Install the required runtime libraries first.",
-        "timestamp": 1744064400.0,
-    },
-    {
-        "prompt": "My microphone isn't being detected",
-        "response": "Check privacy settings and try a different USB port.",
-        "timestamp": 1744068000.0,
-    },
-    {
-        "prompt": "How to connect to WiFi without password?",
-        "response": "You'll need the password or use WPS if available.",
-        "timestamp": 1744071600.0,
-    },
-    {
-        "prompt": "External hard drive not showing up",
-        "response": "Try different USB ports and check Disk Management.",
-        "timestamp": 1744075200.0,
-    },
-    {
-        "prompt": "Video playback is choppy",
-        "response": "Lower the resolution or check for GPU driver updates.",
-        "timestamp": 1744078800.0,
-    },
-    {
-        "prompt": "How to remove viruses from my PC?",
-        "response": "Run a full system scan with updated antivirus software.",
-        "timestamp": 1744082400.0,
-    },
-    {
-        "prompt": "Bluetooth devices won't pair",
-        "response": "Make sure both devices are in pairing mode and close enough.",
-        "timestamp": 1744086000.0,
-    },
-    {
-        "prompt": "System updates failing repeatedly",
-        "response": "Check your internet connection and free up disk space.",
-        "timestamp": 1744089600.0,
-    },
-    {
-        "prompt": "How to recover lost Word document?",
-        "response": "Check temporary files or use AutoRecover feature.",
-        "timestamp": 1744093200.0,
-    },
-    {
-        "prompt": "Game keeps freezing during play",
-        "response": "Lower graphics settings and update your GPU drivers.",
-        "timestamp": 1744096800.0,
-    },
-    {
-        "prompt": "Can't remember my Windows PIN",
-        "response": "You'll need to reset it using your Microsoft account.",
-        "timestamp": 1744100400.0,
-    }
+{"prompt": "How do I connect to WiFi?", "response": "Go to settings, select Network, and choose your WiFi network.", "timestamp": 1712592300.111, "conversation_id": "conv_1712592000", "confidence_score": 0.95}
+{"prompt": "My screen is frozen!", "response": "Hold the power button for 10 seconds to force restart.", "timestamp": 1712592400.222, "conversation_id": "conv_1712592000", "confidence_score": 0.89}
+{"prompt": "Why is my battery draining so fast?", "response": "Check for background apps and reduce screen brightness.", "timestamp": 1712592500.333, "conversation_id": "conv_1712592000", "confidence_score": 0.92}
+{"prompt": "How do I update my OS?", "response": "Go to Settings > System > Software Update.", "timestamp": 1712592600.444, "conversation_id": "conv_1712592000", "confidence_score": 0.94}
+{"prompt": "My files got deleted accidentally", "response": "Check the recycle bin or try file recovery software.", "timestamp": 1712592700.555, "conversation_id": "conv_1712592000", "confidence_score": 0.88}
+{"prompt": "The printer won't connect", "response": "Ensure it's on the same network and drivers are updated.", "timestamp": 1712592800.666, "conversation_id": "conv_1712592000", "confidence_score": 0.90}
+{"prompt": "How do I change my password?", "response": "Go to account settings and select 'Change Password'.", "timestamp": 1712592900.777, "conversation_id": "conv_1712592000", "confidence_score": 0.96}
+{"prompt": "Why is my phone overheating?", "response": "Avoid using while charging and close intensive apps.", "timestamp": 1712593000.888, "conversation_id": "conv_1712592000", "confidence_score": 0.91}
+{"prompt": "The sound isn't working", "response": "Check volume settings and ensure headphones aren't connected.", "timestamp": 1712593100.999, "conversation_id": "conv_1712592000", "confidence_score": 0.93}
+{"prompt": "How do I transfer photos to my PC?", "response": "Use a USB cable or cloud storage like Google Photos.", "timestamp": 1712593200.101, "conversation_id": "conv_1712592000", "confidence_score": 0.94}
+{"prompt": "My email won't sync", "response": "Check internet connection and refresh your inbox.", "timestamp": 1712593300.202, "conversation_id": "conv_1712592000", "confidence_score": 0.89}
+{"prompt": "The screen is flickering", "response": "Update graphics drivers or adjust refresh rate.", "timestamp": 1712593400.303, "conversation_id": "conv_1712592000", "confidence_score": 0.87}
+{"prompt": "How do I clear browser history?", "response": "Press Ctrl+Shift+Del and select what to clear.", "timestamp": 1712593500.404, "conversation_id": "conv_1712592000", "confidence_score": 0.95}
+{"prompt": "My keyboard isn't responding", "response": "Try reconnecting it or replacing batteries if wireless.", "timestamp": 1712593600.505, "conversation_id": "conv_1712592000", "confidence_score": 0.92}
+{"prompt": "The download is stuck at 99%", "response": "Pause and resume, or try a different network.", "timestamp": 1712593700.606, "conversation_id": "conv_1712592000", "confidence_score": 0.90}
+{"prompt": "How do I enable dark mode?", "response": "Go to Display settings and toggle Dark Theme.", "timestamp": 1712593800.707, "conversation_id": "conv_1712592000", "confidence_score": 0.96}
+{"prompt": "My mic isn't working in calls", "response": "Check app permissions and microphone settings.", "timestamp": 1712593900.808, "conversation_id": "conv_1712592000", "confidence_score": 0.93}
+{"prompt": "The website won't load", "response": "Clear cookies or try a different browser.", "timestamp": 1712594000.909, "conversation_id": "conv_1712592000", "confidence_score": 0.91}
+{"prompt": "How do I block spam calls?", "response": "Use your phone's built-in call blocking feature.", "timestamp": 1712594100.010, "conversation_id": "conv_1712592000", "confidence_score": 0.94}
+{"prompt": "My Bluetooth keeps disconnecting", "response": "Forget the device and pair again.", "timestamp": 1712594200.121, "conversation_id": "conv_1712592000", "confidence_score": 0.89}
 ]
