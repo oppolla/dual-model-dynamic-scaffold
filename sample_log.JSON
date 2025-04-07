@@ -3,144 +3,120 @@
         "prompt": "How do I fix this? I’m so frustrated!",
         "response": "Don’t worry, here’s a quick fix—try restarting it. Feel better soon!",
         "timestamp": 1744017600.0,
-        "salience": 0.428
     },
     {
         "prompt": "Why is my computer running so slow?",
         "response": "Try clearing your cache and closing unused applications.",
         "timestamp": 1744021200.0,
-        "salience": 0.512
     },
     {
         "prompt": "The app keeps crashing on startup",
         "response": "Please update to the latest version and try again.",
         "timestamp": 1744024800.0,
-        "salience": 0.675
     },
     {
         "prompt": "How do I recover deleted files?",
         "response": "Check your recycle bin first, then try file recovery software.",
         "timestamp": 1744028400.0,
-        "salience": 0.723
     },
     {
         "prompt": "My internet keeps disconnecting",
         "response": "Reset your router and check all cable connections.",
         "timestamp": 1744032000.0,
-        "salience": 0.589
     },
     {
         "prompt": "Password not working despite being correct",
         "response": "Try resetting your password or using password recovery options.",
         "timestamp": 1744035600.0,
-        "salience": 0.812
     },
     {
         "prompt": "How to transfer files between devices?",
         "response": "You can use cloud storage, USB drives, or direct cable transfer.",
         "timestamp": 1744039200.0,
-        "salience": 0.345
     },
     {
         "prompt": "Printer not responding to print jobs",
         "response": "Check if printer is online and restart the print spooler service.",
         "timestamp": 1744042800.0,
-        "salience": 0.467
     },
     {
         "prompt": "Screen keeps flickering randomly",
         "response": "Update your graphics drivers and check display cables.",
         "timestamp": 1744046400.0,
-        "salience": 0.698
     },
     {
         "prompt": "How to speed up my smartphone?",
         "response": "Clear app cache, uninstall unused apps, and restart regularly.",
         "timestamp": 1744050000.0,
-        "salience": 0.421
     },
     {
         "prompt": "Email attachments won't download",
         "response": "Check your storage space and try a different browser.",
         "timestamp": 1744053600.0,
-        "salience": 0.534
     },
     {
         "prompt": "Website says my connection isn't secure",
         "response": "Verify the URL is correct and check your system clock.",
         "timestamp": 1744057200.0,
-        "salience": 0.876
     },
     {
         "prompt": "How to block spam calls?",
         "response": "Use your phone's built-in spam protection or third-party apps.",
         "timestamp": 1744060800.0,
-        "salience": 0.612
     },
     {
         "prompt": "Software won't install, says I'm missing dependencies",
         "response": "Install the required runtime libraries first.",
         "timestamp": 1744064400.0,
-        "salience": 0.754
     },
     {
         "prompt": "My microphone isn't being detected",
         "response": "Check privacy settings and try a different USB port.",
         "timestamp": 1744068000.0,
-        "salience": 0.498
     },
     {
         "prompt": "How to connect to WiFi without password?",
         "response": "You'll need the password or use WPS if available.",
         "timestamp": 1744071600.0,
-        "salience": 0.387
     },
     {
         "prompt": "External hard drive not showing up",
         "response": "Try different USB ports and check Disk Management.",
         "timestamp": 1744075200.0,
-        "salience": 0.642
     },
     {
         "prompt": "Video playback is choppy",
         "response": "Lower the resolution or check for GPU driver updates.",
         "timestamp": 1744078800.0,
-        "salience": 0.529
     },
     {
         "prompt": "How to remove viruses from my PC?",
         "response": "Run a full system scan with updated antivirus software.",
         "timestamp": 1744082400.0,
-        "salience": 0.891
     },
     {
         "prompt": "Bluetooth devices won't pair",
         "response": "Make sure both devices are in pairing mode and close enough.",
         "timestamp": 1744086000.0,
-        "salience": 0.576
     },
     {
         "prompt": "System updates failing repeatedly",
         "response": "Check your internet connection and free up disk space.",
         "timestamp": 1744089600.0,
-        "salience": 0.713
     },
     {
         "prompt": "How to recover lost Word document?",
         "response": "Check temporary files or use AutoRecover feature.",
         "timestamp": 1744093200.0,
-        "salience": 0.654
     },
     {
         "prompt": "Game keeps freezing during play",
         "response": "Lower graphics settings and update your GPU drivers.",
         "timestamp": 1744096800.0,
-        "salience": 0.598
     },
     {
         "prompt": "Can't remember my Windows PIN",
         "response": "You'll need to reset it using your Microsoft account.",
         "timestamp": 1744100400.0,
-        "salience": 0.832
     }
 ]
