@@ -1,81 +1,84 @@
-def __init__(self):
-    # ... [Existing __init__] ...
-    self.interaction_buffer: List[Dict] = []
-    self.log_file = "interactions.json"
-    self.lock = threading.Lock()
-    self.last_activity = time.time()
-    self.idle_threshold = 0.7
-    self.min_idle_time = 300
-    self.min_examples = 50
-    self.max_training_time = 1800
-    self.salience_threshold = 0.5
-    self.last_trained = 0
-    self.time_window = 86400
-    self.training_active = False
-    self.recent_interactions = 0  # Count in last 5 mins
-    self.last_frequency_check = time.time()
-    self._start_sleep_scheduler()
-
 def _compute_salience(self, prompt: str, response: str) -> float:
-    """Compute salience with intent, emotion, recency, frequency, and complexity"""
+    """
+    Compute salience with human action signals and nonsense penalty:
+    - Intent: Purposeful keywords.
+    - Emotion: Emotional weight.
+    - Recency: Time since last interaction.
+    - Frequency: Engagement density.
+    - Complexity: Prompt effort.
+    - Nonsense: Penalty for gibberish or trolling.
+    """
     intent_keywords = {"how", "why", "what", "please", "help"}
     emotion_keywords = {"great", "bad", "love", "hate", "sorry", "happy", "sad"}
+    dictionary_words = set(["the", "is", "to", "and", "you", "i", "how", "why", "what", "please", "help", 
+                           "great", "bad", "love", "hate", "sorry", "happy", "sad"])  # Small vocab for efficiency
     
     prompt_words = set(prompt.lower().split())
     response_words = set(response.lower().split())
+    prompt_text = prompt.lower()
     
-    # Intent: Questions or commands
+    # Intent (25%): Purposeful inputs
     intent_score = sum(1 for kw in intent_keywords if kw in prompt_words) / len(intent_keywords)
     
-    # Emotion: Emotional weight
+    # Emotion (25%): Emotional weight
     emotion_score = sum(1 for kw in emotion_keywords if kw in prompt_words or kw in response_words) / len(emotion_keywords)
     
-    # Recency: Time since last interaction
+    # Recency (20%): Quick replies
     time_delta = time.time() - self.last_activity
-    if time_delta < 60:  # < 1 min
+    if time_delta < 60:
         recency_score = 1.0
-    elif time_delta < 600:  # 1-10 mins
+    elif time_delta < 600:
         recency_score = 1.0 - (time_delta - 60) / (600 - 60)
-    else:  # > 10 mins
+    else:
         recency_score = 0.1
     
-    # Frequency: Interactions in last 5 mins
+    # Frequency (15%): Engagement density
     current_time = time.time()
-    if current_time - self.last_frequency_check >= 300:  # Reset every 5 mins
+    if current_time - self.last_frequency_check >= 300:
         self.recent_interactions = 0
         self.last_frequency_check = current_time
-    frequency_score = min(self.recent_interactions / 5.0, 1.0)  # Cap at 5 for 1.0
+    frequency_score = min(self.recent_interactions / 5.0, 1.0)
     
-    # Complexity: Punctuation and unique words
+    # Complexity (15%): Prompt effort
     complexity_score = min(
         (prompt.count("?") + prompt.count("!") + prompt.count(".") + len(prompt_words)) / 10.0,
         1.0
     )
     
-    # Weighted combination
-    return min(
-        0.25 * intent_score +  # Adjusted for more factors
+    # Nonsense Score (0-1): Detects gibberish or trolling
+    # 1. Repetition: High word or char repetition = more nonsense
+    if prompt_words:
+        max_word_repeat = max([prompt_text.split().count(w) for w in prompt_words], default=0)
+        repetition_score = min(max_word_repeat / 3.0, 1.0)  # 3+ repeats = full nonsense
+    else:
+        repetition_score = 1.0  # Empty or space-only = nonsense
+    
+    # 2. Randomness: Low real-word ratio = more nonsense
+    real_word_ratio = sum(1 for w in prompt_words if w in dictionary_words) / max(len(prompt_words), 1)
+    randomness_score = 1.0 - real_word_ratio  # 0 real words = 1.0 nonsense
+    
+    # 3. Punctuation Overuse: High punct-to-word ratio = more nonsense
+    punct_count = prompt.count("?") + prompt.count("!") + prompt.count(".")
+    punct_ratio = punct_count / max(len(prompt_words), 1)
+    punctuation_score = min(punct_ratio / 2.0, 1.0)  # 2+ punct per word = full nonsense
+    
+    # Combine nonsense factors (average, 0-1)
+    nonsense_score = (repetition_score + randomness_score + punctuation_score) / 3.0
+    
+    # Base salience before penalty
+    base_salience = (
+        0.25 * intent_score +
         0.25 * emotion_score +
-        0.2 * recency_score +
-        0.15 * frequency_score +  # New: Engagement density
-        0.15 * complexity_score,  # New: Effort in prompt
-        1.0
+        0.20 * recency_score +
+        0.15 * frequency_score +
+        0.15 * complexity_score
     )
-
-def log_interaction(self, prompt: str, response: str):
-    """Log interaction with salience score"""
-    with self.lock:
-        salience = self._compute_salience(prompt, response)
-        interaction = {
-            "prompt": prompt,
-            "response": response,
-            "timestamp": time.time(),
-            "salience": salience
-        }
-        self.interaction_buffer.append(interaction)
-        self.recent_interactions += 1  # Bump frequency counter
-        if len(self.interaction_buffer) > 1000:
-            self._save_to_file()
+    
+    # Apply nonsense penalty: High nonsense reduces salience
+    # Linear reduction: 0 nonsense = full salience, 1 nonsense = 10% salience
+    final_salience = base_salience * (1.0 - 0.9 * nonsense_score)
+    
+    return min(max(final_salience, 0.0), 1.0)  # Clamp between 0 and 1
 
 
 # SKETCH
