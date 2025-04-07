@@ -2,22 +2,22 @@
   "base_model_name": "gpt2",
   "scaffold_model_name": "gpt2",
   "cross_attn_layers": [5, 7],
-  "use_dynamic_layers": false,               // Set to false initial test with same-model setup
-  "layer_selection_mode": "balanced",        // Unused if dynamic_layers=false
+  "use_dynamic_layers": false,
+  "layer_selection_mode": "balanced",
   "custom_layers": null,
   "valid_split_ratio": 0.2,
   "random_seed": 42,
-  "quantization": "fp16",                    
+  "quantization": "fp16",
   "lora_config": {
     "lora_rank": 8,
     "lora_alpha": 16,
     "lora_dropout": 0.1,
-    "lora_target_modules": ["c_attn", "c_proj"]  // GPT-2-specific
+    "lora_target_modules": ["c_attn", "c_proj", "c_fc"]
   },
   "training_config": {
     "learning_rate": 0.0003,
     "train_epochs": 3,
     "batch_size": 1,
-    "max_seq_length": 256                   
+    "max_seq_length": 128
   }
 }
