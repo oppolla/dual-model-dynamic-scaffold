@@ -1,3 +1,5 @@
+= If initial test sucessful, add the sleep learning phase to system for live updates.
+
 - Add Logging and Monitoring fuctions
 - Make a Web UI User Interface
 - Seperate Configuration Management into own file (config.JSON) - DONE / CONSTANT UPDATE AS NEW CONFIGS ADDED
