@@ -296,8 +296,9 @@ class BareBonesDMAO_Learn:
         num_heads = self.base_config.num_attention_heads
 
         if self.scaffold_config.hidden_size != hidden_dim:
-            print(f"Warning: Scaffold hidden size ({self.scaffold_config.hidden_size}) != base hidden size ({hidden_dim}). Adding projection.")
+            print(f"Adding TRAINABLE projection: {self.scaffold_config.hidden_size} -> {hidden_dim}")
             self.scaffold_proj = nn.Linear(self.scaffold_config.hidden_size, hidden_dim).to(DEVICE)
+            self.scaffold_proj.requires_grad = True  # <-- KEY CHANGE: Make it trainable
         else:
             self.scaffold_proj = None
 
@@ -319,8 +320,6 @@ class BareBonesDMAO_Learn:
                 hidden_dim=hidden_dim,
                 num_heads=num_heads
             ).to(DEVICE)
-            for param in cross_attn_fuser.parameters():
-                param.requires_grad = False
 
             class ModifiedLayer(nn.Module):
                 def __init__(self, orig_layer, cross_attn_module, parent_system):
@@ -348,8 +347,13 @@ class BareBonesDMAO_Learn:
 
     def setup_optimizer(self, num_training_steps):
         """Sets up the optimizer and scheduler for LoRA training."""
+        # Collect all trainable parameters (Scaffold LoRA + Projection)
+        trainable_params = list(self.scaffold_model.parameters())
+        if self.scaffold_proj is not None:
+            trainable_params += list(self.scaffold_proj.parameters())  # <-- Add projection layer
+
         self.optimizer = AdamW(
-            filter(lambda p: p.requires_grad, self.scaffold_model.parameters()),
+            trainable_params,  # <-- Optimize both scaffold AND projection
             lr=LEARNING_RATE
         )
         self.scheduler = get_linear_schedule_with_warmup(
@@ -360,18 +364,21 @@ class BareBonesDMAO_Learn:
         print("Optimizer and scheduler set up.")
 
     def map_sequence(self, base_input_ids):
-        """Handle multi-token expansions with efficient padding"""
+        """Handle multi-token expansions with efficient padding, preserving complete expansions"""
         batch_size = base_input_ids.size(0)
-        max_expanded_len = MAX_SEQ_LENGTH * 3  # Allow reasonable expansion
-        
+        max_expanded_len = MAX_SEQ_LENGTH * 3  # Buffer for expansions
+
         # Initialize tensor with padding tokens
         mapped_ids = torch.full(
-            (batch_size, max_expanded_len), 
+            (batch_size, max_expanded_len),
             self.scaffold_tokenizer.pad_token_id,
             dtype=torch.long,
             device=DEVICE
         )
-        
+
+        # Track truncation for logging
+        truncated = False
+
         # Build sequences for each item in batch
         for batch_idx in range(batch_size):
             position = 0
@@ -380,15 +387,24 @@ class BareBonesDMAO_Learn:
                     base_id.item(),
                     self.token_map.get(base_id.item(), [self.scaffold_unk_id])
                 )
+
+                # Check if adding this expansion fits within MAX_SEQ_LENGTH
+                if position + len(mapped_tokens) > MAX_SEQ_LENGTH:
+                    truncated = True
+                    break
                 
-                # Add tokens until we reach max length
+                # Add complete expansion
                 for token in mapped_tokens:
-                    if position >= max_expanded_len:
+                    if position >= max_expanded_len:  # Shouldn’t hit this with buffer
+                        truncated = True
                         break
                     mapped_ids[batch_idx, position] = token
                     position += 1
 
-        # Truncate to MAX_SEQ_LENGTH while preserving batch dimension
+        if truncated:
+            print(f"Warning: Token mapping truncated expansions to fit MAX_SEQ_LENGTH={MAX_SEQ_LENGTH}. Consider increasing MAX_SEQ_LENGTH for longer prompts.")
+    
+        # Return up to MAX_SEQ_LENGTH
         return mapped_ids[:, :MAX_SEQ_LENGTH]
 
     def train_step(self, batch):
@@ -536,10 +552,19 @@ class BareBonesDMAO_Learn:
         print(f"--- Training Finished ({end_train_time - start_train_time:.2f}s) ---")
 
     def has_repetition(self, output_ids, n=3):
-        """Check for n-gram repetition in output_ids."""
-        output_ids = output_ids.tolist()
-        for i in range(len(output_ids) - n):
-            if all(output_ids[i + j] == output_ids[i + j + n] for j in range(n)):
+        """Check for n-gram repetition in output_ids, ignoring padding and special tokens."""
+        special_ids = {
+            self.base_tokenizer.pad_token_id,
+            self.base_tokenizer.eos_token_id,
+            self.base_tokenizer.bos_token_id,
+            self.base_tokenizer.unk_token_id
+        }
+        # Filter out special tokens
+        filtered_ids = [id for id in output_ids.tolist() if id not in special_ids]
+        if len(filtered_ids) < n:
+            return False
+        for i in range(len(filtered_ids) - n):
+            if all(filtered_ids[i + j] == filtered_ids[i + j + n] for j in range(n)):
                 return True
         return False
 
@@ -661,7 +686,7 @@ class BareBonesDMAO_Learn:
     @torch.no_grad()
     def evaluate_generation_quality(self, num_samples=3):
         """Generate sample responses"""
-        samples = random.sample(VALID_DATA, num_samples)
+        samples = random.sample(VALID_DATA, min(num_samples, len(VALID_DATA)))
         print("\n=== Generation Evaluation ===")
 
         for example in samples:
@@ -675,6 +700,7 @@ class BareBonesDMAO_Learn:
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == "__main__":
     print("\nInitializing Bare Bones DMAO System with Learning...")
+    dmao_system = None
     try:
         dmao_system = BareBonesDMAO_Learn()
         print("\nSystem Ready.")
@@ -723,12 +749,19 @@ if __name__ == "__main__":
                 print(response)
                 print("-" * 20)
 
+    except FileNotFoundError as e:
+        print(f"\nFile error: {e}. Ensure 'config.json' and 'train_data.py' are present and correctly formatted.")
+    except torch.cuda.OutOfMemoryError:
+        print("\nOut of GPU memory! Try reducing BATCH_SIZE, MAX_SEQ_LENGTH, or switching to INT8/INT4 quantization.")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     except Exception as e:
-        print(f"\nAn error occurred: {e}")
+        print(f"\nUnexpected error occurred: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        del dmao_system
+        if dmao_system is not None:
+            del dmao_system
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print("\nExiting.")
