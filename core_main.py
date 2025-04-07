@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AdamW, get_linear_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, TaskType
-import copy
 import time
 import random
 from train_data import TRAIN_DATA
@@ -14,6 +13,7 @@ import sys
 import contextlib
 from collections import deque
 import uuid
+import threading
 
 # --- Load Configuration from JSON ---
 with open("config.json", "r") as f:
@@ -53,16 +53,26 @@ MAX_SEQ_LENGTH = get_config_value(training_config, "max_seq_length", 512)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
-# VRAM Monitor
-def print_memory_stats(label=""):
-    """Prints current GPU memory usage."""
-    if torch.cuda.is_available():
-        print(f"\n--- Memory Stats ({label}) ---")
-        print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-        print(torch.cuda.memory_summary(abbreviated=True))
-    else:
-        print("(CPU mode - no GPU memory stats)")
+# --- Config Validation ---
+def _validate_config():
+    """Validate configuration values after loading"""
+    assert isinstance(CROSS_ATTN_LAYERS, list), "CROSS_ATTN_LAYERS must be a list!"
+    
+    if not USE_DYNAMIC_LAYERS:
+        base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+        base_layers = base_config.num_hidden_layers
+        invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_layers)]
+        assert not invalid_layers, (
+            f"Invalid layers in CROSS_ATTN_LAYERS: {invalid_layers}. "
+            f"Base model '{BASE_MODEL_NAME}' only has {base_layers} layers (0-{base_layers-1})."
+        )
+    if LAYER_SELECTION_MODE == "custom":
+        base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+        base_layers = base_config.num_hidden_layers
+        invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_layers)]
+        assert not invalid_custom, f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}"    
+
+_validate_config()
 
 # Train Data Validation Split
 random.seed(RANDOM_SEED)
@@ -118,29 +128,47 @@ class SimpleCrossAttentionFuser(nn.Module):
         return fused_state
     
 class ConversationHistory:
+    """Manages conversation state with a history of messages."""
     def __init__(self, conversation_id=None):
-        self.conversation_id = conversation_id or str(uuid.uuid4())  # Use UUIDv4 for unique ID
+        self.conversation_id = conversation_id or str(uuid.uuid4())
+        self.messages = deque(maxlen=10)  # Stores last 10 messages
 
-class SimpleLogger:
+    def add_message(self, prompt, response):
+        """Add a prompt-response pair to the history."""
+        self.messages.append({"prompt": prompt, "response": response})
+
+class ThreadSafeLogger:
+    """Thread-safe logger for writing JSONL logs."""
     def __init__(self, filename="log.jsonl"):
         self.filename = filename
-    
+        self.lock = threading.Lock()
+
     def write(self, data):
-        with open(self.filename, "a") as f:
-            f.write(json.dumps(data) + "\n")
+        """Thread-safe JSONL write with error handling."""
+        with self.lock:
+            try:
+                with open(self.filename, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(data) + "\n")
+            except (IOError, TypeError, ValueError) as e:
+                print(f"Logging failed: {e}")
 
 def calculate_confidence_score(logits, generated_ids):
     """Calculate confidence score from logits of generated tokens."""
-    if logits is None or len(logits) == 0:
+    if not logits or not isinstance(logits, (list, tuple)) or len(logits) == 0:
         return 0.5  # Fallback if no logits available
-    probs = torch.softmax(logits, dim=-1)  # Convert logits to probabilities
-    max_probs = torch.max(probs, dim=-1).values  # Max probability per token
-    return max_probs.mean().item()  # Average confidence across tokens
+    try:
+        stacked_logits = torch.stack(logits)
+        probs = torch.softmax(stacked_logits, dim=-1)
+        max_probs = torch.max(probs, dim=-1).values
+        return max_probs.mean().item()
+    except (RuntimeError, TypeError) as e:
+        print(f"Confidence score calculation failed: {e}")
+        return 0.5
 
 # --- MAIN SYSTEM ---
 class BareBonesDMAO_Learn:
     def __init__(self):
-        self.quantization_mode = "fp16"  # Default: FP16/BF16
+        self.quantization_mode = "fp16"
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
         self.dry_run = False
@@ -151,7 +179,6 @@ class BareBonesDMAO_Learn:
             'skip_training': True
         }
 
-        # --- LOAD BASE MODEL (frozen) ---
         print(f"Loading base model: {BASE_MODEL_NAME}")
         quantization_config = {}
         if self.quantization_mode == "int8":
@@ -163,13 +190,12 @@ class BareBonesDMAO_Learn:
             config=self.base_config,
             **quantization_config
         ).to(DEVICE)
-        print_memory_stats("After base model load")
+        self.print_memory_stats("After base model load", verbose=True)
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
         print(f"Base model '{BASE_MODEL_NAME}' loaded and frozen.")
 
-        # --- LOAD SCAFFOLD MODEL (dynamic) ---
         print(f"Loading scaffold model: {SCAFFOLD_MODEL_NAME}")
         scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
             SCAFFOLD_MODEL_NAME,
@@ -177,9 +203,8 @@ class BareBonesDMAO_Learn:
             **quantization_config
         )
         print(f"Scaffold model '{SCAFFOLD_MODEL_NAME}' loaded.")
-        print_memory_stats("After scaffold model load")
+        self.print_memory_stats("After scaffold model load", verbose=True)
 
-        # --- APPLY LoRA TO SCAFFOLD MODEL ---
         print("Applying LoRA adapters to scaffold model...")
         lora_config = LoraConfig(
             r=LORA_RANK,
@@ -194,7 +219,6 @@ class BareBonesDMAO_Learn:
         print("LoRA adapters applied. Trainable scaffold parameters:")
         self.scaffold_model.print_trainable_parameters()
 
-        # --- LOAD TOKENIZERS ---
         print(f"Loading base tokenizer from: {BASE_MODEL_NAME}")
         self.base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
         print(f"Base tokenizer loaded (Vocab size: {self.base_tokenizer.vocab_size}).")
@@ -203,7 +227,9 @@ class BareBonesDMAO_Learn:
         self.scaffold_tokenizer = AutoTokenizer.from_pretrained(SCAFFOLD_MODEL_NAME)
         print(f"Scaffold tokenizer loaded (Vocab size: {self.scaffold_tokenizer.vocab_size}).")
 
-        # --- HANDLE PADDING TOKENS ---
+        if self.base_tokenizer.get_vocab() == self.scaffold_tokenizer.get_vocab():
+            print("Base and scaffold models share the same tokenizer.")
+
         if self.base_tokenizer.pad_token is None:
             self.base_tokenizer.pad_token = self.base_tokenizer.eos_token
             print(f"Base tokenizer pad token set to EOS token: '{self.base_tokenizer.eos_token}' (ID: {self.base_tokenizer.eos_token_id})")
@@ -223,9 +249,7 @@ class BareBonesDMAO_Learn:
         except AttributeError:
             print("Could not set pad_token_id on underlying scaffold model config.")
 
-        # --- BUILD TOKEN MAPPING ---
         def build_token_map(base_tokenizer, scaffold_tokenizer):
-            """Build mapping with support for multi-token sequences"""
             base_vocab = base_tokenizer.get_vocab()
             scaffold_vocab = scaffold_tokenizer.get_vocab()
             token_map = {}
@@ -242,7 +266,6 @@ class BareBonesDMAO_Learn:
 
         self.token_map = build_token_map(self.base_tokenizer, self.scaffold_tokenizer)
 
-        # --- SPECIAL TOKEN MAPPING ---
         self.special_token_map = {
             self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id,
             self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id or self.scaffold_tokenizer.sep_token_id,
@@ -250,15 +273,11 @@ class BareBonesDMAO_Learn:
         }
         self.scaffold_unk_id = self.scaffold_tokenizer.unk_token_id
 
-        # --- INJECT CROSS ATTENTION ---
         print("Injecting cross-attention layers...")
         self._insert_cross_attention()
         print("Cross-attention injection complete.")
 
-        # TEMP STORAGE FOR SCAFFOLD CONTEXT
         self._temp_scaffold_context: Optional[torch.Tensor] = None
-
-        # --- SETUP OPTIMIZER (placeholder) ---
         self.optimizer = None
         self.scheduler = None
         self.global_step = 0
@@ -266,15 +285,23 @@ class BareBonesDMAO_Learn:
         self.patience = 0
         self.max_patience = 2
 
-        # --- ADD LOGGING AND HISTORY ---
-        self.logger = SimpleLogger("log.jsonl")
+        self.logger = ThreadSafeLogger("log.jsonl")
         self.history = ConversationHistory()
 
         print("Quantization mode set to:", self.quantization_mode)
         print("Initialization complete. Optimizer needs setup before training.")
 
+    def print_memory_stats(self, label="", verbose=False):
+        """Prints current GPU memory usage if verbose is True."""
+        if verbose and torch.cuda.is_available():
+            print(f"\n--- Memory Stats ({label}) ---")
+            print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+            print(torch.cuda.memory_summary(abbreviated=True))
+        elif not torch.cuda.is_available():
+            print("(CPU mode - no GPU memory stats)")
+
     def set_scaffold_influence(self, weight):
-        """Set the influence weight for all cross-attention layers (0-1 scale)"""
         base_layers = self._get_model_layers(self.base_model)
         if USE_DYNAMIC_LAYERS:
             cross_attn_layers = get_cross_attention_layers(self.base_model)
@@ -287,7 +314,6 @@ class BareBonesDMAO_Learn:
                     modified_layer.cross_attn.set_influence_weight(weight)
 
     def set_quantization_mode(self, mode: str):
-        """Set quantization mode: 'fp16', 'int8', or 'int4'. Restart system for full effect."""
         valid_modes = ["fp16", "int8", "int4"]
         if mode not in valid_modes:
             print(f"Invalid mode '{mode}'. Use: {valid_modes}")
@@ -297,26 +323,22 @@ class BareBonesDMAO_Learn:
             print(f"Quantization mode set to '{mode}'. Restart system to apply quantization.")
 
     def toggle_dynamic_layers(self, enable: bool):
-        """Toggle between dynamic layer selection and fixed CROSS_ATTN_LAYERS. Restart system to apply."""
         global USE_DYNAMIC_LAYERS
         if enable != USE_DYNAMIC_LAYERS:
             USE_DYNAMIC_LAYERS = enable
             print(f"Dynamic layer selection {'enabled' if enable else 'disabled'}. Restart system to apply.")
 
     def _clear_scaffold_cache(self):
-        """More defensive memory cleanup"""
-        if hasattr(self, '_temp_scaffold_context') and self._temp_scaffold_context is not None:
+        if hasattr(self, '_temp_scaffold_context'):
             if isinstance(self._temp_scaffold_context, torch.Tensor):
                 self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
             del self._temp_scaffold_context
             self._temp_scaffold_context = None
         if torch.cuda.is_available():
-            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
     @contextlib.contextmanager
     def _scaffold_context(self, scaffold_hidden_states):
-        """Context manager for safe scaffold context handling"""
         try:
             self._temp_scaffold_context = scaffold_hidden_states
             yield
@@ -324,7 +346,6 @@ class BareBonesDMAO_Learn:
             self._clear_scaffold_cache()
 
     def _get_model_layers(self, model):
-        """Helper to get the main list of transformer layers"""
         actual_model = model.base_model if hasattr(model, 'base_model') else model
         if hasattr(actual_model, 'transformer') and hasattr(actual_model.transformer, 'h'):
             return actual_model.transformer.h
@@ -338,7 +359,6 @@ class BareBonesDMAO_Learn:
             raise ValueError(f"Cannot determine layer structure for model: {actual_model.__class__.__name__}")
 
     def _insert_cross_attention(self):
-        """Injects cross-attention with toggle between dynamic and fixed layers"""
         base_layers = self._get_model_layers(self.base_model)
         num_base_layers = len(base_layers)
         hidden_dim = self.base_config.hidden_size
@@ -347,7 +367,7 @@ class BareBonesDMAO_Learn:
         if self.scaffold_config.hidden_size != hidden_dim:
             print(f"Adding TRAINABLE projection: {self.scaffold_config.hidden_size} -> {hidden_dim}")
             self.scaffold_proj = nn.Linear(self.scaffold_config.hidden_size, hidden_dim).to(DEVICE)
-            self.scaffold_proj.weight.requires_grad_(True)  # Explicitly trainable
+            self.scaffold_proj.weight.requires_grad_(True)
             self.scaffold_proj.bias.requires_grad_(True)
         else:
             self.scaffold_proj = None
@@ -395,7 +415,6 @@ class BareBonesDMAO_Learn:
             print(f"Successfully injected wrapper into layer {layer_idx}")
 
     def enable_dry_run(self, max_samples=2, max_length=128, validate_architecture=True, skip_training=True):
-        """Activate dry run mode for testing"""
         self.dry_run = True
         self.dry_run_params = {
             'max_samples': max_samples,
@@ -406,7 +425,6 @@ class BareBonesDMAO_Learn:
         print(f"Dry run mode activated (max_samples={max_samples}, max_length={max_length})")
 
     def _validate_architecture(self):
-        """Check if cross-attention layers were properly injected"""
         base_layers = self._get_model_layers(self.base_model)
         print("\n🔍 Architecture Validation Results:")
         found_layers = 0
@@ -421,9 +439,12 @@ class BareBonesDMAO_Learn:
             print(f"Warning: Found {found_layers} cross-attention layers, expected {expected_layers}")
         else:
             print("All expected cross-attention layers present")
+        assert hasattr(self.scaffold_model, 'peft_config'), "LoRA adapters not attached!"
+        if self.scaffold_proj is not None:
+            assert next(self.scaffold_proj.parameters()).requires_grad, "Projection layer should be trainable!"
+        print("Architecture validation passed.")
 
     def setup_optimizer(self, num_training_steps):
-        """Sets up the optimizer and scheduler for LoRA training."""
         trainable_params = list(self.scaffold_model.parameters())
         if self.scaffold_proj is not None:
             trainable_params += list(self.scaffold_proj.parameters())
@@ -436,7 +457,7 @@ class BareBonesDMAO_Learn:
         print("Optimizer and scheduler set up.")
 
     def map_sequence(self, base_input_ids):
-        """Handle multi-token expansions with efficient padding, preserving complete expansions"""
+        """Map base input IDs to scaffold IDs, handling multi-token expansions with truncation."""
         batch_size = base_input_ids.size(0)
         max_expanded_len = MAX_SEQ_LENGTH * 3
         mapped_ids = torch.full(
@@ -462,12 +483,18 @@ class BareBonesDMAO_Learn:
                         break
                     mapped_ids[batch_idx, position] = token
                     position += 1
+                if truncated:
+                    break
         if truncated:
-            print(f"Warning: Token mapping truncated expansions to fit MAX_SEQ_LENGTH={MAX_SEQ_LENGTH}.")
+            print(f"Warning: Token mapping truncated to fit MAX_SEQ_LENGTH={MAX_SEQ_LENGTH}.")
+            self.logger.write({
+                "warning": f"Token mapping truncated to fit MAX_SEQ_LENGTH={MAX_SEQ_LENGTH}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
         return mapped_ids[:, :MAX_SEQ_LENGTH]
 
     def train_step(self, batch):
-        """Modified version with dry run support"""
         if self.dry_run:
             print("Dry run train step")
             print(f"Processing {min(len(batch), self.dry_run_params['max_samples'])} samples")
@@ -489,10 +516,9 @@ class BareBonesDMAO_Learn:
         return self._real_train_step(batch)
 
     def _real_train_step(self, batch):
-        """Performs a single training step."""
         if not self.optimizer and not self.dry_run:
             raise RuntimeError("Optimizer not set up. Call setup_optimizer first.")
-        print_memory_stats("Train step start")
+        self.print_memory_stats("Train step start", verbose=True)
         self.scaffold_model.train()
         self.base_model.eval()
 
@@ -527,10 +553,14 @@ class BareBonesDMAO_Learn:
 
         labels = base_input_ids.clone()
         labels[labels == self.base_tokenizer.pad_token_id] = -100
-        prompt_lengths = [len(self.base_tokenizer(p).input_ids) for p in prompts]
-        for i, prompt_len in enumerate(prompt_lengths):
-            actual_prompt_len_in_batch = min(prompt_len, MAX_SEQ_LENGTH)
-            labels[i, :actual_prompt_len_in_batch] = -100
+        prompt_mask = self.base_tokenizer(
+            prompts, 
+            return_tensors='pt', 
+            padding='max_length', 
+            truncation=True, 
+            max_length=MAX_SEQ_LENGTH
+        ).attention_mask.to(DEVICE)
+        labels = torch.where(prompt_mask.bool(), -100, base_input_ids)
 
         with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
             scaffold_outputs = self.scaffold_model(
@@ -538,7 +568,7 @@ class BareBonesDMAO_Learn:
                 output_hidden_states=True
             )
             scaffold_hidden_states = scaffold_outputs.hidden_states[-1]
-            print_memory_stats("After forward pass")
+            self.print_memory_stats("After forward pass", verbose=True)
 
             with self._scaffold_context(scaffold_hidden_states):
                 outputs = self.base_model(
@@ -558,19 +588,24 @@ class BareBonesDMAO_Learn:
         scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
 
+        torch.nn.utils.clip_grad_norm_(
+            list(self.scaffold_model.parameters()) + 
+            (list(self.scaffold_proj.parameters()) if self.scaffold_proj else []),
+            max_norm=1.0
+        )
+
         if (self.global_step + 1) % accumulation_steps == 0:
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
         self.global_step += 1
 
-        print_memory_stats("After optimizer step")
+        self.print_memory_stats("After optimizer step", verbose=True)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         return loss.item()
 
     def run_training_cycle(self, train_data, valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
-        """Modified training loop with dry run support"""
         num_training_steps = (len(train_data) // batch_size) * epochs
         if num_training_steps == 0:
             print("Not enough data or epochs for training.")
@@ -582,7 +617,7 @@ class BareBonesDMAO_Learn:
         start_train_time = time.time()
 
         for epoch in range(epochs):
-            print_memory_stats(f"Epoch {epoch + 1} start")
+            self.print_memory_stats(f"Epoch {epoch + 1} start", verbose=True)
             print(f"\nEpoch {epoch + 1}/{epochs}")
             epoch_loss = 0
             steps_in_epoch = 0
@@ -601,18 +636,15 @@ class BareBonesDMAO_Learn:
                 else:
                     print(f"  Step {self.global_step}/{num_training_steps} | Skipped")
 
-                if self.dry_run and self.dry_run_params['skip_training']:
-                    break  # Exit after one step in dry run
-
             valid_loss = self.validate_epoch(valid_data)
             avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0
             print(f"Epoch {epoch + 1} Stats:")
             print(f"  Train Loss: {avg_epoch_loss:.4f}")
             print(f"  Valid Loss: {valid_loss:.4f}")
-            print_memory_stats(f"Epoch {epoch + 1} end")
+            self.print_memory_stats(f"Epoch {epoch + 1} end", verbose=True)
 
             if self.dry_run and self.dry_run_params['skip_training']:
-                break  # Exit after one epoch in dry run
+                break
 
             if valid_loss < self.best_valid_loss:
                 self.best_valid_loss = valid_loss
@@ -631,18 +663,18 @@ class BareBonesDMAO_Learn:
         print(f"--- Training Finished ({end_train_time - start_train_time:.2f}s) ---")
 
     def has_repetition(self, output_ids, n=3):
-        """Check for n-gram repetition in output_ids, ignoring padding and special tokens."""
+        ids = output_ids.tolist()
         special_ids = {
             self.base_tokenizer.pad_token_id,
             self.base_tokenizer.eos_token_id,
             self.base_tokenizer.bos_token_id,
             self.base_tokenizer.unk_token_id
         }
-        filtered_ids = [id for id in output_ids.tolist() if id not in special_ids]
-        if len(filtered_ids) < n:
-            return False
-        for i in range(len(filtered_ids) - n):
-            if all(filtered_ids[i + j] == filtered_ids[i + j + n] for j in range(n)):
+        filtered = [i for i in ids if i not in special_ids]
+        for i in range(len(filtered) - 2*n):
+            window = filtered[i:i+n]
+            next_window = filtered[i+n:i+2*n]
+            if window == next_window:
                 return True
         return False
 
@@ -655,30 +687,30 @@ class BareBonesDMAO_Learn:
             print(f"Input: {truncated_prompt}{'...' if len(prompt) > self.dry_run_params['max_length'] else ''}")
             print("(Would generate output here)")
             return "[DRY RUN] Pretend generated output"
-
-        print_memory_stats("Pre-generation")
+    
+        self.print_memory_stats("Pre-generation", verbose=True)
         if scaffold_weight is not None:
             self.set_scaffold_influence(scaffold_weight)
         print(f"Using quantization mode: {self.quantization_mode}")
-
+    
         start_time = time.time()
         timestamp = start_time
-
+    
         base_inputs = self.base_tokenizer(prompt, return_tensors='pt').to(DEVICE)
         input_ids = base_inputs['input_ids']
         input_length = input_ids.shape[1]
-
+    
         scaffold_base_inputs = self.base_tokenizer(
             prompt, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH
         ).to(DEVICE)
         scaffold_input_ids = self.map_sequence(scaffold_base_inputs.input_ids)
         scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
-
+    
         scaffold_inputs = {
             'input_ids': scaffold_input_ids,
             'attention_mask': scaffold_attention_mask
         }
-
+    
         with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
             scaffold_outputs = self.scaffold_model(
                 **scaffold_inputs,
@@ -686,7 +718,8 @@ class BareBonesDMAO_Learn:
             )
             actual_outputs = scaffold_outputs.hidden_states if hasattr(scaffold_outputs, 'hidden_states') else scaffold_outputs.base_model_output.hidden_states
             scaffold_hidden_states = actual_outputs[-1]
-
+    
+        self._clear_scaffold_cache()
         with self._scaffold_context(scaffold_hidden_states):
             outputs = self.base_model.generate(
                 input_ids,
@@ -697,20 +730,28 @@ class BareBonesDMAO_Learn:
                 output_scores=True,
                 **kwargs
             )
-
-        print_memory_stats("Post-generation")
+    
+        self.print_memory_stats("Post-generation", verbose=True)
         generated_ids = outputs.sequences[0][input_length:]
         logits = outputs.scores
-        confidence_score = calculate_confidence_score(torch.stack(logits), generated_ids)
-
+        confidence_score = calculate_confidence_score(logits, generated_ids)
+    
         if self.has_repetition(generated_ids, n=3):
             print("Warning: Repetition detected in output. Truncating at first repeat.")
+            original_text = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
             for i in range(len(generated_ids) - 3):
                 if all(generated_ids[i + j] == generated_ids[i + j + 3] for j in range(3)):
                     generated_ids = generated_ids[:i + 3]
                     break
+            self.logger.write({
+                "warning": "Repetition detected in output",
+                "original_text": original_text,
+                "truncated_at": i + 3,
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
         response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
-
+    
         log_entry = {
             "prompt": prompt,
             "response": response,
@@ -719,7 +760,8 @@ class BareBonesDMAO_Learn:
             "confidence_score": confidence_score
         }
         self.logger.write(log_entry)
-
+        self.history.add_message(prompt, response)
+    
         end_time = time.time()
         print(f"Generation took {end_time - start_time:.2f} seconds.")
         if torch.cuda.is_available():
@@ -728,10 +770,9 @@ class BareBonesDMAO_Learn:
 
     @torch.no_grad()
     def validate_epoch(self, valid_data):
-        """Validation loss calculation with dry run support"""
         if self.dry_run:
             print("\n=== DRY RUN VALIDATION ===")
-            return random.random()  # Simulated loss
+            return random.random()
         self.scaffold_model.eval()
         total_loss, batches = 0, 0
 
@@ -785,8 +826,11 @@ class BareBonesDMAO_Learn:
 
     @torch.no_grad()
     def evaluate_generation_quality(self, num_samples=3):
-        """Generate sample responses"""
-        samples = random.sample(VALID_DATA, min(num_samples, len(VALID_DATA)))
+        num_samples = min(num_samples, len(VALID_DATA))
+        if num_samples <= 0:
+            print("No validation data for evaluation!")
+            return
+        samples = random.sample(VALID_DATA, num_samples)
         print("\n=== Generation Evaluation ===")
         for example in samples:
             print(f"\nPrompt: {example['prompt']}")
@@ -797,14 +841,24 @@ class BareBonesDMAO_Learn:
                 print(f"w={weight}: {response}")
 
     def cleanup(self):
-        """Explicit cleanup method"""
+        """Explicit cleanup of system resources."""
         self._clear_scaffold_cache()
         print(f"[DEBUG] Cleanup called for {id(self)}")
+        for attr in ['base_model', 'scaffold_model', 'optimizer', 'scheduler']:
+            if hasattr(self, attr):
+                try:
+                    delattr(self, attr)
+                except Exception as e:
+                    print(f"Failed to delete {attr}: {e}")
+        self._clear_scaffold_cache()
+        print(f"Full cleanup completed for {id(self)}")
 
     def new_conversation(self):
-        """Start a new conversation with a fresh conversation_id."""
+        """Start a new conversation with a fresh conversation_id and clear temporary state."""
+        old_id = self.history.conversation_id
         self.history = ConversationHistory()
-        print(f"New conversation started with ID: {self.history.conversation_id}")    
+        self._clear_scaffold_cache()
+        print(f"New conversation started with ID: {self.history.conversation_id} (Previous ID: {old_id})")
 
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == "__main__":
@@ -826,7 +880,7 @@ if __name__ == "__main__":
             elif cmd == 'train':
                 dmao_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
                 if dmao_system.dry_run:
-                    break  # Exit after dry run training
+                    break
             elif cmd == 'int8':
                 dmao_system.set_quantization_mode("int8")
                 print("Re-initializing system with INT8 quantization...")
@@ -848,7 +902,7 @@ if __name__ == "__main__":
                 print("Re-initializing system with fixed layers...")
                 dmao_system = BareBonesDMAO_Learn()
             elif cmd == 'new':
-                dmao_system.new_conversation()  # Added here
+                dmao_system.new_conversation()
             elif not user_cmd:
                 continue
             else:
@@ -870,8 +924,12 @@ if __name__ == "__main__":
         print("\nOut of GPU memory! Try reducing BATCH_SIZE, MAX_SEQ_LENGTH, or switching to INT8/INT4 quantization.")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    except ValueError as e:
+        print(f"Value error (possibly from config or logging): {e}")
+    except RuntimeError as e:
+        print(f"Runtime error (possibly from model operations): {e}")
     except Exception as e:
-        print(f"\nUnexpected error occurred: {e}")
+        print(f"Unexpected error occurred: {e}")
         import traceback
         traceback.print_exc()
     finally:
