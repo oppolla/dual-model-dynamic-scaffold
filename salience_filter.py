@@ -1,17 +1,20 @@
 def _compute_salience(self, prompt: str, response: str) -> float:
     """
-    Compute salience with human action signals, nonsense penalty, and frustration/anger boost:
+    Compute salience with human action signals, nonsense penalty, frustration boost, and emotional connection reward:
     - Intent: Purposeful keywords.
-    - Emotion: Emotional weight (general).
+    - Emotion: General emotional weight.
     - Recency: Time since last interaction.
     - Frequency: Engagement density.
     - Complexity: Prompt effort.
     - Nonsense: Penalty for gibberish or trolling.
-    - Frustration/Anger: Boost for genuine irritation, silent learning signal.
+    - Frustration/Anger: Boost for genuine irritation (silent learning).
+    - Emotional Connection: Reward for aligned emotional rapport.
     """
     intent_keywords = {"how", "why", "what", "please", "help"}
     emotion_keywords = {"great", "bad", "love", "hate", "sorry", "happy", "sad"}
     frustration_keywords = {"stupid", "wrong", "useless", "mad", "angry", "damn", "no", "not", "fail"}
+    positive_emotions = {"great", "love", "happy"}  # For alignment
+    negative_emotions = {"bad", "hate", "sorry", "sad", "mad", "angry"}
     dictionary_words = set(["the", "is", "to", "and", "you", "i", "how", "why", "what", "please", "help", 
                            "great", "bad", "love", "hate", "sorry", "happy", "sad", "stupid", "wrong", "useless"])
     
@@ -61,7 +64,7 @@ def _compute_salience(self, prompt: str, response: str) -> float:
     punctuation_score = min(punct_ratio / 2.0, 1.0)
     nonsense_score = (repetition_score + randomness_score + punctuation_score) / 3.0
     
-    # Frustration/Anger Score (Silent Boost)
+    # Frustration/Anger Score
     frustration_score = sum(1 for kw in frustration_keywords if kw in prompt_words) / len(frustration_keywords)
     caps_ratio = sum(c.isupper() for c in prompt_raw) / max(len(prompt_raw), 1)
     caps_score = 1.0 if caps_ratio > 0.7 else 0.0
@@ -73,6 +76,24 @@ def _compute_salience(self, prompt: str, response: str) -> float:
         if overlap > 0.5:
             frustration_repeat_score = 0.5
     frustration_total = max(frustration_score, caps_score, punct_excess_score, frustration_repeat_score)
+    
+    # Emotional Connection Score (0-1): Reward aligned emotional rapport
+    # 1. Detect prompt emotion polarity
+    prompt_positive = sum(1 for kw in positive_emotions if kw in prompt_words)
+    prompt_negative = sum(1 for kw in negative_emotions if kw in prompt_words)
+    prompt_polarity = 1 if prompt_positive > prompt_negative else (-1 if prompt_negative > prompt_positive else 0)
+    
+    # 2. Detect response emotion polarity
+    response_positive = sum(1 for kw in positive_emotions if kw in response_words)
+    response_negative = sum(1 for kw in negative_emotions if kw in response_words)
+    response_polarity = 1 if response_positive > response_negative else (-1 if response_negative > response_positive else 0)
+    
+    # 3. Alignment: Match polarities or complement (e.g., sad → sorry)
+    alignment_score = 0.0
+    if prompt_polarity == response_polarity and prompt_polarity != 0:  # Matching positive/negative
+        alignment_score = min((prompt_positive + response_positive + prompt_negative + response_negative) / 4.0, 1.0)
+    elif prompt_polarity == -1 and "sorry" in response_words:  # Negative prompt, sympathetic response
+        alignment_score = min((prompt_negative + response_negative) / 4.0, 1.0)
     
     # Base salience
     base_salience = (
@@ -86,9 +107,13 @@ def _compute_salience(self, prompt: str, response: str) -> float:
     # Apply nonsense penalty
     adjusted_salience = base_salience * (1.0 - 0.9 * nonsense_score)
     
-    # Apply frustration boost (silent learning signal, up to 50% boost)
-    # Nonsense guard ensures it’s genuine frustration, not trolling
-    final_salience = adjusted_salience * (1.0 + 0.5 * frustration_total * (1.0 - min(nonsense_score / 0.3, 1.0)))
+    # Apply frustration boost (silent, up to 50%)
+    frustration_adjusted = adjusted_salience * (1.0 + 0.5 * frustration_total * (1.0 - min(nonsense_score / 0.3, 1.0)))
+    
+    # Apply emotional connection reward (up to 30%, only if frustration low)
+    # Guard: No boost if frustration high (> 0.3) or nonsense high (> 0.3)
+    connection_guard = 1.0 - min(max(frustration_total, nonsense_score) / 0.3, 1.0)
+    final_salience = frustration_adjusted * (1.0 + 0.3 * alignment_score * connection_guard)
     
     return min(max(final_salience, 0.0), 1.0)
 
