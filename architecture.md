@@ -135,3 +135,256 @@ Research directions include exploring more sophisticated salience detection algo
 ## 7. Conclusion
 
 The Dual-Model Adaptive Orchestrators (DMAO) framework, utilizing a static Foundational LM and a dynamically adapted Cognitive Scaffold via Parameter-Efficient Fine-Tuning and Asynchronous Synaptic Consolidation, presents a pragmatic and promising architecture for endowing LLMs with persistent personalization capabilities. By separating general knowledge from adaptable user context and employing efficient, stable offline learning mechanisms, DMAO offers a pathway to overcome the static limitations of current models. This approach potentially paves the way for LLMs that can genuinely learn from interactions, evolving alongside users to provide richer, more effective, and personalized experiences while maintaining computational feasibility and model stability. Further research and empirical validation are necessary to fully realize the potential of this framework.
+
+# Title: Integrating Empathic and User-Centric Adaptation into Large Language Models: A Framework for Personality-Aware AI Systems
+
+Abstract
+This paper presents a comprehensive framework for augmenting large language models (LLMs) with empathic reasoning and user temperament adaptation capabilities. We propose a dual-model architecture combining a frozen base LLM with an adaptive scaffold model, enhanced by affective computing modules and dynamic training prioritization. The system employs psychological trait theory, real-time salience scoring, and personality-aware attention mechanisms to optimize responses for individual user preferences. We formalize a three-phase adaptation process (detection, integration, refinement) and demonstrate its effectiveness through a novel evaluation metric combining behavioral alignment and affective coherence.
+
+1. Introduction
+1.1 The Empathic Adaptation Challenge
+Modern LLMs exhibit remarkable linguistic competence but lack sustained personality adaptation capabilities. Current approaches (e.g., prompt engineering, fine-tuning) fail to address three fundamental requirements:
+
+Continuous learning from sparse emotional signals
+
+Cross-session memory of user preferences
+
+Context-aware modulation of response strategies
+
+1.2 Theoretical Foundations
+Our framework integrates:
+
+Five Factor Model (FFM) for trait quantification [1]
+
+Affective Event Theory for emotional salience detection [2]
+
+Neural Scaffolding through parameter-efficient adaptation [3]
+
+1.3 System Overview
+The architecture combines:
+
+Base Model: Frozen LLM (e.g., LLaMA-2 70B)
+
+Scaffold Model: LoRA-adapted smaller LLM with:
+
+Affective cross-attention modules
+
+Trait-specific parameter routing
+
+Adaptation Engine: Real-time processing pipeline featuring:
+
+Multi-modal salience scoring
+
+Dynamic training prioritization
+
+Synthetic persona preservation
+
+2. Related Work
+2.1 Personality in Conversational AI
+Prior work falls into three categories:
+
+Static persona embeddings [4]
+
+Reinforcement learning from human feedback [5]
+
+Memory-augmented networks [6]
+
+2.2 Limitations of Current Approaches
+Existing systems exhibit:
+
+Catastrophic forgetting of user preferences
+
+Poor cross-domain trait generalization
+
+Black-box adaptation processes
+
+3. Methodology
+3.1 Architectural Components
+
+System Architecture
+
+3.1.1 Affective Salience Detector
+Implements hybrid processing:
+
+python
+Copy
+class HybridAffectiveScorer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.text_encoder = DeBERTa-v3(base="large") 
+        self.audio_encoder = Wav2Vec2.0()
+        self.fusion = CrossmodalAttention(
+            dim=1024,
+            heads=8,
+            dropout=0.1
+        )
+        self.trait_predictor = nn.Sequential(
+            DynamicRoutingLayer(
+                in_dim=2048,
+                out_dims=[256]*5,  # FFM dimensions
+                routing_weights=LearnedRouter()
+            ),
+            FFMNormalizationLayer()
+        )
+3.1.2 Adaptive Training Scheduler
+Implements neurosymbolic rules:
+
+Copy
+IF (User_Neuroticism > 0.7 AND Context_Valence < 0.3)  
+THEN BoostLearningRate(2.0x)  
+APPLY ResponseSofteningTransform  
+3.2 Trait-Aware Attention Mechanism
+Modifies standard attention through FFM-guided gating:
+
+<div align="center"> <img src="https://i.imgur.com/5GjKZ0m.png" width="400"> </div>
+Equation 1: Personality-modulated attention
+
+Attention
+(
+Q
+,
+K
+,
+V
+)
+ffm
+=
+∑
+i
+=
+1
+5
+ω
+i
+⋅
+softmax
+(
+Q
+W
+i
+Q
+(
+K
+W
+i
+K
+)
+T
+d
+k
+)
+V
+W
+i
+V
+Attention(Q,K,V) 
+ffm
+​
+ = 
+i=1
+∑
+5
+​
+ ω 
+i
+​
+ ⋅softmax( 
+d 
+k
+​
+ 
+​
+ 
+QW 
+i
+Q
+​
+ (KW 
+i
+K
+​
+ ) 
+T
+ 
+​
+ )VW 
+i
+V
+​
+ 
+Where 
+ω
+i
+ω 
+i
+​
+  represents FFM trait weights learned through:
+
+ω
+i
+=
+σ
+(
+MLP
+(
+[
+u
+t
+;
+h
+t
+−
+1
+]
+)
+)
+ω 
+i
+​
+ =σ(MLP([u 
+t
+​
+ ;h 
+t−1
+​
+ ]))
+4. Implementation
+4.1 Dynamic Parameter Routing
+Implements trait-specific LoRA pathways:
+
+python
+Copy
+class TraitAwareLoRA(nn.Module):
+    def __init__(self, base_layer, rank=8):
+        super().__init__()
+        self.base = base_layer
+        self.lora_A = nn.ParameterDict({
+            trait: nn.Parameter(torch.randn(rank, base_layer.in_features))
+            for trait in ['openness', 'conscientiousness', 'extraversion', 
+                        'agreeableness', 'neuroticism']
+        })
+        self.lora_B = nn.ParameterDict({
+            trait: nn.Parameter(torch.randn(base_layer.out_features, rank))
+            for trait in ['openness', 'conscientiousness', 'extraversion',
+                        'agreeableness', 'neuroticism']
+        })
+        self.router = TraitRouterNetwork()
+
+    def forward(self, x, trait_vector):
+        base_out = self.base(x)
+        route_weights = self.router(trait_vector)
+        lora_out = sum(
+            weight * (x @ self.lora_A[trait].T) @ self.lora_B[trait].T
+            for trait, weight in route_weights.items()
+        )
+        return base_out + lora_out
+4.2 Continuous Adaptation Loop
+Implements four-stage process:
+
+Multi-Signal Detection (text, voice, interaction patterns)
+
+Trait Vector Estimation (FFM with uncertainty modeling)
+
+Response Generation (trait-guided beam search)
+
+Feedback Integration (explicit & implicit signals)
