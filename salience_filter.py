@@ -388,3 +388,114 @@ if __name__ == "__main__":
                 print("\nResponse:", response)
     finally:
         # ... [Existing cleanup] ...
+        
+        
+        
+        #vader
+        
+        
+        import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from datetime import datetime
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+class SalienceFilter(nn.Module):
+    def __init__(self):
+        super(SalienceFilter, self).__init__()
+        self.intent_keywords = {"how", "why", "what", "please", "help"}
+        self.frustration_keywords = {"stupid", "wrong", "useless", "mad", "angry", "no", "not", "fail"}
+        self.vader_analyzer = SentimentIntensityAnalyzer()  # Initialize Vader sentiment analyzer
+
+    def timestamp_to_seconds(self, timestamp):
+        # Convert timestamp (string) to seconds since epoch
+        return int(datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").timestamp())
+
+    def compute_intent_score(self, prompt):
+        # Count intent-related keywords in the prompt
+        prompt_words = set(prompt.lower().split())
+        intent_score = sum(1 for kw in self.intent_keywords if kw in prompt_words) / len(self.intent_keywords)
+        return torch.tensor(intent_score, dtype=torch.float)
+
+    def compute_emotion_score(self, prompt, response):
+        # Use Vader to analyze sentiment of prompt and response
+        prompt_sentiment = self.vader_analyzer.polarity_scores(prompt)["compound"]
+        response_sentiment = self.vader_analyzer.polarity_scores(response)["compound"]
+        
+        # Normalize Vader output (-1 to 1) to a 0-1 scale
+        normalized_prompt_sentiment = (prompt_sentiment + 1) / 2
+        normalized_response_sentiment = (response_sentiment + 1) / 2
+        
+        # Average the sentiment scores for overall emotional weight
+        emotion_score = (normalized_prompt_sentiment + normalized_response_sentiment) / 2
+        return torch.tensor(emotion_score, dtype=torch.float)
+
+    def compute_engagement_density(self, timestamps):
+        # Calculate interaction frequency
+        seconds = [self.timestamp_to_seconds(ts) for ts in timestamps]
+        time_diffs = [seconds[i+1] - seconds[i] for i in range(len(seconds)-1)]
+        if not time_diffs:  # Single interaction case
+            return torch.tensor(1.0, dtype=torch.float)
+        avg_diff = sum(time_diffs) / len(time_diffs)
+        # Normalize (arbitrary scale for salience)
+        engagement_score = 1.0 / (1.0 + avg_diff / 60)  # Engagement decays with time gap
+        return torch.tensor(engagement_score, dtype=torch.float)
+
+    def compute_complexity_score(self, prompt):
+        # Measure linguistic complexity based on length and punctuation
+        punctuation_count = prompt.count('.') + prompt.count('!') + prompt.count('?')
+        word_count = len(prompt.split())
+        complexity_score = min((word_count + punctuation_count) / 15.0, 1.0)  # Normalized
+        return torch.tensor(complexity_score, dtype=torch.float)
+
+    def compute_frustration_penalty(self, prompt):
+        # Look for frustration signals using keywords and sentiment analysis
+        prompt_words = set(prompt.lower().split())
+        frustration_score = sum(1 for kw in self.frustration_keywords if kw in prompt_words) / len(self.frustration_keywords)
+        
+        # Use Vader sentiment for frustration detection (negative sentiment indicates frustration)
+        sentiment = self.vader_analyzer.polarity_scores(prompt)["compound"]
+        sentiment_penalty = 0.0 if sentiment >= 0 else abs(sentiment)  # Higher penalty for stronger negative sentiment
+        
+        # Combine keyword and sentiment-based frustration signals
+        total_penalty = 1.0 - (frustration_score + sentiment_penalty) / 2
+        return torch.tensor(total_penalty, dtype=torch.float)
+
+    def compute_alignment_reward(self, prompt, response):
+        # Use Vader sentiment to check emotional alignment
+        prompt_sentiment = self.vader_analyzer.polarity_scores(prompt)["compound"]
+        response_sentiment = self.vader_analyzer.polarity_scores(response)["compound"]
+        
+        # Reward alignment if both sentiments are either positive or negative
+        if (prompt_sentiment > 0 and response_sentiment > 0) or (prompt_sentiment < 0 and response_sentiment < 0):
+            reward = 0.3  # Positive or negative alignment
+        else:
+            reward = 0.0  # No alignment
+        return torch.tensor(reward, dtype=torch.float)
+
+    def forward(self, prompt, response, timestamps):
+        # Calculate individual metrics
+        intent_score = self.compute_intent_score(prompt)
+        emotion_score = self.compute_emotion_score(prompt, response)
+        engagement_score = self.compute_engagement_density(timestamps)
+        complexity_score = self.compute_complexity_score(prompt)
+        frustration_penalty = self.compute_frustration_penalty(prompt)
+        alignment_reward = self.compute_alignment_reward(prompt, response)
+        
+        # Base salience score
+        base_salience = 0.25 * intent_score + 0.25 * emotion_score + 0.2 * engagement_score + 0.15 * complexity_score
+        
+        # Apply adjustments
+        adjusted_salience = base_salience * frustration_penalty  # Frustration reduces salience
+        final_salience = adjusted_salience + alignment_reward  # Alignment increases salience
+        
+        return torch.clamp(final_salience, 0.0, 1.0)  # Ensure salience is within [0, 1]
+
+# Example Usage
+filter = SalienceFilter()
+prompt = "How do I fix this problem? It's so frustrating!"
+response = "I'm sorry to hear that. Let me help."
+timestamps = ["2025-04-07 05:00:00", "2025-04-07 05:01:00", "2025-04-07 05:03:00"]
+
+salience = filter(prompt, response, timestamps)
+print("Final Salience Score:", salience.item())
