@@ -15,27 +15,36 @@ import json
 with open("config.json", "r") as f:
     config = json.load(f)
 
-# Extract variables from config
-BASE_MODEL_NAME = config["base_model_name"]
-SCAFFOLD_MODEL_NAME = config["scaffold_model_name"]
-CROSS_ATTN_LAYERS = config["cross_attn_layers"]
-USE_DYNAMIC_LAYERS = config["use_dynamic_layers"]
-LAYER_SELECTION_MODE = config["layer_selection_mode"]
-CUSTOM_LAYERS = config["custom_layers"]
-VALID_SPLIT_RATIO = config["valid_split_ratio"]
-RANDOM_SEED = config["random_seed"]
+# Extract variables from config with defaults
+def get_config_value(config, key, default=None):
+    try:
+        return config[key]
+    except KeyError:
+        print(f"Warning: '{key}' missing in config.json. Using default: {default}")
+        return default
+
+BASE_MODEL_NAME = get_config_value(config, "base_model_name", "gpt2")
+SCAFFOLD_MODEL_NAME = get_config_value(config, "scaffold_model_name", "gpt2")
+CROSS_ATTN_LAYERS = get_config_value(config, "cross_attn_layers", [0, 1, 2])
+USE_DYNAMIC_LAYERS = get_config_value(config, "use_dynamic_layers", False)
+LAYER_SELECTION_MODE = get_config_value(config, "layer_selection_mode", "balanced")
+CUSTOM_LAYERS = get_config_value(config, "custom_layers", [])
+VALID_SPLIT_RATIO = get_config_value(config, "valid_split_ratio", 0.2)
+RANDOM_SEED = get_config_value(config, "random_seed", 42)
 
 # LoRA Configuration
-LORA_RANK = config["lora_config"]["lora_rank"]
-LORA_ALPHA = config["lora_config"]["lora_alpha"]
-LORA_DROPOUT = config["lora_config"]["lora_dropout"]
-LORA_TARGET_MODULES = config["lora_config"]["lora_target_modules"]
+lora_config = get_config_value(config, "lora_config", {})
+LORA_RANK = get_config_value(lora_config, "lora_rank", 8)
+LORA_ALPHA = get_config_value(lora_config, "lora_alpha", 16)
+LORA_DROPOUT = get_config_value(lora_config, "lora_dropout", 0.1)
+LORA_TARGET_MODULES = get_config_value(lora_config, "lora_target_modules", ["q_proj", "v_proj"])
 
 # Training Config
-LEARNING_RATE = config["training_config"]["learning_rate"]
-TRAIN_EPOCHS = config["training_config"]["train_epochs"]
-BATCH_SIZE = config["training_config"]["batch_size"]
-MAX_SEQ_LENGTH = config["training_config"]["max_seq_length"]
+training_config = get_config_value(config, "training_config", {})
+LEARNING_RATE = get_config_value(training_config, "learning_rate", 2e-5)
+TRAIN_EPOCHS = get_config_value(training_config, "train_epochs", 3)
+BATCH_SIZE = get_config_value(training_config, "batch_size", 2)
+MAX_SEQ_LENGTH = get_config_value(training_config, "max_seq_length", 512)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
@@ -112,31 +121,34 @@ class SimpleCrossAttentionFuser(nn.Module):
 # --- MAIN SYSTEM ---
 class BareBonesDMAO_Learn:
     def __init__(self):
+        self.quantization_mode = "fp16"  # Default: full precision (FP16/BF16), options: "fp16", "int8", "int4"
+        self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+        self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
 
         # --- LOAD BASE MODEL (frozen) ---
         print(f"Loading base model: {BASE_MODEL_NAME}")
-        self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+        quantization_config = {}
+        if self.quantization_mode == "int8":
+            quantization_config["load_in_8bit"] = True
+        elif self.quantization_mode == "int4":
+            quantization_config["load_in_4bit"] = True
         self.base_model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL_NAME, config=self.base_config
+            BASE_MODEL_NAME,
+            config=self.base_config,
+            **quantization_config
         ).to(DEVICE)
         print_memory_stats("After base model load")
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
         print(f"Base model '{BASE_MODEL_NAME}' loaded and frozen.")
-        # Apply quantization if enabled
-        if self.quantization_mode in ["int8", "int4"]:
-            if self.quantization_mode == "int8":
-                self.base_model = bnb.nn.modules.Linear8bitLt.quantize(self.base_model)
-            elif self.quantization_mode == "int4":
-                self.base_model = bnb.nn.modules.Linear4bit.quantize(self.base_model)
-            print(f"Base model quantized to {self.quantization_mode}")
 
         # --- LOAD SCAFFOLD MODEL (dynamic) ---
         print(f"Loading scaffold model: {SCAFFOLD_MODEL_NAME}")
-        self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
         scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
-            SCAFFOLD_MODEL_NAME, config=self.scaffold_config
+            SCAFFOLD_MODEL_NAME,
+            config=self.scaffold_config,
+            **quantization_config
         )
         print(f"Scaffold model '{SCAFFOLD_MODEL_NAME}' loaded.")
         print_memory_stats("After scaffold model load")
@@ -155,13 +167,6 @@ class BareBonesDMAO_Learn:
         self.scaffold_model.to(DEVICE)
         print("LoRA adapters applied. Trainable scaffold parameters:")
         self.scaffold_model.print_trainable_parameters()
-        # Apply quantization if enabled (LoRA adapters remain FP16 for training)
-        if self.quantization_mode in ["int8", "int4"]:
-            if self.quantization_mode == "int8":
-              self.scaffold_model = bnb.nn.modules.Linear8bitLt.quantize(self.scaffold_model)
-            elif self.quantization_mode == "int4":
-              self.scaffold_model = bnb.nn.modules.Linear4bit.quantize(self.scaffold_model)
-            print(f"Scaffold model quantized to {self.quantization_mode}")
 
         # --- LOAD TOKENIZERS ---
         print(f"Loading base tokenizer from: {BASE_MODEL_NAME}")
@@ -236,7 +241,6 @@ class BareBonesDMAO_Learn:
         self.best_valid_loss = float('inf')
         self.patience = 0
         self.max_patience = 2
-        self.quantization_mode = "fp16"  # Default: full precision (FP16/BF16), options: "fp16", "int8", "int4"
         print("Quantization mode set to:", self.quantization_mode)
         print("Initialization complete. Optimizer needs setup before training.")
 
@@ -286,10 +290,13 @@ class BareBonesDMAO_Learn:
         num_base_layers = len(base_layers)
         hidden_dim = self.base_config.hidden_size
         num_heads = self.base_config.num_attention_heads
-
+    
         if self.scaffold_config.hidden_size != hidden_dim:
-            print(f"Warning: Scaffold hidden size != base hidden size. Add projection if needed.")
-
+            print(f"Warning: Scaffold hidden size ({self.scaffold_config.hidden_size}) != base hidden size ({hidden_dim}). Adding projection.")
+            self.scaffold_proj = nn.Linear(self.scaffold_config.hidden_size, hidden_dim).to(DEVICE)
+        else:
+            self.scaffold_proj = None
+    
         # Toggle between dynamic and fixed layers
         if USE_DYNAMIC_LAYERS:
             cross_attn_layers = get_cross_attention_layers(self.base_model)
@@ -297,12 +304,12 @@ class BareBonesDMAO_Learn:
         else:
             cross_attn_layers = CROSS_ATTN_LAYERS
             print(f"Using fixed layers: {cross_attn_layers}")
-
+    
         for layer_idx in cross_attn_layers:
             if layer_idx >= num_base_layers:
                 print(f"Warning: Layer index {layer_idx} out of bounds ({num_base_layers} layers). Skipping.")
                 continue
-
+            
             original_layer = base_layers[layer_idx]
             cross_attn_fuser = SimpleCrossAttentionFuser(
                 hidden_dim=hidden_dim,
@@ -310,68 +317,28 @@ class BareBonesDMAO_Learn:
             ).to(DEVICE)
             for param in cross_attn_fuser.parameters():
                 param.requires_grad = False
-
+    
             class ModifiedLayer(nn.Module):
                 def __init__(self, orig_layer, cross_attn_module, parent_system):
                     super().__init__()
                     self.orig_layer = orig_layer
                     self.cross_attn = cross_attn_module
                     self._parent_system = parent_system
-
+    
                 def forward(self, hidden_states, **kwargs):
                     outputs = self.orig_layer(hidden_states, **kwargs)
                     base_hidden_state_output = outputs[0] if isinstance(outputs, tuple) else outputs
                     scaffold_context = getattr(self._parent_system, '_temp_scaffold_context', None)
-
+    
                     if scaffold_context is not None:
                         scaffold_context = scaffold_context.to(base_hidden_state_output.device)
+                        if self._parent_system.scaffold_proj is not None:
+                            scaffold_context = self._parent_system.scaffold_proj(scaffold_context)
                         fused_hidden_state = self.cross_attn(base_hidden_state_output, scaffold_context)
                         final_outputs = (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
                         return final_outputs
-                    else:
-                        return outputs
-
-            base_layers[layer_idx] = ModifiedLayer(original_layer, cross_attn_fuser, self)
-            print(f"Successfully injected wrapper into layer {layer_idx}")
-
-        if self.scaffold_config.hidden_size != hidden_dim:
-            print(f"Warning: Scaffold hidden size != base hidden size. Add projection if needed.")
-
-        print(f"Injecting CrossAttentionFuser at layers: {CROSS_ATTN_LAYERS}")
-
-        for layer_idx in CROSS_ATTN_LAYERS:
-            if layer_idx >= num_base_layers:
-                print(f"Warning: Layer index {layer_idx} out of bounds ({num_base_layers} layers). Skipping.")
-                continue
-
-            original_layer = base_layers[layer_idx]
-            cross_attn_fuser = SimpleCrossAttentionFuser(
-                hidden_dim=hidden_dim,
-                num_heads=num_heads
-            ).to(DEVICE)
-            for param in cross_attn_fuser.parameters():
-                param.requires_grad = False
-
-            class ModifiedLayer(nn.Module):
-                def __init__(self, orig_layer, cross_attn_module, parent_system):
-                    super().__init__()
-                    self.orig_layer = orig_layer
-                    self.cross_attn = cross_attn_module
-                    self._parent_system = parent_system
-
-                def forward(self, hidden_states, **kwargs):
-                    outputs = self.orig_layer(hidden_states, **kwargs)
-                    base_hidden_state_output = outputs[0] if isinstance(outputs, tuple) else outputs
-                    scaffold_context = getattr(self._parent_system, '_temp_scaffold_context', None)
-
-                    if scaffold_context is not None:
-                        scaffold_context = scaffold_context.to(base_hidden_state_output.device)
-                        fused_hidden_state = self.cross_attn(base_hidden_state_output, scaffold_context)
-                        final_outputs = (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
-                        return final_outputs
-                    else:
-                        return outputs
-
+                    return outputs
+    
             base_layers[layer_idx] = ModifiedLayer(original_layer, cross_attn_fuser, self)
             print(f"Successfully injected wrapper into layer {layer_idx}")
 
@@ -466,8 +433,7 @@ class BareBonesDMAO_Learn:
             labels[i, :actual_prompt_len_in_batch] = -100
 
         with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
-            scaffold_core_model = self.scaffold_model.base_model.transformer if hasattr(self.scaffold_model.base_model, 'transformer') else self.scaffold_model.base_model.model
-            scaffold_outputs = scaffold_core_model(
+            scaffold_outputs = self.scaffold_model(
                 **scaffold_inputs,
                 output_hidden_states=True
             )
@@ -494,17 +460,11 @@ class BareBonesDMAO_Learn:
         scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
 
-        if hasattr(self, 'global_step'):
-            if (self.global_step + 1) % accumulation_steps == 0:
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
-        else:
-            print("Warning: global_step not defined. Running without accumulation logic.")
-            self.optimizer.zero_grad()
-            loss.backward()
+        if (self.global_step + 1) % accumulation_steps == 0:
             self.optimizer.step()
             self.scheduler.step()
+            self.optimizer.zero_grad()
+        self.global_step += 1  # Increment here
 
         print_memory_stats("After optimizer step")
         self._temp_scaffold_context = None
@@ -668,8 +628,11 @@ class BareBonesDMAO_Learn:
                 'attention_mask': scaffold_attention_mask
             }
 
-            scaffold_outputs = self.scaffold_model.base_model.transformer(**scaffold_inputs)
-            self._temp_scaffold_context = scaffold_outputs.last_hidden_state
+            scaffold_outputs = self.scaffold_model(
+                **scaffold_inputs,
+                output_hidden_states=True
+            )
+            self._temp_scaffold_context = scaffold_outputs.hidden_states[-1]
 
             base_inputs = self.base_tokenizer(
                 full_texts,
