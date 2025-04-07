@@ -122,7 +122,7 @@ class LRFinder:
 
 # python
 # Copy
-# from learning_rate_tool.py import LRFinder
+# from learning_rate_finder_routine.py import LRFinder
 # import random  # Ensure this is imported for sample()
 # Then add this method to your BareBonesDMAO_Learn class:
 
