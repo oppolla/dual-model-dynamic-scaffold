@@ -14,6 +14,7 @@ import contextlib
 from collections import deque
 import uuid
 import threading
+from sklearn.model_selection import KFold
 
 # --- Load Configuration from JSON ---
 with open("config.json", "r") as f:
@@ -49,6 +50,10 @@ LEARNING_RATE = get_config_value(training_config, "learning_rate", 2e-5)
 TRAIN_EPOCHS = get_config_value(training_config, "train_epochs", 3)
 BATCH_SIZE = get_config_value(training_config, "batch_size", 2)
 MAX_SEQ_LENGTH = get_config_value(training_config, "max_seq_length", 512)
+
+# K-Fold Cross Validation config
+k_folds = 5  # Number of folds
+kf = KFold(n_splits=k_folds, shuffle=True, random_state=RANDOM_SEED)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
@@ -287,6 +292,9 @@ class BareBonesDMAO_Learn:
 
         self.logger = ThreadSafeLogger("log.jsonl")
         self.history = ConversationHistory()
+
+        if not TRAIN_DATA or not VALID_DATA:
+            print("Warning: TRAIN_DATA or VALID_DATA is empty. Training may fail as a result.")
 
         print("Quantization mode set to:", self.quantization_mode)
         print("Initialization complete. Optimizer needs setup before training.")
@@ -716,7 +724,12 @@ class BareBonesDMAO_Learn:
                 **scaffold_inputs,
                 output_hidden_states=True
             )
-            actual_outputs = scaffold_outputs.hidden_states if hasattr(scaffold_outputs, 'hidden_states') else scaffold_outputs.base_model_output.hidden_states
+            if hasattr(scaffold_outputs, 'hidden_states'):
+                actual_outputs = scaffold_outputs.hidden_states
+            elif hasattr(scaffold_outputs, 'base_model_output') and hasattr(scaffold_outputs.base_model_output, 'hidden_states'):
+                actual_outputs = scaffold_outputs.base_model_output.hidden_states
+            else:
+                raise AttributeError("Scaffold model output does not contain expected hidden_states structure")
             scaffold_hidden_states = actual_outputs[-1]
     
         self._clear_scaffold_cache()
@@ -860,6 +873,35 @@ class BareBonesDMAO_Learn:
         self._clear_scaffold_cache()
         print(f"New conversation started with ID: {self.history.conversation_id} (Previous ID: {old_id})")
 
+# --- K-Fold Cross Validation Function ---
+def run_k_fold_cross_validation(train_data, k_folds=5):
+    kf = KFold(n_splits=k_folds, shuffle=True, random_state=RANDOM_SEED)
+    fold_results = []
+
+    for fold, (train_idx, valid_idx) in enumerate(kf.split(train_data)):
+        print(f"Training fold {fold+1}/{k_folds}...")
+        fold_train_data = [train_data[i] for i in train_idx]
+        fold_valid_data = [train_data[i] for i in valid_idx]
+
+        # Initialize a new instance of the model for each fold
+        dmao_system = BareBonesDMAO_Learn()
+
+        # Run the training cycle on the current fold
+        dmao_system.run_training_cycle(fold_train_data, fold_valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
+
+        # Evaluate and store the results
+        valid_loss = dmao_system.validate_epoch(fold_valid_data)
+        fold_results.append(valid_loss)
+        print(f"Fold {fold+1} validation loss: {valid_loss}")
+
+        # Cleanup model to free memory
+        dmao_system.cleanup()
+
+    # Calculate the average validation loss across all folds
+    avg_validation_loss = sum(fold_results) / len(fold_results)
+    print(f"Average validation loss across {k_folds} folds: {avg_validation_loss}")
+    return avg_validation_loss
+
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == "__main__":
     print("\nInitializing Bare Bones DMAO System...")
@@ -870,6 +912,9 @@ if __name__ == "__main__":
             dmao_system.enable_dry_run(max_samples=2, max_length=64, validate_architecture=True)
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', or enter a prompt.")
+
+        avg_val_loss = run_k_fold_cross_validation(TRAIN_DATA, k_folds=5)
+        print(f"Average validation loss across all folds: {avg_val_loss}")
 
         while True:
             user_cmd = input("\nEnter command or prompt: ")
