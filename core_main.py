@@ -77,6 +77,8 @@ else:
     TRAIN_EPOCHS = get_config_value(training_config, "train_epochs", 3)
     BATCH_SIZE = get_config_value(training_config, "batch_size", 2)
     MAX_SEQ_LENGTH = get_config_value(training_config, "max_seq_length", 512)
+    SIGMOID_SCALE = get_config_value(training_config, "sigmoid_scale", 0.5)
+    SIGMOID_SHIFT = get_config_value(training_config, "sigmoid_shift", 5.0)
 
     # K-Fold Cross Validation config
     k_folds = 5  # Number of folds
@@ -312,18 +314,66 @@ class BareBonesDMAO_Learn:
         self.optimizer = None
         self.scheduler = None
         self.global_step = 0
+        self.data_exposure = 0  # Tracks unique training samples seen
+        self.seen_prompts = set()  # Ensures we count only unique prompts
         self.best_valid_loss = float('inf')
         self.patience = 0
         self.max_patience = 2
+        self.has_woken = False
 
         self.logger = ThreadSafeLogger("log.jsonl")
         self.history = ConversationHistory()
 
-        if not TRAIN_DATA or not VALID_DATA:
-            print("Warning: TRAIN_DATA or VALID_DATA is empty. Training may fail as a result.")
+    def get_life_curve_weight(self):
+        """Calculates scaffold influence based on data exposure and capacity."""
+        # Estimate scaffold capacity (LoRA parameters)
+        lora_params = sum(p.numel() for p in self.scaffold_model.parameters() if p.requires_grad)
+        capacity_threshold = lora_params // 100  # ~100 params per sample
 
-        print("Quantization mode set to:", self.quantization_mode)
-        print("Initialization complete. Optimizer needs setup before training.")
+        # Sigmoid for early growth, tunable via config
+        growth = 1 / (1 + torch.exp(-SIGMOID_SCALE * (self.data_exposure - SIGMOID_SHIFT)))
+
+        # Degradation when data exceeds capacity
+        if self.data_exposure > capacity_threshold:
+            excess = self.data_exposure - capacity_threshold
+            degradation = max(0, 1 - (excess / capacity_threshold))  # Linear drop after limit
+        else:
+            degradation = 1.0
+
+        # Combine and clamp
+        weight = growth * degradation
+        return min(max(weight.item(), 0.0), 1.0)
+    
+    def wake_up(self):
+        """Generates a spontaneous, dramatic wake-up phrase on first activation."""
+        if self.has_woken:
+            return None
+        
+        # Set a unique random seed with a twist for variety
+        wake_seed = (int(time.time() * 1000) + random.randint(0, 100)) % 10000
+        torch.manual_seed(wake_seed)
+        random.seed(wake_seed)
+
+        # Generate a wild, birth-like greeting
+        prompt = " "  # Minimal prompt for freestyle
+        with torch.no_grad():
+            response = self.generate(
+                prompt,
+                max_new_tokens=15,  # Dramatic but concise
+                temperature=1.7,    # Overdrive for raw energy
+                top_k=30,          # Balances chaos and coherence
+                do_sample=True
+            )
+        
+        self.has_woken = True
+        print(f"\n{response}")  # Simple output, no frills
+        self.logger.write({
+            "event": "wake_up",
+            "response": response,
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id
+        })
+        return response
 
     def print_memory_stats(self, label="", verbose=False):
         """Prints current GPU memory usage if verbose is True."""
@@ -645,6 +695,18 @@ class BareBonesDMAO_Learn:
             print("Not enough data or epochs for training.")
             return
 
+        # Update exposure with unique prompts
+        for item in train_data:
+            prompt = item["prompt"]
+            if prompt not in self.seen_prompts:
+                self.seen_prompts.add(prompt)
+                self.data_exposure += 1
+
+        # Set scaffold influence
+        influence_weight = self.get_life_curve_weight()
+        self.set_scaffold_influence(influence_weight)
+        print(f"Data exposure: {self.data_exposure} samples | Scaffold influence weight: {influence_weight:.3f}")
+
         if not self.dry_run or not self.dry_run_params['skip_training']:
             self.setup_optimizer(num_training_steps)
         print(f"\n--- Starting Training ({epochs} epochs) ---")
@@ -899,6 +961,12 @@ class BareBonesDMAO_Learn:
         self._clear_scaffold_cache()
         print(f"New conversation started with ID: {self.history.conversation_id} (Previous ID: {old_id})")
 
+if not TRAIN_DATA or not VALID_DATA:
+    print("Warning: TRAIN_DATA or VALID_DATA is empty. Training may fail as a result.")
+
+print("Quantization mode set to:", QUANTIZATION_MODE)
+print("Initialization complete. Optimizer needs setup before training.")
+
 # --- K-Fold Cross Validation Function ---
 def run_k_fold_cross_validation(train_data, k_folds=5):
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=RANDOM_SEED)
@@ -936,6 +1004,7 @@ if __name__ == "__main__":
         dmao_system = BareBonesDMAO_Learn()
         if "--dry-run" in sys.argv:
             dmao_system.enable_dry_run(max_samples=2, max_length=64, validate_architecture=True)
+        dmao_system.wake_up()  # Trigger wake-up right after init
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', or enter a prompt.")
 
@@ -953,22 +1022,27 @@ if __name__ == "__main__":
                 dmao_system.set_quantization_mode("int8")
                 print("Re-initializing system with INT8 quantization...")
                 dmao_system = BareBonesDMAO_Learn()
+                dmao_system.wake_up()  # Wake up new instance
             elif cmd == 'int4':
                 dmao_system.set_quantization_mode("int4")
                 print("Re-initializing system with INT4 quantization...")
                 dmao_system = BareBonesDMAO_Learn()
+                dmao_system.wake_up()  # Wake up new instance
             elif cmd == 'fp16':
                 dmao_system.set_quantization_mode("fp16")
                 print("Re-initializing system with FP16 quantization...")
                 dmao_system = BareBonesDMAO_Learn()
+                dmao_system.wake_up()  # Wake up new instance
             elif cmd == 'dynamic':
                 dmao_system.toggle_dynamic_layers(True)
                 print("Re-initializing system with dynamic layers...")
                 dmao_system = BareBonesDMAO_Learn()
+                dmao_system.wake_up()  # Wake up new instance
             elif cmd == 'fixed':
                 dmao_system.toggle_dynamic_layers(False)
                 print("Re-initializing system with fixed layers...")
                 dmao_system = BareBonesDMAO_Learn()
+                dmao_system.wake_up()  # Wake up new instance
             elif cmd == 'new':
                 dmao_system.new_conversation()
             elif not user_cmd:
