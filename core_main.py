@@ -19,12 +19,13 @@ def load_jsonl(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
-                entry = json.loads(line.strip())
-                data.append({"prompt": entry["prompt"], "completion": entry["response"]})
+                try:
+                    entry = json.loads(line.strip())
+                    data.append({"prompt": entry["prompt"], "completion": entry["response"]})
+                except json.JSONDecodeError:
+                    print(f"Error: Failed to decode JSON from line: {line.strip()}. Skipping this line.")
     except FileNotFoundError:
         print(f"Warning: {file_path} not found. Starting with empty data!")
-    except json.JSONDecodeError:
-        print(f"Error: Failed to decode JSON from {file_path}. Check the file format.")
     except IOError as e:
         print(f"Error: I/O error({e.errno}): {e.strerror}.")
     except Exception as e:
