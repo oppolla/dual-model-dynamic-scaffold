@@ -22,4 +22,21 @@
     "sigmoid_scale": 0.5,
     "sigmoid_shift": 5.0
   }
+
+"controls_config": {
+    "sleep_conf_threshold": 0.7,
+    "sleep_time_factor": 1.0,
+    "sleep_log_min": 10,
+    "dream_swing_var": 0.1,
+    "dream_lifecycle_delta": 0.1,
+    "dream_temperament_on": true,
+    "dream_noise_scale": 0.05,
+    "temp_eager_threshold": 0.8,
+    "temp_sluggish_threshold": 0.6,
+    "temp_mood_influence": 0.0,
+    "scaffold_weight_cap": 1.0,
+    "base_temperature": 0.7,
+    "save_path_prefix": "state"
+}
+
 }
