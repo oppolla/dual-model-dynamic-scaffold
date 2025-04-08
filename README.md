@@ -1,81 +1,60 @@
 # Dual-Model Dynamic Scaffold with Asynchronous Training Phase for dynamic LLM personalization
 
 ## Overview
-The DMDF System is an prototype AI architecture that combines a large base model with a smaller "scaffold" model for efficient, adaptive inference. The system dynamically coordinates between models using cross-attention and continuously improves through background training.
-
-## Key Components of Prototype Implementation
-
-### Core Models
-
-- **Base Model:** Large frozen LLM (`deepseek-llm-67b-chat`)
-
-- **Scaffold Model:** Smaller adaptable model (`deepseek-r1-distill-qwen1.5-1.5b`) with dynamic LoRA layers
-
-
-## Innovative Modules
-
-**AdaptiveLoRALinear:** Dynamically adjusts LoRA rank based on learned importance
-
-**SparseCrossAttention:** Efficient top-k attention between models
-
-**CrossAttentionFuser:** Intelligently combines base and scaffold outputs
-
-**SalienceScorer:** Evaluates interaction importance using BERT
+A lightweight, modular framework for dynamic language model augmentation using cross-attention and LoRA adapters. Designed for controllable text generation with memory, temperament modeling, and adaptive training.
 
 ## Key Features
+- **Dual-Model Architecture**: Combines a frozen base LLM with trainable scaffold models via cross-attention
+- **Dynamic Memory Integration**: 
+  - Short-term conversation memory
+  - Learned token mapping memory
+  - "Dream" memory consolidation during sleep phases
+- **Temperament Modeling**: 
+  - Mood-influenced generation (eager/restless/melancholic)
+  - Confidence-based self-regulation
+  - Lifecycle-aware capacity scaling
+- **Efficient Training**:
+  - LoRA adapters for parameter-efficient fine-tuning
+  - FP16/INT8/INT4 quantization support
+  - Dynamic layer selection
+- **Interactive Controls**:
+  - Real-time parameter adjustment
+  - Multiple memory modes
+  - Custom training schedules
+ 
+## Architecture Overview
+Base Model (Frozen)
+↑
+Cross-Attention Fusion ← Scaffold Model (LoRA-adapted)
+↑
+Temperament Controls
+↑
+Memory Systems:
+Conversation History
+Token Mapping
+Dream Memory
 
-### Dynamic Adaptation:
+## Core Components
+### Cross-Attention Fusion
+- Injects attention layers between base and scaffold models
+- Configurable layer selection (early/late/custom)
+- Dynamic influence weighting
 
-- LoRA layers automatically adjust their rank
+### Memory Systems
+Type	Function	Control Parameters
+Conversation	Maintains dialog context	dream_memory_maxlen
+Token Mapping	Learns token-level associations	use_token_map_memory
+Dream Memory	Consolidates experiences	dream_noise_scale
 
-- Cross-attention gates scaffold contributions based on confidence
-
-### Continuous Learning:
-
-- Background training scheduler
-
-- Cluster-based data sampling
-
-- Automatic rollback on failure
-
-### Resource Awareness:
-
-- System load monitoring
-
-- Training time limits
-
-- Gradient checkpointing
-
-## Configuration
-
-The system has some configurable parameters including:
-
-- Training intervals (default: 5 minutes)
-
-- Minimum training examples (default: 50)
-
-- System load limits (default: 70%)
-
-- Salience thresholds (default: 0.75)
-
-- Training epochs (default: 3)
-
-- More planned (see TODO.md)
-
+### Temperament Controls
 ```
-system = ASCSystem()
-response = system.generate_response(user_input)
-system.log_interaction(user_input, response)
+# Adjust temperament parameters
+system.adjust_temperament(
+    eager_threshold=0.8,
+    mood_influence=0.3,
+    curiosity_boost=0.2
+)
 ```
 
-## Requirements
 
-- PyTorch
 
-- Transformers
-
-- PEFT (Parameter-Efficient Fine-Tuning)
-
-- Scikit-learn (for clustering)
-
-- PSutil (for system monitoring)
