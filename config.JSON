@@ -1,13 +1,15 @@
 {
-  "base_model_name": "gpt2",
-  "scaffold_model_name": "gpt2",
-  "cross_attn_layers": [5, 7],
-  "use_dynamic_layers": false,
-  "layer_selection_mode": "balanced",
-  "custom_layers": null,
-  "valid_split_ratio": 0.2,
-  "random_seed": 42,
-  "quantization": "fp16",
+  "core_config": {
+    "base_model_name": "gpt2",
+    "scaffold_model_name": "gpt2",
+    "cross_attn_layers": [5, 7],
+    "use_dynamic_layers": false,
+    "layer_selection_mode": "balanced",
+    "custom_layers": null,
+    "valid_split_ratio": 0.2,
+    "random_seed": 42,
+    "quantization": "fp16"
+  },
   "lora_config": {
     "lora_rank": 8,
     "lora_alpha": 16,
@@ -21,9 +23,8 @@
     "max_seq_length": 128,
     "sigmoid_scale": 0.5,
     "sigmoid_shift": 5.0
-  }
-
-"controls_config": {
+  },
+  "controls_config": {
     "sleep_conf_threshold": 0.7,
     "sleep_time_factor": 1.0,
     "sleep_log_min": 10,
@@ -37,6 +38,5 @@
     "scaffold_weight_cap": 1.0,
     "base_temperature": 0.7,
     "save_path_prefix": "state"
-}
-
+  }
 }
