@@ -18,6 +18,8 @@
     "learning_rate": 0.0003,
     "train_epochs": 3,
     "batch_size": 1,
-    "max_seq_length": 128
+    "max_seq_length": 128,
+    "sigmoid_scale": 0.5,
+    "sigmoid_shift": 5.0
   }
 }
