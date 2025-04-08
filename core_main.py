@@ -18,87 +18,99 @@ from sklearn.model_selection import KFold
 # --- Load Training Data from JSONL ---
 def load_jsonl(file_path):
     data = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            entry = json.loads(line.strip())
-            processed_entry = {
-                "prompt": entry["prompt"],
-                "completion": entry["response"]
-            }
-            data.append(processed_entry)
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                entry = json.loads(line.strip())
+                processed_entry = {
+                    "prompt": entry["prompt"],
+                    "completion": entry["response"]
+                }
+                data.append(processed_entry)
+    except FileNotFoundError:
+        print(f"Warning: {file_path} not found. Starting with empty data—training will skip until you add data!")
+        data = []
     return data
 
 TRAIN_DATA = load_jsonl("sample_log.jsonl")
+if not TRAIN_DATA:
+    print("Error: No data loaded from sample_log.jsonl. Please add at least one valid line!")
+else:
+    # --- Load Configuration from JSON ---
+    with open("config.json", "r") as f:
+        config = json.load(f)
 
-# --- Load Configuration from JSON ---
-with open("config.json", "r") as f:
-    config = json.load(f)
+    # Extract variables from config with defaults
+    def get_config_value(config, key, default=None):
+        try:
+            return config[key]
+        except KeyError:
+            print(f"Warning: '{key}' missing in config.json. Using default: {default}")
+            return default
 
-# Extract variables from config with defaults
-def get_config_value(config, key, default=None):
-    try:
-        return config[key]
-    except KeyError:
-        print(f"Warning: '{key}' missing in config.json. Using default: {default}")
-        return default
+    BASE_MODEL_NAME = get_config_value(config, "base_model_name", "gpt2")
+    SCAFFOLD_MODEL_NAME = get_config_value(config, "scaffold_model_name", "gpt2")
+    CROSS_ATTN_LAYERS = get_config_value(config, "cross_attn_layers", [0, 1, 2])
+    USE_DYNAMIC_LAYERS = get_config_value(config, "use_dynamic_layers", False)
+    LAYER_SELECTION_MODE = get_config_value(config, "layer_selection_mode", "balanced")
+    CUSTOM_LAYERS = get_config_value(config, "custom_layers", [])
+    VALID_SPLIT_RATIO = get_config_value(config, "valid_split_ratio", 0.2)
+    RANDOM_SEED = get_config_value(config, "random_seed", 42)
+    QUANTIZATION_MODE = get_config_value(config, "quantization", "fp16")
 
-BASE_MODEL_NAME = get_config_value(config, "base_model_name", "gpt2")
-SCAFFOLD_MODEL_NAME = get_config_value(config, "scaffold_model_name", "gpt2")
-CROSS_ATTN_LAYERS = get_config_value(config, "cross_attn_layers", [0, 1, 2])
-USE_DYNAMIC_LAYERS = get_config_value(config, "use_dynamic_layers", False)
-LAYER_SELECTION_MODE = get_config_value(config, "layer_selection_mode", "balanced")
-CUSTOM_LAYERS = get_config_value(config, "custom_layers", [])
-VALID_SPLIT_RATIO = get_config_value(config, "valid_split_ratio", 0.2)
-RANDOM_SEED = get_config_value(config, "random_seed", 42)
+    # Validate quantization mode
+    valid_quant_modes = ["fp16", "int8", "int4"]
+    if QUANTIZATION_MODE not in valid_quant_modes:
+        print(f"Warning: Invalid quantization mode '{QUANTIZATION_MODE}' in config.json. Must be one of {valid_quant_modes}. Defaulting to 'fp16'.")
+        QUANTIZATION_MODE = "fp16"
 
-# LoRA Configuration
-lora_config = get_config_value(config, "lora_config", {})
-LORA_RANK = get_config_value(lora_config, "lora_rank", 8)
-LORA_ALPHA = get_config_value(lora_config, "lora_alpha", 16)
-LORA_DROPOUT = get_config_value(lora_config, "lora_dropout", 0.1)
-LORA_TARGET_MODULES = get_config_value(lora_config, "lora_target_modules", ["q_proj", "v_proj"])
+    # LoRA Configuration
+    lora_config = get_config_value(config, "lora_config", {})
+    LORA_RANK = get_config_value(lora_config, "lora_rank", 8)
+    LORA_ALPHA = get_config_value(lora_config, "lora_alpha", 16)
+    LORA_DROPOUT = get_config_value(lora_config, "lora_dropout", 0.1)
+    LORA_TARGET_MODULES = get_config_value(lora_config, "lora_target_modules", ["q_proj", "v_proj"])
 
-# Training Config
-training_config = get_config_value(config, "training_config", {})
-LEARNING_RATE = get_config_value(training_config, "learning_rate", 2e-5)
-TRAIN_EPOCHS = get_config_value(training_config, "train_epochs", 3)
-BATCH_SIZE = get_config_value(training_config, "batch_size", 2)
-MAX_SEQ_LENGTH = get_config_value(training_config, "max_seq_length", 512)
+    # Training Config
+    training_config = get_config_value(config, "training_config", {})
+    LEARNING_RATE = get_config_value(training_config, "learning_rate", 2e-5)
+    TRAIN_EPOCHS = get_config_value(training_config, "train_epochs", 3)
+    BATCH_SIZE = get_config_value(training_config, "batch_size", 2)
+    MAX_SEQ_LENGTH = get_config_value(training_config, "max_seq_length", 512)
 
-# K-Fold Cross Validation config
-k_folds = 5  # Number of folds
-kf = KFold(n_splits=k_folds, shuffle=True, random_state=RANDOM_SEED)
+    # K-Fold Cross Validation config
+    k_folds = 5  # Number of folds
+    kf = KFold(n_splits=k_folds, shuffle=True, random_state=RANDOM_SEED)
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {DEVICE}")
 
-# --- Config Validation ---
-def _validate_config():
-    """Validate configuration values after loading"""
-    assert isinstance(CROSS_ATTN_LAYERS, list), "CROSS_ATTN_LAYERS must be a list!"
-    
-    if not USE_DYNAMIC_LAYERS:
-        base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
-        base_layers = base_config.num_hidden_layers
-        invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_layers)]
-        assert not invalid_layers, (
-            f"Invalid layers in CROSS_ATTN_LAYERS: {invalid_layers}. "
-            f"Base model '{BASE_MODEL_NAME}' only has {base_layers} layers (0-{base_layers-1})."
-        )
-    if LAYER_SELECTION_MODE == "custom":
-        base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
-        base_layers = base_config.num_hidden_layers
-        invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_layers)]
-        assert not invalid_custom, f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}"    
+    # --- Config Validation ---
+    def _validate_config():
+        """Validate configuration values after loading"""
+        assert isinstance(CROSS_ATTN_LAYERS, list), "CROSS_ATTN_LAYERS must be a list!"
+        
+        if not USE_DYNAMIC_LAYERS:
+            base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+            base_layers = base_config.num_hidden_layers
+            invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_layers)]
+            assert not invalid_layers, (
+                f"Invalid layers in CROSS_ATTN_LAYERS: {invalid_layers}. "
+                f"Base model '{BASE_MODEL_NAME}' only has {base_layers} layers (0-{base_layers-1})."
+            )
+        if LAYER_SELECTION_MODE == "custom":
+            base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+            base_layers = base_config.num_hidden_layers
+            invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_layers)]
+            assert not invalid_custom, f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}"    
 
-_validate_config()
+    _validate_config()
 
-# Train Data Validation Split
-random.seed(RANDOM_SEED)
-random.shuffle(TRAIN_DATA)
-split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
-TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
-print(f"Dataset split: {len(TRAIN_DATA)} train, {len(VALID_DATA)} validation")
+    random.seed(RANDOM_SEED)
+    random.shuffle(TRAIN_DATA)
+    split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
+    TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
+    print(f"Dataset split: {len(TRAIN_DATA)} train, {len(VALID_DATA)} validation")
 
 # --- Dynamic Layer Selection ---
 def get_cross_attention_layers(model):
@@ -187,7 +199,7 @@ def calculate_confidence_score(logits, generated_ids):
 # --- MAIN SYSTEM ---
 class BareBonesDMAO_Learn:
     def __init__(self):
-        self.quantization_mode = "fp16"
+        self.quantization_mode = QUANTIZATION_MODE
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
         self.dry_run = False
@@ -927,9 +939,6 @@ if __name__ == "__main__":
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', or enter a prompt.")
 
-        avg_val_loss = run_k_fold_cross_validation(TRAIN_DATA, k_folds=5)
-        print(f"Average validation loss across all folds: {avg_val_loss}")
-
         while True:
             user_cmd = input("\nEnter command or prompt: ")
             cmd = user_cmd.lower().strip()
@@ -978,7 +987,7 @@ if __name__ == "__main__":
                 print("-" * 20)
 
     except FileNotFoundError as e:
-        print(f"\nFile error: {e}. Ensure 'config.json' and 'train_data.py' are present and correctly formatted.")
+        print(f"\nFile error: {e}. Ensure 'config.json' and 'sample_log.jsonl' are present and correctly formatted.")
     except torch.cuda.OutOfMemoryError:
         print("\nOut of GPU memory! Try reducing BATCH_SIZE, MAX_SEQ_LENGTH, or switching to INT8/INT4 quantization.")
         if torch.cuda.is_available():
