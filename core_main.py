@@ -12,8 +12,7 @@ import sys
 import contextlib
 from collections import deque, defaultdict
 import uuid
-import threading
-from sklearn.model_selection import KFold
+import os
 
 def load_jsonl(file_path):
     data = []
@@ -24,7 +23,6 @@ def load_jsonl(file_path):
                 data.append({"prompt": entry["prompt"], "completion": entry["response"]})
     except FileNotFoundError:
         print(f"Warning: {file_path} not found. Starting with empty data!")
-        data = []
     return data
 
 TRAIN_DATA = load_jsonl("sample_log.jsonl")
@@ -64,8 +62,6 @@ else:
     SIGMOID_SCALE = get_config_value(training_config, "sigmoid_scale", 0.5)
     SIGMOID_SHIFT = get_config_value(training_config, "sigmoid_shift", 5.0)
 
-    k_folds = 5
-    kf = KFold(n_splits=k_folds, shuffle=True, random_state=RANDOM_SEED)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
 
@@ -127,15 +123,32 @@ class ConversationHistory:
 class ThreadSafeLogger:
     def __init__(self, filename="log.jsonl"):
         self.filename = filename
-        self.lock = threading.Lock()
 
     def write(self, data):
-        with self.lock:
-            try:
-                with open(self.filename, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(data) + "\n")
-            except (IOError, TypeError, ValueError) as e:
-                print(f"Logging failed: {e}")
+        try:
+            with open(self.filename, "a", encoding="utf-8") as f:
+                f.write(json.dumps(data) + "\n")
+        except (IOError, TypeError, ValueError) as e:
+            print(f"Logging failed: {e}")
+
+    def read(self):
+        data = []
+        try:
+            with open(self.filename, "r", encoding="utf-8") as f:
+                for line in f:
+                    data.append(json.loads(line.strip()))
+            return data
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            print(f"Log read failed: {e}")
+            return []
+
+    def clear(self):
+        try:
+            open(self.filename, "w").close()
+        except Exception as e:
+            print(f"Log clear failed: {e}")
 
 def calculate_confidence_score(logits, generated_ids):
     if not logits or not isinstance(logits, (list, tuple)) or len(logits) == 0:
@@ -159,7 +172,6 @@ class BareBonesDMAO_Learn:
         print(f"Loading base model: {BASE_MODEL_NAME}")
         quantization_config = {"load_in_8bit": True} if self.quantization_mode == "int8" else {"load_in_4bit": True} if self.quantization_mode == "int4" else {}
         self.base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_NAME, config=self.base_config, **quantization_config).to(DEVICE)
-        self.print_memory_stats("After base model load", verbose=True)
         self.base_model.eval()
         for param in self.base_model.parameters():
             param.requires_grad = False
@@ -168,9 +180,8 @@ class BareBonesDMAO_Learn:
         print(f"Loading scaffold model: {SCAFFOLD_MODEL_NAME}")
         scaffold_model_raw = AutoModelForCausalLM.from_pretrained(SCAFFOLD_MODEL_NAME, config=self.scaffold_config, **quantization_config)
         lora_config = LoraConfig(r=LORA_RANK, lora_alpha=LORA_ALPHA, target_modules=LORA_TARGET_MODULES, lora_dropout=LORA_DROPOUT, bias="none", task_type=TaskType.CAUSAL_LM)
-        self.scaffolds = [get_peft_model(scaffold_model_raw, lora_config).to(DEVICE)]  # List for future chorus
-        print("LoRA adapters applied to scaffold[0]. Trainable parameters:")
-        self.scaffolds[0].print_trainable_parameters()
+        self.scaffolds = [get_peft_model(scaffold_model_raw, lora_config).to(DEVICE)]
+        print("LoRA adapters applied to scaffold[0].")
 
         print(f"Loading tokenizers from: {BASE_MODEL_NAME} and {SCAFFOLD_MODEL_NAME}")
         self.base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME)
@@ -183,11 +194,11 @@ class BareBonesDMAO_Learn:
         self.scaffolds[0].config.pad_token_id = self.scaffold_tokenizer.pad_token_id
 
         def build_token_map(base_tokenizer, scaffold_tokenizer):
-            token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])  # Default to unk
+            token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
             for base_token, base_id in base_tokenizer.get_vocab().items():
                 normalized = base_token.replace("Ġ", "").replace("##", "")
                 scaffold_ids = scaffold_tokenizer.encode(normalized, add_special_tokens=False, max_length=3, truncation=True) or [scaffold_tokenizer.unk_token_id]
-                token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}  # Add weight for memory
+                token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
             return token_map
 
         self.token_map = build_token_map(self.base_tokenizer, self.scaffold_tokenizer)
@@ -212,11 +223,18 @@ class BareBonesDMAO_Learn:
         self.patience = 0
         self.max_patience = 2
         self.has_woken = False
-        self.use_scaffold_memory = True  # Toggle for scaffold memory
-        self.use_token_map_memory = True  # Toggle for token map memory
-        self.memory_decay_rate = 0.95  # Decay for token map weights
+        self.use_scaffold_memory = True
+        self.use_token_map_memory = True
+        self.memory_decay_rate = 0.95
         self.logger = ThreadSafeLogger("log.jsonl")
         self.history = ConversationHistory()
+        self.last_trained = 0
+        self.sleep_confidence_sum = 0.0
+        self.sleep_confidence_count = 0
+        self.temperament = "neutral"  # calm, eager, sluggish
+        self.confidence_history = deque(maxlen=5)  # For swings
+        self.last_weight = 0.0  # For lifecycle
+        self.last_temperament = "neutral"  # For shifts
 
     def toggle_memory(self, mode):
         modes = {
@@ -304,7 +322,7 @@ class BareBonesDMAO_Learn:
 
     def get_scaffold_hidden_states(self, scaffold_inputs):
         with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
-            scaffold_outputs = self.scaffolds[0](**scaffold_inputs, output_hidden_states=True)  # First scaffold for now
+            scaffold_outputs = self.scaffolds[0](**scaffold_inputs, output_hidden_states=True)
             return scaffold_outputs.hidden_states[-1] if hasattr(scaffold_outputs, 'hidden_states') else scaffold_outputs.base_model_output.hidden_states[-1]
 
     def _get_model_layers(self, model):
@@ -408,9 +426,107 @@ class BareBonesDMAO_Learn:
         tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
         for token_id in tokens:
             if token_id in self.token_map:
-                self.token_map[token_id]['weight'] = min(self.token_map[token_id]['weight'] + confidence * 0.1, 2.0)  # Cap at 2.0
+                self.token_map[token_id]['weight'] = min(self.token_map[token_id]['weight'] + confidence * 0.1, 2.0)
         for token_id in self.token_map:
-            self.token_map[token_id]['weight'] *= self.memory_decay_rate  # Decay over time
+            self.token_map[token_id]['weight'] *= self.memory_decay_rate
+
+    def _should_sleep_train(self):
+        log_entries = self.logger.read()
+        if len(log_entries) < 10:  # Min log size
+            return False
+        avg_confidence = self.sleep_confidence_sum / self.sleep_confidence_count if self.sleep_confidence_count > 0 else 0.5
+        exposure_factor = max(1, self.data_exposure // 10)  # Slows as system ages
+        time_since = time.time() - self.last_trained
+        return avg_confidence > 0.7 and time_since > (60 * exposure_factor)  # 1 min per 10 exposures
+
+    def _should_dream(self):
+        # Confidence Swings: Variance over last 5 scores
+        if len(self.confidence_history) >= 5:
+            conf_tensor = torch.tensor(list(self.confidence_history), dtype=torch.float32)
+            conf_variance = torch.var(conf_tensor).item()
+            swing_dream = conf_variance > 0.1
+        else:
+            swing_dream = False
+
+        # Lifecycle Peaks: Weight delta
+        current_weight = self.get_life_curve_weight()
+        weight_delta = abs(current_weight - self.last_weight)
+        lifecycle_dream = weight_delta > 0.1
+
+        # Temperament Shifts: Mood change
+        temperament_dream = self.temperament != self.last_temperament
+
+        return swing_dream or lifecycle_dream or temperament_dream
+
+    def _dream(self):
+        print("--- Dreaming ---")
+        log_entries = self.logger.read()
+        if not log_entries:
+            print("No memories to dream on.")
+            return
+        dream_prompt = random.choice(log_entries)["prompt"]
+        with torch.no_grad():
+            inputs = self.tokenize_and_map(dream_prompt)
+            hidden_states = self.get_scaffold_hidden_states(inputs)
+            noise = torch.randn_like(hidden_states) * 0.05
+            for param in self.scaffolds[0].parameters():
+                if param.grad is not None:
+                    param.data += noise.mean() * 0.01  # Subtle dream tweak
+        print("--- Dream Complete ---")
+
+    def _sleep_train(self):
+        if not self._should_sleep_train():
+            return
+        print("\n--- Sleep Training Initiated ---")
+        log_entries = self.logger.read()
+        if not log_entries:
+            print("No log data to train on.")
+            return
+
+        # Check for dream before training
+        if self._should_dream():
+            self._dream()
+
+        self.scaffolds[0].train()
+        optimizer = AdamW(self.scaffolds[0].parameters(), lr=LEARNING_RATE * 0.5)  # Lower LR for sleep
+        batch = []
+        for entry in log_entries:
+            if "prompt" in entry and "response" in entry:
+                inputs = self.base_tokenizer(entry["prompt"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
+                labels = self.base_tokenizer(entry["response"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).input_ids.to(DEVICE)
+                batch.append((inputs, labels))
+
+        total_loss = 0
+        for inputs, labels in batch:
+            scaffold_inputs = self.tokenize_and_map(inputs["input_ids"])
+            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
+            with self._scaffold_context(scaffold_hidden_states):
+                outputs = self.base_model(**inputs)
+                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.scaffolds[0].parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(batch) if batch else 0
+        print(f"Sleep Training Loss: {avg_loss:.4f}")
+        self.last_trained = time.time()
+        self.logger.clear()
+        self.last_weight = self.get_life_curve_weight()  # Update after training
+        self._update_temperament()
+        self.last_temperament = self.temperament  # Update after temperament
+        print("--- Sleep Training Complete ---")
+
+    def _update_temperament(self):
+        avg_confidence = self.sleep_confidence_sum / self.sleep_confidence_count if self.sleep_confidence_count > 0 else 0.5
+        if avg_confidence > 0.8:
+            self.temperament = "eager"
+        elif avg_confidence < 0.6:
+            self.temperament = "sluggish"
+        else:
+            self.temperament = "calm"
+        print(f"Temperament updated: {self.temperament}")
 
     def train_step(self, batch):
         if self.dry_run:
@@ -464,12 +580,12 @@ class BareBonesDMAO_Learn:
         torch.nn.utils.clip_grad_norm_(list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else []), max_norm=1.0)
 
         if (self.global_step + 1) % accumulation_steps == 0:
-            if self.use_scaffold_memory:  # Update scaffold memory if enabled
+            if self.use_scaffold_memory:
                 confidence = calculate_confidence_score(outputs.logits, base_input_ids)
-                if confidence > 0.7:  # Threshold for "memorable" outputs
+                if confidence > 0.7:
                     for param in self.scaffolds[0].parameters():
                         if param.grad is not None:
-                            param.data += param.grad * 0.01  # Small tweak for memory
+                            param.data += param.grad * 0.01
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
@@ -478,8 +594,8 @@ class BareBonesDMAO_Learn:
         for prompt in prompts:
             if prompt not in self.seen_prompts:
                 self.seen_prompts.add(prompt)
-                self.data_exposure += 1
-        if self.use_token_map_memory:  # Update token map memory if enabled
+                self.data_exposure += 2  # Boosted for lifecycle sensitivity
+        if self.use_token_map_memory:
             self._update_token_map_memory(prompts[0], calculate_confidence_score(outputs.logits, base_input_ids))
 
         return loss.item()
@@ -549,7 +665,6 @@ class BareBonesDMAO_Learn:
 
         if scaffold_weight is not None:
             self.set_scaffold_influence(scaffold_weight)
-        print(f"Using quantization mode: {self.quantization_mode}")
 
         start_time = time.time()
         base_inputs = self.base_tokenizer(prompt, return_tensors='pt').to(DEVICE)
@@ -573,6 +688,9 @@ class BareBonesDMAO_Learn:
 
         generated_ids = outputs.sequences[0][input_length:]
         confidence_score = calculate_confidence_score(outputs.scores, generated_ids)
+        self.sleep_confidence_sum += confidence_score
+        self.sleep_confidence_count += 1
+        self.confidence_history.append(confidence_score)  # Track for swings
 
         if self.has_repetition(generated_ids, n=3):
             print("Warning: Repetition detected. Truncating.")
@@ -589,6 +707,7 @@ class BareBonesDMAO_Learn:
         if self.use_token_map_memory:
             self._update_token_map_memory(prompt, confidence_score)
 
+        self._sleep_train()  # Check for sleep and dream after generation
         print(f"Generation took {time.time() - start_time:.2f} seconds.")
         return response
 
