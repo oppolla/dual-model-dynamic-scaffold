@@ -39,7 +39,10 @@ else:
         config = json.load(f)
 
     def get_config_value(config, key, default=None):
-        return config.get(key, default) or (print(f"Warning: '{key}' missing, using {default}"), default)[1]
+        if key not in config:
+            print(f"Warning: '{key}' missing, using {default}")
+            return default
+        return config[key]
 
     # Core Model Config
     BASE_MODEL_NAME = get_config_value(config["core_config"], "base_model_name", "gpt2")
