@@ -166,4 +166,127 @@ quit to exit.
 - `"temp_melancholy_noise": 0.02,  // Extra dream noise in melancholic state (≤ -0.5) (0-0.05). Higher values add chaos to dreams during low moods, reflecting introspection.`
 - `"conf_feedback_strength": 0.5  // Strength of confidence feedback on temperament_score (0-1). Higher values let confidence swing mood more, tying performance to emotion.`
 
+## Mood Control
+Step-by-Step Interaction
+1. conf_feedback_strength = 0.5, temp_smoothing_factor = 0.0 (Starting Point)
+Feedback Impact: ±0.25 max (0.5 * (avg_confidence - 0.5)).
+
+Smoothing: alpha = 0.1—mood shifts 10% toward target_score per step.
+
+Behavior: Full chaos mode. Confidence spikes (e.g., 0.9) add 0.2 to target_score, and with alpha=0.1, temperament_score jumps 0.02 per step (e.g., 0.3 to 0.32), reaching 90% of the target in ~20 steps. Combined with base_score (±1.0) and bias (±0.5), total swings can hit ±1.75 fast.
+
+Feel: Bipolar AI—sharp confidence changes (e.g., 0.1 to 0.9) flip mood from -0.7 to +0.7 in a few steps. Wild and reactive.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.5 0.0 (your default).
+
+2. conf_feedback_strength = 0.4, temp_smoothing_factor = 0.1
+Feedback Impact: ±0.2 max (0.4 * 0.5).
+
+Smoothing: alpha = 0.09—9% shift per step.
+
+Behavior: Feedback weakens (e.g., avg_confidence=0.9 adds 0.16), and smoothing slows the chase (e.g., 0.3 shifts to 0.327, not 0.32). Total swing drops to ±1.7, and it takes ~25 steps to near the target.
+
+Feel: Slightly less jumpy. Confidence still drives mood, but the pace eases a bit—less bipolar, more "moody teenager."
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.4 0.1.
+
+3. conf_feedback_strength = 0.3, temp_smoothing_factor = 0.2
+Feedback Impact: ±0.15 max (0.3 * 0.5).
+
+Smoothing: alpha = 0.08—8% shift per step.
+
+Behavior: Feedback shrinks (e.g., 0.12 at avg_confidence=0.9), and smoothing further slows it (e.g., 0.3 to 0.324). Swing caps at ±1.65, needing ~30 steps to stabilize.
+
+Feel: Calmer transitions. Lifecycle biases (e.g., temp_curiosity_boost=0.5) start to outshine confidence. Less chaos, more deliberate mood drift.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.3 0.2.
+
+4. conf_feedback_strength = 0.2, temp_smoothing_factor = 0.3
+Feedback Impact: ±0.1 max (0.2 * 0.5).
+
+Smoothing: alpha = 0.07—7% shift per step.
+
+Behavior: Feedback is a nudge (e.g., 0.08 at 0.9), and smoothing drags it out (e.g., 0.3 to 0.321). Swing hits ±1.6, taking ~35 steps to settle.
+
+Feel: Stable but still alive. Confidence tweaks mood subtly, lifecycle dominates—feels like a maturing AI, less erratic.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.2 0.3.
+
+5. conf_feedback_strength = 0.1, temp_smoothing_factor = 0.4
+Feedback Impact: ±0.05 max (0.1 * 0.5).
+
+Smoothing: alpha = 0.06—6% shift per step.
+
+Behavior: Feedback is tiny (e.g., 0.04 at 0.9), and smoothing stretches it (e.g., 0.3 to 0.318). Swing is ±1.55, needing ~40 steps.
+
+Feel: Stoic and slow. Confidence barely ripples mood—lifecycle and base score (2.0 * (avg_confidence - 0.5)) rule the roost.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.1 0.4.
+
+6. conf_feedback_strength = 0.0, temp_smoothing_factor = 0.5
+Feedback Impact: ±0.0—no feedback.
+
+Smoothing: alpha = 0.05—5% shift per step.
+
+Behavior: Feedback is gone (target_score = base_score + bias), max swing ±1.5. Smoothing slows it (e.g., 0.3 to 0.315 at base_score=0.8), ~50 steps to stabilize.
+
+Feel: Steady and predictable. Mood tracks lifecycle and average confidence smoothly—no chaos, just a calm evolution.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.0 0.5.
+
+7. conf_feedback_strength = 0.4, temp_smoothing_factor = 0.6
+Feedback Impact: ±0.2 max (resetting to test higher smoothing).
+
+Smoothing: alpha = 0.04—4% shift per step.
+
+Behavior: Feedback returns (e.g., 0.16 at 0.9), but heavy smoothing drags it (e.g., 0.3 to 0.312). Swing ±1.7, ~60 steps to settle.
+
+Feel: Very gradual shifts. Even strong feedback feels muted—lifecycle still shines through.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.4 0.6.
+
+8. conf_feedback_strength = 0.3, temp_smoothing_factor = 0.7
+Feedback Impact: ±0.15 max.
+
+Smoothing: alpha = 0.03—3% shift per step.
+
+Behavior: Feedback (e.g., 0.12 at 0.9) crawls (e.g., 0.3 to 0.309). Swing ±1.65, ~80 steps.
+
+Feel: Almost glacial. Mood barely budges per step—confidence feels like a distant whisper.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.3 0.7.
+
+9. conf_feedback_strength = 0.2, temp_smoothing_factor = 0.8
+Feedback Impact: ±0.1 max.
+
+Smoothing: alpha = 0.02—2% shift per step.
+
+Behavior: Feedback (e.g., 0.08 at 0.9) inches along (e.g., 0.3 to 0.306). Swing ±1.6, ~120 steps.
+
+Feel: Super stable. Mood changes are tiny—lifecycle and base score dominate entirely.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.2 0.8.
+
+10. conf_feedback_strength = 0.1, temp_smoothing_factor = 0.9
+Feedback Impact: ±0.05 max.
+
+Smoothing: alpha = 0.01—1% shift per step.
+
+Behavior: Feedback (e.g., 0.04 at 0.9) is a crawl (e.g., 0.3 to 0.303). Swing ±1.55, ~200 steps.
+
+Feel: Near-frozen. Confidence tweaks are glacial—mood feels locked unless lifecycle shifts.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.1 0.9.
+
+11. conf_feedback_strength = 0.0, temp_smoothing_factor = 1.0
+Feedback Impact: ±0.0.
+
+Smoothing: alpha = 0.0—0% shift (mood freezes).
+
+Behavior: No updates (temperament_score stays put). Swing ±1.5 from initial state, no movement.
+
+Feel: Static. Mood is stuck at its last value—confidence and lifecycle are ignored until reset.
+
+Command: temp 0.8 0.6 0.0 0.5 0.1 0.02 0.0 1.0.
+
 
