@@ -48,6 +48,8 @@
     "temp_restless_drop": 0.1,
     "temp_melancholy_noise": 0.02,
     "conf_feedback_strength": 0.5,
-    "temp_smoothing_factor": 0.0
+    "temp_smoothing_factor": 0.0,
+    "dream_memory_decay": 0.95,
+    "dream_prune_threshold": 0.1
   }
 }
