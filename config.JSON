@@ -48,6 +48,6 @@
     "temp_restless_drop": 0.1,
     "temp_melancholy_noise": 0.02,
     "conf_feedback_strength": 0.5,
-    "temp_smoothing_factor": 0.2
+    "temp_smoothing_factor": 0.0
   }
 }
