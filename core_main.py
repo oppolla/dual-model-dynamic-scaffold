@@ -6,7 +6,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AdamW,
 from peft import LoraConfig, get_peft_model, TaskType
 import time
 import random
-from train_data import TRAIN_DATA
 import bitsandbytes as bnb
 import json
 import sys
@@ -15,6 +14,21 @@ from collections import deque
 import uuid
 import threading
 from sklearn.model_selection import KFold
+
+# --- Load Training Data from JSONL ---
+def load_jsonl(file_path):
+    data = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            entry = json.loads(line.strip())
+            processed_entry = {
+                "prompt": entry["prompt"],
+                "completion": entry["response"]
+            }
+            data.append(processed_entry)
+    return data
+
+TRAIN_DATA = load_jsonl("sample_log.jsonl")
 
 # --- Load Configuration from JSON ---
 with open("config.json", "r") as f:
