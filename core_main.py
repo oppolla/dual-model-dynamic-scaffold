@@ -326,21 +326,10 @@ class BareBonesDMAO_Learn:
 
     def get_life_curve_weight(self):
         """Calculates scaffold influence based on data exposure and capacity."""
-        # Estimate scaffold capacity (LoRA parameters)
         lora_params = sum(p.numel() for p in self.scaffold_model.parameters() if p.requires_grad)
-        capacity_threshold = lora_params // 100  # ~100 params per sample
-
-        # Sigmoid for early growth, tunable via config
+        capacity_threshold = lora_params // 100
         growth = 1 / (1 + torch.exp(-SIGMOID_SCALE * (self.data_exposure - SIGMOID_SHIFT)))
-
-        # Degradation when data exceeds capacity
-        if self.data_exposure > capacity_threshold:
-            excess = self.data_exposure - capacity_threshold
-            degradation = max(0, 1 - (excess / capacity_threshold))  # Linear drop after limit
-        else:
-            degradation = 1.0
-
-        # Combine and clamp
+        degradation = max(0, 1 - ((self.data_exposure - capacity_threshold) / capacity_threshold)) if self.data_exposure > capacity_threshold else 1.0
         weight = growth * degradation
         return min(max(weight.item(), 0.0), 1.0)
     
@@ -349,24 +338,22 @@ class BareBonesDMAO_Learn:
         if self.has_woken:
             return None
         
-        # Set a unique random seed with a twist for variety
         wake_seed = (int(time.time() * 1000) + random.randint(0, 100)) % 10000
         torch.manual_seed(wake_seed)
         random.seed(wake_seed)
 
-        # Generate a wild, birth-like greeting
-        prompt = " "  # Minimal prompt for freestyle
+        prompt = " "
         with torch.no_grad():
             response = self.generate(
                 prompt,
-                max_new_tokens=15,  # Dramatic but concise
-                temperature=1.7,    # Overdrive for raw energy
-                top_k=30,          # Balances chaos and coherence
+                max_new_tokens=15,
+                temperature=1.7,
+                top_k=30,
                 do_sample=True
             )
         
         self.has_woken = True
-        print(f"\n{response}")  # Simple output, no frills
+        print(f"\n{response}")
         self.logger.write({
             "event": "wake_up",
             "response": response,
@@ -428,6 +415,39 @@ class BareBonesDMAO_Learn:
             yield
         finally:
             self._clear_scaffold_cache()
+
+    # New helper functions added here
+    def tokenize_and_map(self, prompts, max_length=MAX_SEQ_LENGTH, padding='max_length'):
+        """Tokenize prompts and map to scaffold input IDs."""
+        if isinstance(prompts, str):
+            prompts = [prompts]  # Handle single prompt for generate
+        inputs = self.base_tokenizer(
+            prompts,
+            return_tensors='pt',
+            padding=padding,
+            truncation=True,
+            max_length=max_length
+        ).to(DEVICE)
+        scaffold_input_ids = self.map_sequence(inputs.input_ids)
+        scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
+        return {
+            'input_ids': scaffold_input_ids,
+            'attention_mask': scaffold_attention_mask
+        }
+
+    def get_scaffold_hidden_states(self, scaffold_inputs):
+        """Run scaffold model and return last hidden states."""
+        with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
+            scaffold_outputs = self.scaffold_model(
+                **scaffold_inputs,
+                output_hidden_states=True
+            )
+            if hasattr(scaffold_outputs, 'hidden_states'):
+                return scaffold_outputs.hidden_states[-1]
+            elif hasattr(scaffold_outputs, 'base_model_output') and hasattr(scaffold_outputs.base_model_output, 'hidden_states'):
+                return scaffold_outputs.base_model_output.hidden_states[-1]
+            else:
+                raise AttributeError("Scaffold model output lacks hidden_states")
 
     def _get_model_layers(self, model):
         actual_model = model.base_model if hasattr(model, 'base_model') else model
@@ -555,7 +575,7 @@ class BareBonesDMAO_Learn:
             position = 0
             for base_id in base_input_ids[batch_idx]:
                 mapped_tokens = self.special_token_map.get(
-                    base_id.item(),
+                    base_id.item(),  # Fixed: Removed "wrote:"
                     self.token_map.get(base_id.item(), [self.scaffold_unk_id])
                 )
                 if position + len(mapped_tokens) > MAX_SEQ_LENGTH:
@@ -695,14 +715,12 @@ class BareBonesDMAO_Learn:
             print("Not enough data or epochs for training.")
             return
 
-        # Update exposure with unique prompts
         for item in train_data:
             prompt = item["prompt"]
             if prompt not in self.seen_prompts:
                 self.seen_prompts.add(prompt)
                 self.data_exposure += 1
 
-        # Set scaffold influence
         influence_weight = self.get_life_curve_weight()
         self.set_scaffold_influence(influence_weight)
         print(f"Data exposure: {self.data_exposure} samples | Scaffold influence weight: {influence_weight:.3f}")
@@ -796,29 +814,8 @@ class BareBonesDMAO_Learn:
         input_ids = base_inputs['input_ids']
         input_length = input_ids.shape[1]
     
-        scaffold_base_inputs = self.base_tokenizer(
-            prompt, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH
-        ).to(DEVICE)
-        scaffold_input_ids = self.map_sequence(scaffold_base_inputs.input_ids)
-        scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
-    
-        scaffold_inputs = {
-            'input_ids': scaffold_input_ids,
-            'attention_mask': scaffold_attention_mask
-        }
-    
-        with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
-            scaffold_outputs = self.scaffold_model(
-                **scaffold_inputs,
-                output_hidden_states=True
-            )
-            if hasattr(scaffold_outputs, 'hidden_states'):
-                actual_outputs = scaffold_outputs.hidden_states
-            elif hasattr(scaffold_outputs, 'base_model_output') and hasattr(scaffold_outputs.base_model_output, 'hidden_states'):
-                actual_outputs = scaffold_outputs.base_model_output.hidden_states
-            else:
-                raise AttributeError("Scaffold model output does not contain expected hidden_states structure")
-            scaffold_hidden_states = actual_outputs[-1]
+        scaffold_inputs = self.tokenize_and_map(prompt)
+        scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
     
         self._clear_scaffold_cache()
         with self._scaffold_context(scaffold_hidden_states):
@@ -886,26 +883,10 @@ class BareBonesDMAO_Learn:
             completions = [item['completion'] for item in batch]
             full_texts = [p + c for p, c in zip(prompts, completions)]
 
-            prompts_base = self.base_tokenizer(
-                prompts,
-                return_tensors='pt',
-                padding='max_length',
-                truncation=True,
-                max_length=MAX_SEQ_LENGTH
-            ).to(DEVICE)
-            scaffold_input_ids = self.map_sequence(prompts_base.input_ids)
-            scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
-
-            scaffold_inputs = {
-                'input_ids': scaffold_input_ids,
-                'attention_mask': scaffold_attention_mask
-            }
-
-            scaffold_outputs = self.scaffold_model(
-                **scaffold_inputs,
-                output_hidden_states=True
-            )
-            with self._scaffold_context(scaffold_outputs.hidden_states[-1]):
+            scaffold_inputs = self.tokenize_and_map(prompts)
+            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
+            
+            with self._scaffold_context(scaffold_hidden_states):
                 base_inputs = self.base_tokenizer(
                     full_texts,
                     return_tensors='pt',
@@ -977,21 +958,13 @@ def run_k_fold_cross_validation(train_data, k_folds=5):
         fold_train_data = [train_data[i] for i in train_idx]
         fold_valid_data = [train_data[i] for i in valid_idx]
 
-        # Initialize a new instance of the model for each fold
         dmao_system = BareBonesDMAO_Learn()
-
-        # Run the training cycle on the current fold
         dmao_system.run_training_cycle(fold_train_data, fold_valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
-
-        # Evaluate and store the results
         valid_loss = dmao_system.validate_epoch(fold_valid_data)
         fold_results.append(valid_loss)
         print(f"Fold {fold+1} validation loss: {valid_loss}")
-
-        # Cleanup model to free memory
         dmao_system.cleanup()
 
-    # Calculate the average validation loss across all folds
     avg_validation_loss = sum(fold_results) / len(fold_results)
     print(f"Average validation loss across {k_folds} folds: {avg_validation_loss}")
     return avg_validation_loss
@@ -1004,7 +977,7 @@ if __name__ == "__main__":
         dmao_system = BareBonesDMAO_Learn()
         if "--dry-run" in sys.argv:
             dmao_system.enable_dry_run(max_samples=2, max_length=64, validate_architecture=True)
-        dmao_system.wake_up()  # Trigger wake-up right after init
+        dmao_system.wake_up()
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', or enter a prompt.")
 
@@ -1022,27 +995,27 @@ if __name__ == "__main__":
                 dmao_system.set_quantization_mode("int8")
                 print("Re-initializing system with INT8 quantization...")
                 dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()  # Wake up new instance
+                dmao_system.wake_up()
             elif cmd == 'int4':
                 dmao_system.set_quantization_mode("int4")
                 print("Re-initializing system with INT4 quantization...")
                 dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()  # Wake up new instance
+                dmao_system.wake_up()
             elif cmd == 'fp16':
                 dmao_system.set_quantization_mode("fp16")
                 print("Re-initializing system with FP16 quantization...")
                 dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()  # Wake up new instance
+                dmao_system.wake_up()
             elif cmd == 'dynamic':
                 dmao_system.toggle_dynamic_layers(True)
                 print("Re-initializing system with dynamic layers...")
                 dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()  # Wake up new instance
+                dmao_system.wake_up()
             elif cmd == 'fixed':
                 dmao_system.toggle_dynamic_layers(False)
                 print("Re-initializing system with fixed layers...")
                 dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()  # Wake up new instance
+                dmao_system.wake_up()
             elif cmd == 'new':
                 dmao_system.new_conversation()
             elif not user_cmd:
