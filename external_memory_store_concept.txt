@@ -377,3 +377,15 @@ response = system.generate_response("Where am I from?")
 # Expected: Uses "name: Alex" from memory_store in response
 print(response)  # e.g., "I don’t know where you’re from, Alex, can you tell me?"
 
+MODEL OPTIONS:
+TinyLlama - 1.1B
+DistilBERT - 66M
+GPT-2 117M
+DeepSeek-R1-Distilled-1.5B
+
+
+
+
+
+
+
