@@ -1,53 +1,44 @@
 graph TD
+    %% Subgraph 1: User Interaction
     subgraph User Interaction
-        UI[User Input] -->|Text| GEN[generate]
+        UI[User Input] -->|Text| GEN[Generate Response]
         GEN -->|Response| UO[User Output]
     end
 
+    %% Subgraph 2: Core Components
     subgraph Core Components
-        BM[Base Model<br>gpt2<br>Frozen] -->|Hidden States| CAF[SimpleCrossAttentionFuser]
-        SM[Scaffold Model<br>gpt2 w/ LoRA<br>Trainable] -->|Hidden States| CAF
-        CAF -->|Fused States| BM
-        BT[Base Tokenizer] -->|Tokens| BM
-        ST[Scaffold Tokenizer] -->|Tokens| SM
-        CH[ConversationHistory<br>Deque max=10] -->|Prompt-Response| GEN
-        TL[ThreadSafeLogger<br>log.jsonl] -->|Logs| GEN
-        IB[Interaction Buffer<br>Temporary Storage] -->|Interactions| LOG[log_interaction]
-        EMS[External Memory Store<br>Key-Value Pairs] -->|Personal Context| GEN
-        
-        SM -->|Initial State| PS[Production Scaffold]
-        PS -->|Context| CAF
+        BT[Base Tokenizer<br><i>Tokens Processing</i>] --> BM[Base Model<br>Frozen]
+        ST[Scaffold Tokenizer<br><i>Adaptive Tokens</i>] --> SM[Scaffold Model<br>Trainable]
+        BM -->|Hidden States| CAF[Simple Cross-Attention Fuser]
+        SM -->|Hidden States| CAF
+        CAF -->|Processed States| BM
+        CH[Conversation History] --> GEN
+        TL[Thread Logger<br>Log Interaction Data] --> GEN
     end
 
+    %% Subgraph 3: Training Subsystem - Sleep Phase
     subgraph Training Subsystem - Sleep Phase
-        TS[Training Scheduler<br>Sleep Phase Thread] -->|Trigger| RT[_run_dmao_training]
-        RT -->|Train Data| TE[train_step]
-        TE -->|Updated Weights| SM
-        RT -->|Deploy| DU[_deploy_updated_scaffold]
-        DU -->|Production Weights| PS
-        PT[_prepare_training_data] -->|Prepared Data| RT
-        IB -->|Interactions| PT
-        EMS -->|Personal Data| PT
-        TD[TRAIN_DATA] -->|Initial Data| PT
-        VD[VALID_DATA] -->|Validation| VE[validate_epoch]
-        VE -->|Validation Loss| RT
-        RT -->|Rollback| RB[_rollback_training]
-        RB -->|Revert| SM
-        
-        KF[K-Fold Cross Validation] -->|Split Data| TS
+        TS[Training Scheduler] --> RT[Training Runtime Trigger]
+        RT --> TE[Training Step]
+        TE --> SM[Update Weights]
+        DU[Deploy Updates] -->|Production Weights| PS[Production Scaffold]
     end
 
-    LOG -->|Interaction| IB
-    LOG -->|Personal Info| EMS
-    GEN -->|Input| BT
-    GEN -->|Input| ST
-    GEN -->|Prompt-Response| CH
-    GEN -->|Log Entry| TL
-    GEN -->|Input-Output| LOG
-    
-    classDef core fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef train fill:#bbf,stroke:#333,stroke-width:2px;
-    classDef eval fill:#fbf,stroke:#333,stroke-width:2px;
-    class BM,SM,CAF,BT,ST,CH,TL,IB,LOG,EMS,PS core;
-    class TS,RT,TE,DU,PT,TD,VD,VE,RB train;
-    class KF eval;
+    %% External Connections
+    CH --> IB[Interaction Buffer]
+    TL --> IB
+    IB --> EMS[External Memory Store]
+    EMS --> PT[Prepare Training Data]
+    PT --> RT
+    PT --> KF[K-Fold Cross Validation]
+    KF -->|Split Data| TS
+
+    %% Styling Nodes
+    classDef user fill:#f8c3,stroke:#333,stroke-width:1px;
+    classDef core fill:#b6c8e5,stroke:#333,stroke-width:1px;
+    classDef train fill:#ffd3b6,stroke:#333,stroke-width:1px;
+    classDef external fill:#c4f1b1,stroke:#333,stroke-width:1px;
+    class UI,UO,GEN user;
+    class BT,BM,ST,SM,CAF,CH,TL,PS core;
+    class TS,RT,TE,DU train;
+    class IB,EMS,PT,KF external;
