@@ -37,7 +37,7 @@
     "temp_eager_threshold": 0.8,
     "temp_sluggish_threshold": 0.6,
     "temp_mood_influence": 0.0,
-    "scaffold_weight_cap": 0.8,
+    "scaffold_weight_cap": 0.9,
     "base_temperature": 0.7,
     "save_path_prefix": "state",
     "dream_memory_weight": 0.1,
