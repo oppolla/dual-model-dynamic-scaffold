@@ -23,6 +23,12 @@ def load_jsonl(file_path):
                 data.append({"prompt": entry["prompt"], "completion": entry["response"]})
     except FileNotFoundError:
         print(f"Warning: {file_path} not found. Starting with empty data!")
+    except json.JSONDecodeError:
+        print(f"Error: Failed to decode JSON from {file_path}. Check the file format.")
+    except IOError as e:
+        print(f"Error: I/O error({e.errno}): {e.strerror}.")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
     return data
 
 TRAIN_DATA = load_jsonl("sample_log.jsonl")
@@ -96,11 +102,15 @@ else:
             assert not invalid_custom, f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}"
 
     _validate_config()
+
     random.seed(RANDOM_SEED)
     random.shuffle(TRAIN_DATA)
     split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
     TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
     print(f"Dataset split: {len(TRAIN_DATA)} train, {len(VALID_DATA)} validation")
+    if not TRAIN_DATA or not VALID_DATA:
+        print("Warning: TRAIN_DATA or VALID_DATA empty. Training may fail.")
+        sys.exit(1)
 
 def get_cross_attention_layers(model):
     total_layers = len(model.transformer.h) if hasattr(model, 'transformer') else len(model.layers)
