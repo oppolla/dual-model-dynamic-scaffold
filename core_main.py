@@ -162,6 +162,7 @@ class ThreadSafeLogger:
                 f.write(json.dumps(data) + "\n")
         except (IOError, TypeError, ValueError) as e:
             print(f"Logging failed: {e}")
+            raise
 
     def read(self):
         data = []
@@ -174,13 +175,14 @@ class ThreadSafeLogger:
             return []
         except Exception as e:
             print(f"Log read failed: {e}")
-            return []
+            raise
 
     def clear(self):
         try:
             open(self.filename, "w").close()
         except Exception as e:
             print(f"Log clear failed: {e}")
+            raise
 
 def calculate_confidence_score(logits, generated_ids):
     if not logits or not isinstance(logits, (list, tuple)) or len(logits) == 0:
@@ -690,46 +692,50 @@ class BareBonesDMAO_Learn:
                 loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), inputs.input_ids.view(-1), ignore_index=-100)
                 print(f"Dry run loss: {loss.item()}")
             return None
-
+    
+        # Ensure the optimizer is set up before training
         if not self.optimizer:
-            raise RuntimeError("Optimizer not set up. Call setup_optimizer first.")
+            print("Optimizer not set up. Setting up optimizer now.")
+            num_training_steps = (len(TRAIN_DATA) // BATCH_SIZE) * TRAIN_EPOCHS
+            self.setup_optimizer(num_training_steps)
+    
         self.scaffolds[0].train()
         self.base_model.eval()
-
+    
         prompts = [item['prompt'] for item in batch]
         completions = [item['completion'] for item in batch]
         full_texts = [p + c for p, c in zip(prompts, completions)]
-
+    
         base_inputs = self.base_tokenizer(full_texts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
         base_input_ids = base_inputs.input_ids
         base_attention_mask = base_inputs.attention_mask
-
+    
         prompts_base = self.base_tokenizer(prompts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH)
         scaffold_input_ids = self.map_sequence(prompts_base.input_ids)
         scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
         scaffold_inputs = {'input_ids': scaffold_input_ids, 'attention_mask': scaffold_attention_mask}
-
+    
         labels = base_input_ids.clone()
         labels[labels == self.base_tokenizer.pad_token_id] = -100
         prompt_mask = self.base_tokenizer(prompts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH).attention_mask.to(DEVICE)
         labels = torch.where(prompt_mask.bool(), -100, base_input_ids)
-
+    
         with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
             scaffold_outputs = self.scaffolds[0](**scaffold_inputs, output_hidden_states=True)
             scaffold_hidden_states = scaffold_outputs.hidden_states[-1]
             with self._scaffold_context(scaffold_hidden_states):
                 outputs = self.base_model(input_ids=base_input_ids, attention_mask=base_attention_mask)
             loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
-
+    
         if torch.isnan(loss) or torch.isinf(loss):
             print("Warning: Invalid loss. Skipping batch.")
             return None
-
+    
         accumulation_steps = 4
         scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else []), max_norm=1.0)
-
+    
         if (self.global_step + 1) % accumulation_steps == 0:
             if self.use_scaffold_memory:
                 confidence = calculate_confidence_score(outputs.logits, base_input_ids)
@@ -741,14 +747,14 @@ class BareBonesDMAO_Learn:
             self.scheduler.step()
             self.optimizer.zero_grad()
         self.global_step += 1
-
+    
         for prompt in prompts:
             if prompt not in self.seen_prompts:
                 self.seen_prompts.add(prompt)
                 self.data_exposure += 2
         if self.use_token_map_memory:
             self._update_token_map_memory(prompts[0], calculate_confidence_score(outputs.logits, base_input_ids))
-
+    
         return loss.item()
 
     def run_training_cycle(self, train_data, valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
