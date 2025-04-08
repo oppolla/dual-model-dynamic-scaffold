@@ -942,6 +942,11 @@ if __name__ == "__main__":
               "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise>', 'temp <eager> <sluggish> <influence>', "
               "'blend <weight> <temp>', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem', or a prompt.")
 
+        valid_commands = [
+            'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', 
+            'sleep', 'dream', 'temp', 'blend', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
+        ]
+
         while True:
             user_cmd = input("\nEnter command or prompt: ").strip().lower()
             parts = user_cmd.split()
@@ -989,10 +994,14 @@ if __name__ == "__main__":
             elif not user_cmd:
                 continue
             else:
-                print("\n--- Generating Response ---")
-                response = dmao_system.generate(user_cmd, max_new_tokens=60, temperature=dmao_system.base_temperature, top_k=50, do_sample=True)
-                print("\nResponse:", response)
-                print("-" * 20)
+                if cmd not in valid_commands:
+                    print("Error: Invalid command. Please enter a valid command.")
+                    print("Valid commands are:", ', '.join(valid_commands))
+                else:
+                    print("\n--- Generating Response ---")
+                    response = dmao_system.generate(user_cmd, max_new_tokens=60, temperature=dmao_system.base_temperature, top_k=50, do_sample=True)
+                    print("\nResponse:", response)
+                    print("-" * 20)
 
     except FileNotFoundError as e:
         print(f"\nFile error: {e}. Check 'config.json' and 'sample_log.jsonl'.")
