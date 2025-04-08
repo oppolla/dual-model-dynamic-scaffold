@@ -1,5 +1,5 @@
 # Console Commands
-## quit or exit
+## `quit` or `exit`
 What it does: Stops the script and exits the program cleanly.
 How it works: Breaks the input loop, triggers cleanup (freeing GPU memory), and shuts down.
 Use case: When you’re done testing or training and want to close everything.
