@@ -75,7 +75,7 @@ else:
     SIGMOID_SCALE = get_config_value(training_config, "sigmoid_scale", 0.5)
     SIGMOID_SHIFT = get_config_value(training_config, "sigmoid_shift", 5.0)
 
-    # Exposed Controls (New Section in config.json)
+    # Exposed Controls
     controls_config = get_config_value(config, "controls_config", {})
     SLEEP_CONF_THRESHOLD = get_config_value(controls_config, "sleep_conf_threshold", 0.7)  # 0.5-0.9
     SLEEP_TIME_FACTOR = get_config_value(controls_config, "sleep_time_factor", 1.0)  # 0.5-5.0
@@ -90,6 +90,19 @@ else:
     SCAFFOLD_WEIGHT_CAP = get_config_value(controls_config, "scaffold_weight_cap", 1.0)  # 0.5-1.0
     BASE_TEMPERATURE = get_config_value(controls_config, "base_temperature", 0.7)  # 0.5-1.5
     SAVE_PATH_PREFIX = get_config_value(controls_config, "save_path_prefix", "state")  # Path for save/load
+
+    # New Controls for Features
+    DREAM_MEMORY_WEIGHT = get_config_value(controls_config, "dream_memory_weight", 0.1)  # 0-0.5
+    DREAM_MEMORY_MAXLEN = get_config_value(controls_config, "dream_memory_maxlen", 10)  # 5-20
+    DREAM_PROMPT_WEIGHT = get_config_value(controls_config, "dream_prompt_weight", 0.5)  # 0-1
+    DREAM_NOVELTY_BOOST = get_config_value(controls_config, "dream_novelty_boost", 0.03)  # 0-0.05
+    TEMP_CURIOSITY_BOOST = get_config_value(controls_config, "temp_curiosity_boost", 0.5)  # 0-0.5
+    TEMP_RESTLESS_DROP = get_config_value(controls_config, "temp_restless_drop", 0.1)  # 0-0.5
+    TEMP_MELANCHOLY_NOISE = get_config_value(controls_config, "temp_melancholy_noise", 0.02)  # 0-0.05
+    CONF_FEEDBACK_STRENGTH = get_config_value(controls_config, "conf_feedback_strength", 0.5)  # 0-1
+    TEMP_SMOOTHING_FACTOR = get_config_value(controls_config, "temp_smoothing_factor", 0.0)  # 0-1
+    LIFECYCLE_CAPACITY_FACTOR = get_config_value(training_config, "lifecycle_capacity_factor", 0.01)  # 0.001-0.1
+    LIFECYCLE_CURVE = get_config_value(training_config, "lifecycle_curve", "sigmoid_linear")  # "sigmoid_linear" or "exponential"
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
@@ -271,10 +284,16 @@ class BareBonesDMAO_Learn:
         self.last_trained = 0
         self.sleep_confidence_sum = 0.0
         self.sleep_confidence_count = 0
-        self.temperament = "neutral"
         self.confidence_history = deque(maxlen=5)
         self.last_weight = 0.0
-        self.last_temperament = "neutral"
+
+        # New state for features
+        self.temperament_score = 0.0
+        self.last_temperament_score = 0.0
+        self.temperament_history = deque(maxlen=5)
+        self.dream_memory = deque(maxlen=DREAM_MEMORY_MAXLEN)
+        self.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * LIFECYCLE_CAPACITY_FACTOR
+        self.last_prompt_embedding = None  # Cache for Prompt-Driven Dreams
 
         # Exposed controls
         self.sleep_conf_threshold = SLEEP_CONF_THRESHOLD
@@ -290,6 +309,17 @@ class BareBonesDMAO_Learn:
         self.scaffold_weight_cap = SCAFFOLD_WEIGHT_CAP
         self.base_temperature = BASE_TEMPERATURE
         self.save_path_prefix = SAVE_PATH_PREFIX
+        self.dream_memory_weight = DREAM_MEMORY_WEIGHT
+        self.dream_memory_maxlen = DREAM_MEMORY_MAXLEN
+        self.dream_prompt_weight = DREAM_PROMPT_WEIGHT
+        self.dream_novelty_boost = DREAM_NOVELTY_BOOST
+        self.temp_curiosity_boost = TEMP_CURIOSITY_BOOST
+        self.temp_restless_drop = TEMP_RESTLESS_DROP
+        self.temp_melancholy_noise = TEMP_MELANCHOLY_NOISE
+        self.conf_feedback_strength = CONF_FEEDBACK_STRENGTH
+        self.temp_smoothing_factor = TEMP_SMOOTHING_FACTOR
+        self.lifecycle_capacity_factor = LIFECYCLE_CAPACITY_FACTOR
+        self.lifecycle_curve = LIFECYCLE_CURVE
 
         # Load state if exists
         self.load_state()
@@ -308,11 +338,19 @@ class BareBonesDMAO_Learn:
             print("Invalid memory mode. Use: 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'")
 
     def get_life_curve_weight(self):
-        lora_params = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad)
-        capacity_threshold = lora_params // 100
-        growth = 1 / (1 + torch.exp(-SIGMOID_SCALE * (self.data_exposure - SIGMOID_SHIFT)))
-        degradation = max(0, 1 - ((self.data_exposure - capacity_threshold) / capacity_threshold)) if self.data_exposure > capacity_threshold else 1.0
-        return min(max((growth * degradation).item(), 0.0), self.scaffold_weight_cap)
+        stage = self.data_exposure / self.lora_capacity
+        if self.lifecycle_curve == "sigmoid_linear":
+            growth = 1 / (1 + torch.exp(-SIGMOID_SCALE * (self.data_exposure - SIGMOID_SHIFT)))
+            degradation = max(0, 1 - (stage - 1)) if stage > 1 else 1.0
+        elif self.lifecycle_curve == "exponential":
+            growth = 1 - torch.exp(-SIGMOID_SCALE * self.data_exposure)
+            degradation = torch.exp(-stage + 1) if stage > 1 else 1.0
+        else:
+            growth = 1 / (1 + torch.exp(-SIGMOID_SCALE * (self.data_exposure - SIGMOID_SHIFT)))
+            degradation = 1.0
+        weight = min(max((growth * degradation).item(), 0.0), self.scaffold_weight_cap)
+        print(f"Lifecycle weight: {weight:.3f}, stage: {stage:.2f}")
+        return weight
 
     def wake_up(self):
         if self.has_woken:
@@ -364,7 +402,7 @@ class BareBonesDMAO_Learn:
             self.sleep_log_min = log_min
         print(f"Sleep params: conf={self.sleep_conf_threshold}, time_factor={self.sleep_time_factor}, log_min={self.sleep_log_min}")
 
-    def tune_dream(self, swing_var=None, lifecycle_delta=None, temperament_on=None, noise_scale=None):
+    def tune_dream(self, swing_var=None, lifecycle_delta=None, temperament_on=None, noise_scale=None, memory_weight=None, memory_maxlen=None, prompt_weight=None, novelty_boost=None):
         if swing_var is not None and 0.05 <= swing_var <= 0.2:
             self.dream_swing_var = swing_var
         if lifecycle_delta is not None and 0.05 <= lifecycle_delta <= 0.2:
@@ -373,16 +411,35 @@ class BareBonesDMAO_Learn:
             self.dream_temperament_on = bool(temperament_on)
         if noise_scale is not None and 0.01 <= noise_scale <= 0.1:
             self.dream_noise_scale = noise_scale
-        print(f"Dream params: swing_var={self.dream_swing_var}, lifecycle_delta={self.dream_lifecycle_delta}, temperament_on={self.dream_temperament_on}, noise_scale={self.dream_noise_scale}")
+        if memory_weight is not None and 0 <= memory_weight <= 0.5:
+            self.dream_memory_weight = memory_weight
+        if memory_maxlen is not None and 5 <= memory_maxlen <= 20:
+            self.dream_memory_maxlen = memory_maxlen
+            self.dream_memory = deque(self.dream_memory, maxlen=memory_maxlen)
+        if prompt_weight is not None and 0 <= prompt_weight <= 1:
+            self.dream_prompt_weight = prompt_weight
+        if novelty_boost is not None and 0 <= novelty_boost <= 0.05:
+            self.dream_novelty_boost = novelty_boost
+        print(f"Dream params: swing_var={self.dream_swing_var}, lifecycle_delta={self.dream_lifecycle_delta}, temperament_on={self.dream_temperament_on}, noise_scale={self.dream_noise_scale}, memory_weight={self.dream_memory_weight}, memory_maxlen={self.dream_memory_maxlen}, prompt_weight={self.dream_prompt_weight}, novelty_boost={self.dream_novelty_boost}")
 
-    def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None):
+    def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None, curiosity_boost=None, restless_drop=None, melancholy_noise=None, conf_feedback_strength=None, temp_smoothing_factor=None):
         if eager_threshold is not None and 0.7 <= eager_threshold <= 0.9:
             self.temp_eager_threshold = eager_threshold
         if sluggish_threshold is not None and 0.4 <= sluggish_threshold <= 0.6:
             self.temp_sluggish_threshold = sluggish_threshold
         if mood_influence is not None and 0 <= mood_influence <= 1:
             self.temp_mood_influence = mood_influence
-        print(f"Temperament params: eager={self.temp_eager_threshold}, sluggish={self.temp_sluggish_threshold}, mood_influence={self.temp_mood_influence}")
+        if curiosity_boost is not None and 0 <= curiosity_boost <= 0.5:
+            self.temp_curiosity_boost = curiosity_boost
+        if restless_drop is not None and 0 <= restless_drop <= 0.5:
+            self.temp_restless_drop = restless_drop
+        if melancholy_noise is not None and 0 <= melancholy_noise <= 0.05:
+            self.temp_melancholy_noise = melancholy_noise
+        if conf_feedback_strength is not None and 0 <= conf_feedback_strength <= 1:
+            self.conf_feedback_strength = conf_feedback_strength
+        if temp_smoothing_factor is not None and 0 <= temp_smoothing_factor <= 1:
+            self.temp_smoothing_factor = temp_smoothing_factor
+        print(f"Temperament params: eager={self.temp_eager_threshold}, sluggish={self.temp_sluggish_threshold}, mood_influence={self.temp_mood_influence}, curiosity_boost={self.temp_curiosity_boost}, restless_drop={self.temp_restless_drop}, melancholy_noise={self.temp_melancholy_noise}, conf_feedback_strength={self.conf_feedback_strength}, smoothing_factor={self.temp_smoothing_factor}")
 
     def set_global_blend(self, weight_cap=None, base_temp=None):
         if weight_cap is not None and 0.5 <= weight_cap <= 1.0:
@@ -391,28 +448,34 @@ class BareBonesDMAO_Learn:
             self.base_temperature = base_temp
         print(f"Global blend: weight_cap={self.scaffold_weight_cap}, base_temp={self.base_temperature}")
 
+    def tune_lifecycle(self, capacity_factor=None, curve=None):
+        if capacity_factor is not None and 0.001 <= capacity_factor <= 0.1:
+            self.lifecycle_capacity_factor = capacity_factor
+            self.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * self.lifecycle_capacity_factor
+        if curve in ["sigmoid_linear", "exponential"]:
+            self.lifecycle_curve = curve
+        print(f"Lifecycle params: capacity_factor={self.lifecycle_capacity_factor}, curve={self.lifecycle_curve}")
+
     # Save/Load Methods
     def save_state(self, path_prefix=None):
         if path_prefix is None:
             path_prefix = self.save_path_prefix
         try:
-            # Save scaffold
             torch.save(self.scaffolds[0].state_dict(), f"{path_prefix}_scaffold.pth")
-            # Save cross-attention
             cross_attn_dict = {k: v for k, v in self.base_model.state_dict().items() if 'cross_attn' in k}
             torch.save(cross_attn_dict, f"{path_prefix}_cross_attn.pth")
-            # Save token map (JSON, lean and organic)
             with open(f"{path_prefix}_token_map.json", "w") as f:
-                json.dump({str(k): v for k, v in self.token_map.items()}, f)  # Keys as strings for JSON
-            # Save metadata
+                json.dump({str(k): v for k, v in self.token_map.items()}, f)
             metadata = {
                 "data_exposure": self.data_exposure,
                 "last_trained": self.last_trained,
-                "temperament": self.temperament,
+                "temperament_score": self.temperament_score,
+                "last_temperament_score": self.last_temperament_score,
+                "temperament_history": list(self.temperament_history),
+                "dream_memory": [m.tolist() for m in self.dream_memory],
                 "seen_prompts": list(self.seen_prompts),
                 "confidence_history": list(self.confidence_history),
-                "last_weight": self.last_weight,
-                "last_temperament": self.last_temperament
+                "last_weight": self.last_weight
             }
             with open(f"{path_prefix}_meta.json", "w") as f:
                 json.dump(metadata, f)
@@ -442,11 +505,13 @@ class BareBonesDMAO_Learn:
                     meta = json.load(f)
                     self.data_exposure = meta.get("data_exposure", 0)
                     self.last_trained = meta.get("last_trained", 0)
-                    self.temperament = meta.get("temperament", "neutral")
+                    self.temperament_score = meta.get("temperament_score", 0.0)
+                    self.last_temperament_score = meta.get("last_temperament_score", 0.0)
+                    self.temperament_history = deque(meta.get("temperament_history", []), maxlen=5)
+                    self.dream_memory = deque([torch.tensor(m, dtype=torch.float32) for m in meta.get("dream_memory", [])], maxlen=self.dream_memory_maxlen)
                     self.seen_prompts = set(meta.get("seen_prompts", []))
                     self.confidence_history = deque(meta.get("confidence_history", []), maxlen=5)
                     self.last_weight = meta.get("last_weight", 0.0)
-                    self.last_temperament = meta.get("last_temperament", "neutral")
                 print("Metadata loaded.")
         except Exception as e:
             print(f"Load failed: {e}. Starting fresh.")
@@ -531,6 +596,10 @@ class BareBonesDMAO_Learn:
                         scaffold_context = scaffold_context.to(base_hidden_state_output.device)
                         if self._parent_system.scaffold_proj is not None:
                             scaffold_context = self._parent_system.scaffold_proj(scaffold_context)
+                        # Blend dream memory if available
+                        if self._parent_system.dream_memory and self._parent_system.dream_memory_weight > 0:
+                            dream_avg = torch.stack(list(self._parent_system.dream_memory)).mean(dim=0).to(base_hidden_state_output.device)
+                            scaffold_context = (1 - self._parent_system.dream_memory_weight) * scaffold_context + self._parent_system.dream_memory_weight * dream_avg
                         fused_hidden_state = self.cross_attn(base_hidden_state_output, scaffold_context)
                         return (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
                     return outputs
@@ -590,28 +659,20 @@ class BareBonesDMAO_Learn:
         if len(log_entries) < self.sleep_log_min:
             return False
         avg_confidence = self.sleep_confidence_sum / self.sleep_confidence_count if self.sleep_confidence_count > 0 else 0.5
+        restless_adjust = -self.temp_restless_drop if -0.5 < self.temperament_score <= 0.0 else 0.0
+        threshold = self.sleep_conf_threshold + restless_adjust
         exposure_factor = max(1, self.data_exposure // 10)
         time_since = time.time() - self.last_trained
-        return avg_confidence > self.sleep_conf_threshold and time_since > (60 * exposure_factor * self.sleep_time_factor)
+        return avg_confidence > threshold and time_since > (60 * exposure_factor * self.sleep_time_factor)
 
     def _should_dream(self):
-        # Confidence Swings
-        if len(self.confidence_history) >= 5:
-            conf_tensor = torch.tensor(list(self.confidence_history), dtype=torch.float32)
-            conf_variance = torch.var(conf_tensor).item()
-            swing_dream = conf_variance > self.dream_swing_var
-        else:
-            swing_dream = False
-
-        # Lifecycle Peaks
-        current_weight = self.get_life_curve_weight()
-        weight_delta = abs(current_weight - self.last_weight)
-        lifecycle_dream = weight_delta > self.dream_lifecycle_delta
-
-        # Temperament Shifts
-        temperament_dream = self.dream_temperament_on and self.temperament != self.last_temperament
-
-        return swing_dream or lifecycle_dream or temperament_dream
+        swing_dream = len(self.confidence_history) >= 5 and torch.var(torch.tensor(list(self.confidence_history))).item() > self.dream_swing_var
+        lifecycle_dream = abs(self.temperament_score - self.last_temperament_score) > self.dream_lifecycle_delta
+        history_dream = False
+        if len(self.temperament_history) >= 5:
+            trend = torch.tensor(list(self.temperament_history)).mean().item() - self.temperament_history[0]
+            history_dream = abs(trend) > 0.3
+        return swing_dream or lifecycle_dream or (self.dream_temperament_on and history_dream)
 
     def _dream(self):
         print("--- Dreaming ---")
@@ -619,14 +680,35 @@ class BareBonesDMAO_Learn:
         if not log_entries:
             print("No memories to dream on.")
             return
-        dream_prompt = random.choice(log_entries)["prompt"]
+
+        # Prompt-Driven Dreams
+        last_prompt = self.history.messages[-1]["prompt"] if self.history.messages else random.choice(log_entries)["prompt"]
+        prompt_inputs = self.base_tokenizer(last_prompt, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
+        with torch.no_grad():
+            prompt_hidden = self.scaffolds[0](**prompt_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
+        self.last_prompt_embedding = prompt_hidden
+
+        weights = []
+        for i, entry in enumerate(log_entries):
+            log_inputs = self.base_tokenizer(entry["prompt"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
+            log_hidden = self.scaffolds[0](**log_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
+            similarity = F.cosine_similarity(prompt_hidden, log_hidden).item()
+            recency = (i + 1) / len(log_entries)
+            weight = self.dream_prompt_weight * similarity + (1 - self.dream_prompt_weight) * recency
+            weights.append(weight)
+        dream_entry = random.choices(log_entries, weights=weights, k=1)[0]
+        dream_prompt = dream_entry["prompt"]
+        is_novel = dream_prompt not in self.seen_prompts
+        noise_scale = self.dream_noise_scale + (self.temp_melancholy_noise if self.temperament_score <= -0.5 else 0) + (self.dream_novelty_boost if is_novel else 0)
+        noise_scale = min(noise_scale, 0.1)
+
         with torch.no_grad():
             inputs = self.tokenize_and_map(dream_prompt)
             hidden_states = self.get_scaffold_hidden_states(inputs)
-            noise = torch.randn_like(hidden_states) * self.dream_noise_scale
-            for param in self.scaffolds[0].parameters():
-                if param.grad is not None:
-                    param.data += noise.mean() * 0.01
+            noise = torch.randn_like(hidden_states) * noise_scale
+            dream_layer = (hidden_states.mean(dim=1) + noise).detach().cpu()
+            self.dream_memory.append(dream_layer)
+        print(f"Dreaming from prompt similarity: {max(weights):.2f}, novelty boost: {self.dream_novelty_boost if is_novel else 0:.3f}")
         print("--- Dream Complete ---")
 
     def _sleep_train(self):
@@ -669,18 +751,35 @@ class BareBonesDMAO_Learn:
         self.logger.clear()
         self.last_weight = self.get_life_curve_weight()
         self._update_temperament()
-        self.last_temperament = self.temperament
+        self.last_temperament_score = self.temperament_score
         print("--- Sleep Training Complete ---")
 
     def _update_temperament(self):
         avg_confidence = self.sleep_confidence_sum / self.sleep_confidence_count if self.sleep_confidence_count > 0 else 0.5
-        if avg_confidence > self.temp_eager_threshold:
-            self.temperament = "eager"
-        elif avg_confidence < self.temp_sluggish_threshold:
-            self.temperament = "sluggish"
+        lifecycle_stage = self.data_exposure / self.lora_capacity
+        base_score = 2.0 * (avg_confidence - 0.5)
+
+        if lifecycle_stage < 0.25:
+            bias = self.temp_curiosity_boost * (1 - lifecycle_stage / 0.25)
+        elif lifecycle_stage < 0.75:
+            bias = 0.0
+            if len(self.temperament_history) >= 5:
+                variance = torch.var(torch.tensor(list(self.temperament_history))).item()
+                bias -= 0.2 * variance
         else:
-            self.temperament = "calm"
-        print(f"Temperament updated: {self.temperament}")
+            bias = -self.temp_curiosity_boost * (lifecycle_stage - 0.75) / 0.25
+
+        target_score = base_score + bias + (self.conf_feedback_strength * (avg_confidence - 0.5))
+        target_score = max(-1.0, min(1.0, target_score))  # Clamp target to valid range
+        
+        # Apply smoothing: blend current score with target based on temp_smoothing_factor
+        alpha = 0.1 * (1 - self.temp_smoothing_factor)  # Reduce base alpha with smoothing
+        self.temperament_score = (1 - alpha) * self.temperament_score + alpha * target_score
+        self.temperament_score = max(-1.0, min(1.0, self.temperament_score))  # Ensure bounds
+        self.temperament_history.append(self.temperament_score)
+
+        label = "melancholic" if self.temperament_score <= -0.5 else "restless" if self.temperament_score <= 0.0 else "calm" if self.temperament_score <= 0.5 else "curious"
+        print(f"Temperament score: {self.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
 
     def train_step(self, batch):
         if self.dry_run:
@@ -694,7 +793,6 @@ class BareBonesDMAO_Learn:
                 print(f"Dry run loss: {loss.item()}")
             return None
     
-        # Ensure the optimizer is set up before training
         if not self.optimizer:
             print("Optimizer not set up. Setting up optimizer now.")
             num_training_steps = (len(TRAIN_DATA) // BATCH_SIZE) * TRAIN_EPOCHS
@@ -749,10 +847,11 @@ class BareBonesDMAO_Learn:
             self.optimizer.zero_grad()
         self.global_step += 1
     
+        exposure_gain = 3 if self.temperament_score > 0.5 else 2
         for prompt in prompts:
             if prompt not in self.seen_prompts:
                 self.seen_prompts.add(prompt)
-                self.data_exposure += 2
+                self.data_exposure += exposure_gain
         if self.use_token_map_memory:
             self._update_token_map_memory(prompts[0], calculate_confidence_score(outputs.logits, base_input_ids))
     
@@ -832,13 +931,10 @@ class BareBonesDMAO_Learn:
         scaffold_inputs = self.tokenize_and_map(prompt)
         scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
 
-        # Apply mood influence to temperature
         temp = self.base_temperature
         if self.temp_mood_influence > 0:
-            if self.temperament == "eager":
-                temp += self.temp_mood_influence * 0.3
-            elif self.temperament == "sluggish":
-                temp -= self.temp_mood_influence * 0.3
+            temp_adjustment = self.temp_mood_influence * 0.3 * self.temperament_score
+            temp += temp_adjustment
             temp = max(0.5, min(1.5, temp))
 
         self._clear_scaffold_cache()
@@ -910,7 +1006,7 @@ class BareBonesDMAO_Learn:
         return total_loss / batches if batches > 0 else 0
 
     def cleanup(self):
-        self.save_state()  # Auto-save on cleanup
+        self.save_state()
         self._clear_scaffold_cache()
         for attr in ['base_model', 'scaffolds', 'optimizer', 'scheduler']:
             if hasattr(self, attr):
@@ -946,12 +1042,13 @@ if __name__ == "__main__":
         dmao_system.wake_up()
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', "
-              "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise>', 'temp <eager> <sluggish> <influence>', "
-              "'blend <weight> <temp>', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem', or a prompt.")
+              "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost>', "
+              "'temp <eager> <sluggish> <influence> <curiosity> <restless> <melancholy> <conf_strength> <smoothing_factor>', "
+              "'blend <weight> <temp>', 'lifecycle <capacity> <curve>', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem', or a prompt.")
 
         valid_commands = [
             'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', 
-            'sleep', 'dream', 'temp', 'blend', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
+            'sleep', 'dream', 'temp', 'blend', 'lifecycle', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
         ]
 
         while True:
@@ -990,12 +1087,14 @@ if __name__ == "__main__":
                 dmao_system.load_state(path)
             elif cmd == 'sleep' and len(parts) == 4:
                 dmao_system.set_sleep_params(float(parts[1]), float(parts[2]), int(parts[3]))
-            elif cmd == 'dream' and len(parts) == 5:
-                dmao_system.tune_dream(float(parts[1]), float(parts[2]), parts[3].lower() == 'true', float(parts[4]))
-            elif cmd == 'temp' and len(parts) == 4:
-                dmao_system.adjust_temperament(float(parts[1]), float(parts[2]), float(parts[3]))
+            elif cmd == 'dream' and len(parts) == 9:
+                dmao_system.tune_dream(float(parts[1]), float(parts[2]), parts[3].lower() == 'true', float(parts[4]), float(parts[5]), int(parts[6]), float(parts[7]), float(parts[8]))
+            elif cmd == 'temp' and len(parts) == 9:
+                dmao_system.adjust_temperament(float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7]), float(parts[8]))
             elif cmd == 'blend' and len(parts) == 3:
                 dmao_system.set_global_blend(float(parts[1]), float(parts[2]))
+            elif cmd == 'lifecycle' and len(parts) == 3:
+                dmao_system.tune_lifecycle(float(parts[1]), parts[2])
             elif cmd in ['scaffold_mem', 'token_mem', 'both_mem', 'no_mem']:
                 dmao_system.toggle_memory(cmd)
             elif not user_cmd:
