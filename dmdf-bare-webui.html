@@ -3,32 +3,191 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DMDF Advanced UI</title>
+    <title>DMDF Synth Control Panel</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }
-        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        .section { margin-bottom: 25px; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
-        .section-title { font-size: 1.2em; margin-bottom: 15px; color: #333; }
-        .control-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-bottom: 15px; }
-        .control-item { display: flex; align-items: center; gap: 10px; }
-        input, select, textarea { padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100%; }
-        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; transition: background 0.3s; }
-        button:hover { background: #0056b3; }
-        .response { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 4px; white-space: pre-wrap; }
-        .hidden { display: none; }
-        .status-bar { margin-top: 20px; padding: 10px; background: #e9ecef; border-radius: 4px; }
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2b2b2b 100%);
+            color: #e0e0e0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #252525;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            border: 1px solid #3a3a3a;
+        }
+        .section {
+            margin-bottom: 25px;
+            padding: 20px;
+            background: #303030;
+            border: 1px solid #404040;
+            border-radius: 6px;
+            box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.3);
+        }
+        .section-title {
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            color: #00ccff;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            text-shadow: 0 0 5px rgba(0, 204, 255, 0.5);
+        }
+        .control-group {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 20px;
+            margin-bottom: 15px;
+        }
+        .control-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+        }
+        label {
+            color: #b0b0b0;
+            font-size: 0.85em;
+            text-align: center;
+        }
+        select {
+            padding: 6px;
+            border: 1px solid #505050;
+            border-radius: 4px;
+            background: #1f1f1f;
+            color: #e0e0e0;
+            width: 100%;
+            appearance: none;
+            background-image: url('data:image/svg+xml;utf8,<svg fill="%23e0e0e0" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5z"/></svg>');
+            background-repeat: no-repeat;
+            background-position: right 8px center;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+        select:focus {
+            border-color: #00ccff;
+            box-shadow: 0 0 8px rgba(0, 204, 255, 0.5);
+            outline: none;
+        }
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 8px;
+            background: #404040;
+            border-radius: 4px;
+            outline: none;
+            transition: background 0.3s;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #00ccff;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 8px rgba(0, 204, 255, 0.7);
+            transition: transform 0.3s;
+        }
+        input[type="range"]:hover::-webkit-slider-thumb {
+            transform: scale(1.2);
+        }
+        input[type="range"].knob {
+            width: 50px;
+            height: 50px;
+            transform: rotate(-135deg);
+            background: radial-gradient(circle, #505050 40%, #00ccff 45%, #505050 50%);
+            border-radius: 50%;
+            clip-path: circle(50%);
+        }
+        input[type="range"].knob::-webkit-slider-thumb {
+            width: 10px;
+            height: 10px;
+            background: #e0e0e0;
+            border-radius: 50%;
+            box-shadow: 0 0 5px rgba(0, 204, 255, 0.5);
+        }
+        textarea {
+            padding: 8px;
+            border: 1px solid #505050;
+            border-radius: 4px;
+            background: #1f1f1f;
+            color: #e0e0e0;
+            width: 100%;
+            resize: vertical;
+        }
+        button {
+            background: linear-gradient(45deg, #007bff, #00ccff);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-weight: bold;
+            letter-spacing: 1px;
+            transition: all 0.3s;
+            box-shadow: 0 2px 10px rgba(0, 204, 255, 0.4);
+        }
+        button:hover {
+            background: linear-gradient(45deg, #0056b3, #0099cc);
+            box-shadow: 0 4px 15px rgba(0, 204, 255, 0.6);
+            transform: translateY(-2px);
+        }
+        .response {
+            margin-top: 20px;
+            padding: 15px;
+            background: #1a1a1a;
+            border: 1px solid #404040;
+            border-radius: 4px;
+            color: #00ff99;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            text-shadow: 0 0 5px rgba(0, 255, 153, 0.5);
+        }
+        .hidden {
+            display: none;
+        }
+        .status-bar {
+            margin-top: 20px;
+            padding: 10px;
+            background: #252525;
+            border: 1px solid #505050;
+            border-radius: 4px;
+            color: #ffcc00;
+            font-family: 'Courier New', monospace;
+            text-shadow: 0 0 5px rgba(255, 204, 0, 0.5);
+        }
+        h1 {
+            color: #00ccff;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px rgba(0, 204, 255, 0.7);
+            margin-bottom: 30px;
+        }
+        .visualizer {
+            width: 100%;
+            height: 100px;
+            background: #1a1a1a;
+            border: 1px solid #404040;
+            border-radius: 4px;
+            margin-top: 20px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>DMDF Control Panel</h1>
+        <h1>DMDF Synth Control Panel</h1>
         
         <!-- Configuration Section -->
         <div class="section">
             <div class="section-title">Model Configuration</div>
             <div class="control-group">
                 <div class="control-item">
-                    <label>Quantization:</label>
+                    <label>Quantization</label>
                     <select id="quantization">
                         <option value="fp16">FP16</option>
                         <option value="int8">INT8</option>
@@ -36,7 +195,7 @@
                     </select>
                 </div>
                 <div class="control-item">
-                    <label>Layer Mode:</label>
+                    <label>Layer Mode</label>
                     <select id="layer_mode">
                         <option value="dynamic">Dynamic</option>
                         <option value="fixed">Fixed</option>
@@ -44,11 +203,11 @@
                     </select>
                 </div>
                 <div class="control-item" id="custom_layers_container" style="display: none;">
-                    <label>Custom Layers:</label>
+                    <label>Custom Layers</label>
                     <input type="text" id="custom_layers" placeholder="e.g., 4,5,6,7">
                 </div>
                 <div class="control-item">
-                    <label>Scaffold JIT:</label>
+                    <label>Scaffold JIT</label>
                     <select id="jit_mode">
                         <option value="on">Enabled</option>
                         <option value="off">Disabled</option>
@@ -62,20 +221,20 @@
             <div class="section-title">Training Parameters</div>
             <div class="control-group">
                 <div class="control-item">
-                    <label>Epochs:</label>
-                    <input type="number" id="epochs" value="3" min="1">
+                    <label>Epochs</label>
+                    <input type="range" min="1" max="10" value="3" id="epochs">
                 </div>
                 <div class="control-item">
-                    <label>Batch Size:</label>
-                    <input type="number" id="batch_size" value="1" min="1">
+                    <label>Batch Size</label>
+                    <input type="range" min="1" max="16" value="1" id="batch_size">
                 </div>
                 <div class="control-item">
-                    <label>Learning Rate:</label>
-                    <input type="number" id="lr" value="3e-4" step="1e-5">
+                    <label>Learning Rate</label>
+                    <input type="range" min="0.00001" max="0.001" step="0.00001" value="0.0003" id="lr" class="knob">
                 </div>
                 <div class="control-item">
-                    <label>Max Sequence Length:</label>
-                    <input type="number" id="max_seq" value="128" min="64">
+                    <label>Max Seq Length</label>
+                    <input type="range" min="64" max="256" value="128" id="max_seq">
                 </div>
             </div>
         </div>
@@ -86,8 +245,8 @@
             <div class="control-group">
                 <button onclick="toggleScaffold(true)">Load Scaffold</button>
                 <button onclick="toggleScaffold(false)">Unload Scaffold</button>
-                <button onclick="toggleDynamicLayers()">Toggle Dynamic Layers</button>
-                <button onclick="resetSystem()">Reinitialize System</button>
+                <button onclick="toggleDynamicLayers()">Toggle Layers</button>
+                <button onclick="resetSystem()">Reinitialize</button>
             </div>
         </div>
 
@@ -95,21 +254,21 @@
         <div class="section">
             <div class="section-title">Text Generation</div>
             <div class="control-group">
-                <div class="control-item">
-                    <label>Prompt:</label>
+                <div class="control-item" style="grid-column: span 2;">
+                    <label>Prompt</label>
                     <textarea id="user_input" rows="4" placeholder="Enter your prompt..."></textarea>
                 </div>
                 <div class="control-item">
-                    <label>Scaffold Weight (0-1):</label>
-                    <input type="number" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5">
+                    <label>Scaffold Weight</label>
+                    <input type="range" min="0" max="1" step="0.1" value="0.5" id="scaffold_weight" class="knob">
                 </div>
                 <div class="control-item">
-                    <label>Max Tokens:</label>
-                    <input type="number" id="max_tokens" value="60" min="10" max="500">
+                    <label>Max Tokens</label>
+                    <input type="range" min="10" max="500" value="60" id="max_tokens">
                 </div>
                 <div class="control-item">
-                    <label>Temperature:</label>
-                    <input type="number" id="temperature" value="0.7" min="0.1" max="2.0" step="0.1">
+                    <label>Temperature</label>
+                    <input type="range" min="0.1" max="2.0" step="0.1" value="0.7" id="temperature" class="knob">
                 </div>
             </div>
             <div class="control-group">
@@ -123,6 +282,7 @@
             <div class="section-title">Output</div>
             <div class="status-bar" id="status">System Ready</div>
             <div class="response" id="response"></div>
+            <canvas class="visualizer" id="visualizer"></canvas>
         </div>
     </div>
 
@@ -140,7 +300,6 @@
 
         function toggleScaffold(enable) {
             updateStatus(`Scaffold ${enable ? 'loaded' : 'unloaded'}`);
-            // Add actual scaffold control logic here
         }
 
         function toggleDynamicLayers() {
@@ -152,7 +311,6 @@
         function resetSystem() {
             const quantization = document.getElementById('quantization').value;
             updateStatus(`Reinitializing system with ${quantization} quantization...`);
-            // Add actual reinitialization logic here
         }
 
         function collectTrainingParams() {
@@ -176,17 +334,39 @@
         function generateResponse() {
             const params = collectGenerationParams();
             updateStatus(`Generating response with weight=${params.scaffold_weight}...`);
-            // Add actual generation logic here
             document.getElementById('response').textContent = 
                 `Generated response for: ${params.prompt}\n` +
                 `(Weight: ${params.scaffold_weight}, Temp: ${params.temperature})`;
+            updateVisualizer();
         }
 
         function startTraining() {
             const params = collectTrainingParams();
             updateStatus(`Starting training for ${params.epochs} epochs...`);
-            // Add actual training logic here
+            updateVisualizer();
         }
+
+        // Visualizer Logic
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+
+        function updateVisualizer() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#00ff99';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            const temp = parseFloat(document.getElementById('temperature').value);
+            const weight = parseFloat(document.getElementById('scaffold_weight').value);
+            for (let x = 0; x < canvas.width; x++) {
+                const y = canvas.height / 2 + Math.sin(x * 0.05 + temp) * 30 * weight;
+                x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            requestAnimationFrame(updateVisualizer);
+        }
+        updateVisualizer();
     </script>
 </body>
 </html>
