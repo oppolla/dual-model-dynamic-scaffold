@@ -286,68 +286,68 @@ Output: (new prompt line)
 ```
 ## Configuration (config.json)
 ### core_config
-- base_model_name: Base model (e.g., "gpt2"). Defines the primary language model.
+- `base_model_name`: Base model (e.g., "gpt2"). Defines the primary language model.
 
-- scaffold_model_name: Scaffold model (e.g., "gpt2"). Guides the base model via cross-attention.
+- `scaffold_model_name`: Scaffold model (e.g., "gpt2"). Guides the base model via cross-attention.
 
-- cross_attn_layers: Fixed layers for cross-attention (e.g., [5, 7]). Ignored if use_dynamic_layers is true.
+- `cross_attn_layers`: Fixed layers for cross-attention (e.g., [5, 7]). Ignored if use_dynamic_layers is true.
 
-- use_dynamic_layers: If true, selects layers dynamically based on layer_selection_mode.
+- `use_dynamic_layers`: If true, selects layers dynamically based on layer_selection_mode.
 
-- layer_selection_mode: Dynamic layer strategy ("early", "late", "balanced", "custom").
+- `layer_selection_mode`: Dynamic layer strategy ("early", "late", "balanced", "custom").
 
-- custom_layers: Custom layer list for "custom" mode (e.g., [0, 2, 4]).
+- `custom_layers`: Custom layer list for "custom" mode (e.g., [0, 2, 4]).
 
-- valid_split_ratio: Validation data split (e.g., 0.2 = 20%).
+- `valid_split_ratio`: Validation data split (e.g., 0.2 = 20%).
 
-- random_seed: Seed for reproducibility (e.g., 42).
+- `random_seed`: Seed for reproducibility (e.g., 42).
 
-- quantization: Precision mode ("fp16", "int8", "int4").
+- `quantization`: Precision mode ("fp16", "int8", "int4").
 
 ### lora_config
-- lora_rank: LoRA rank (e.g., 8). Controls adaptation capacity.
+- `lora_rank`: LoRA rank (e.g., 8). Controls adaptation capacity.
 
-- lora_alpha: LoRA scaling factor (e.g., 16).
+- `lora_alpha`: LoRA scaling factor (e.g., 16).
 
-- lora_dropout: Dropout rate for LoRA (e.g., 0.1).
+- `lora_dropout`: Dropout rate for LoRA (e.g., 0.1).
 
-- lora_target_modules: Modules to adapt (e.g., ["q_proj", "v_proj"]).
+- `lora_target_modules`: Modules to adapt (e.g., ["q_proj", "v_proj"]).
 
 ### training_config
-- learning_rate: Learning rate (e.g., 2e-5).
+- `learning_rate`: Learning rate (e.g., 2e-5).
 
-- train_epochs: Number of epochs (e.g., 3).
+- `train_epochs`: Number of epochs (e.g., 3).
 
-- batch_size: Batch size (e.g., 2).
+- `batch_size`: Batch size (e.g., 2).
 
-- max_seq_length: Max token length (e.g., 512).
+- `max_seq_length`: Max token length (e.g., 512).
 
-- sigmoid_scale: Sigmoid scaling for lifecycle (e.g., 0.5).
+- `sigmoid_scale`: Sigmoid scaling for lifecycle (e.g., 0.5).
 
-- sigmoid_shift: Sigmoid shift for lifecycle (e.g., 5.0).
+- `sigmoid_shift`: Sigmoid shift for lifecycle (e.g., 5.0).
 
-- lifecycle_capacity_factor: Capacity factor for lifecycle weighting (e.g., 0.01).
+- `lifecycle_capacity_factor`: Capacity factor for lifecycle weighting (e.g., 0.01).
 
-- lifecycle_curve: Lifecycle curve type ("sigmoid_linear", "exponential").
+- `lifecycle_curve`: Lifecycle curve type ("sigmoid_linear", "exponential").
 
-- accumulation_steps: Gradient accumulation steps (e.g., 4).
+- `accumulation_steps`: Gradient accumulation steps (e.g., 4).
 
-- exposure_gain_eager: Exposure gain when eager (e.g., 3).
+- `exposure_gain_eager`: Exposure gain when eager (e.g., 3).
 
-- exposure_gain_default: Default exposure gain (e.g., 2).
+- `exposure_gain_default`: Default exposure gain (e.g., 2).
 
-- max_patience: Early stopping patience (e.g., 2).
+- `max_patience`: Early stopping patience (e.g., 2).
 
-- dry_run: If true, enables dry-run mode.
+- `dry_run`: If true, enables dry-run mode.
 
 ### dry_run_params:
-- max_samples: Max samples in dry run (e.g., 2).
+- `max_samples`: Max samples in dry run (e.g., 2).
 
-- max_length: Max length in dry run (e.g., 128).
+- `max_length`: Max length in dry run (e.g., 128).
 
-- validate_architecture: If true, validates architecture.
+- `validate_architecture`: If true, validates architecture.
 
-- skip_training: If true, skips full training.
+- `skip_training`: If true, skips full training.
 
 ### controls_config
 - `sleep_conf_threshold`: Confidence threshold for gestation (0.5–0.9, e.g., 0.7). Triggers gestation if average confidence exceeds this.
