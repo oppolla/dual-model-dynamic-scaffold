@@ -94,20 +94,10 @@
         input[type="range"]:hover::-webkit-slider-thumb {
             transform: scale(1.2);
         }
-        input[type="range"].knob {
-            width: 50px;
-            height: 50px;
-            transform: rotate(-135deg);
-            background: radial-gradient(circle, #505050 40%, #00ccff 45%, #505050 50%);
-            border-radius: 50%;
-            clip-path: circle(50%);
-        }
-        input[type="range"].knob::-webkit-slider-thumb {
-            width: 10px;
-            height: 10px;
-            background: #e0e0e0;
-            border-radius: 50%;
-            box-shadow: 0 0 5px rgba(0, 204, 255, 0.5);
+        .value-display {
+            font-size: 0.8em;
+            color: #00ff99;
+            text-shadow: 0 0 3px rgba(0, 255, 153, 0.5);
         }
         input[type="checkbox"] {
             appearance: none;
@@ -240,6 +230,7 @@
                 <div class="control-item">
                     <label>Cross Attn Layers</label>
                     <input type="range" id="cross_attn_layers" min="0" max="11" value="5">
+                    <span class="value-display" id="cross_attn_layers_value">5</span>
                 </div>
                 <div class="control-item">
                     <label>Quantization</label>
@@ -264,11 +255,13 @@
                 </div>
                 <div class="control-item">
                     <label>Valid Split</label>
-                    <input type="range" id="valid_split_ratio" min="0.1" max="0.5" step="0.1" value="0.2" class="knob">
+                    <input type="range" id="valid_split_ratio" min="0.1" max="0.5" step="0.1" value="0.2">
+                    <span class="value-display" id="valid_split_ratio_value">0.2</span>
                 </div>
                 <div class="control-item">
                     <label>Random Seed</label>
                     <input type="range" id="random_seed" min="0" max="100" value="42">
+                    <span class="value-display" id="random_seed_value">42</span>
                 </div>
                 <div class="control-item">
                     <label>Scaffold JIT</label>
@@ -287,14 +280,17 @@
                 <div class="control-item">
                     <label>LoRA Rank</label>
                     <input type="range" id="lora_rank" min="1" max="16" value="8">
+                    <span class="value-display" id="lora_rank_value">8</span>
                 </div>
                 <div class="control-item">
                     <label>LoRA Alpha</label>
                     <input type="range" id="lora_alpha" min="8" max="32" value="16">
+                    <span class="value-display" id="lora_alpha_value">16</span>
                 </div>
                 <div class="control-item">
                     <label>LoRA Dropout</label>
-                    <input type="range" id="lora_dropout" min="0" max="0.5" step="0.05" value="0.1" class="knob">
+                    <input type="range" id="lora_dropout" min="0" max="0.5" step="0.05" value="0.1">
+                    <span class="value-display" id="lora_dropout_value">0.1</span>
                 </div>
                 <div class="control-item">
                     <label>Target Modules</label>
@@ -316,30 +312,37 @@
                 <div class="control-item">
                     <label>Epochs</label>
                     <input type="range" id="epochs" min="1" max="10" value="3">
+                    <span class="value-display" id="epochs_value">3</span>
                 </div>
                 <div class="control-item">
                     <label>Batch Size</label>
                     <input type="range" id="batch_size" min="1" max="16" value="1">
+                    <span class="value-display" id="batch_size_value">1</span>
                 </div>
                 <div class="control-item">
                     <label>Learning Rate</label>
-                    <input type="range" id="lr" min="0.00001" max="0.001" step="0.00001" value="0.0003" class="knob">
+                    <input type="range" id="lr" min="0.00001" max="0.001" step="0.00001" value="0.0003">
+                    <span class="value-display" id="lr_value">0.0003</span>
                 </div>
                 <div class="control-item">
                     <label>Max Seq Length</label>
                     <input type="range" id="max_seq" min="64" max="256" value="128">
+                    <span class="value-display" id="max_seq_value">128</span>
                 </div>
                 <div class="control-item">
                     <label>Sigmoid Scale</label>
-                    <input type="range" id="sigmoid_scale" min="0" max="1" step="0.1" value="0.5" class="knob">
+                    <input type="range" id="sigmoid_scale" min="0" max="1" step="0.1" value="0.5">
+                    <span class="value-display" id="sigmoid_scale_value">0.5</span>
                 </div>
                 <div class="control-item">
                     <label>Sigmoid Shift</label>
                     <input type="range" id="sigmoid_shift" min="0" max="10" value="5">
+                    <span class="value-display" id="sigmoid_shift_value">5</span>
                 </div>
                 <div class="control-item">
                     <label>Capacity Factor</label>
-                    <input type="range" id="lifecycle_capacity_factor" min="0.001" max="0.1" step="0.001" value="0.01" class="knob">
+                    <input type="range" id="lifecycle_capacity_factor" min="0.001" max="0.1" step="0.001" value="0.01">
+                    <span class="value-display" id="lifecycle_capacity_factor_value">0.01</span>
                 </div>
                 <div class="control-item">
                     <label>Lifecycle Curve</label>
@@ -357,15 +360,18 @@
             <div class="control-group">
                 <div class="control-item">
                     <label>Conf Threshold</label>
-                    <input type="range" id="sleep_conf_threshold" min="0.5" max="0.9" step="0.1" value="0.7" class="knob">
+                    <input type="range" id="sleep_conf_threshold" min="0.5" max="0.9" step="0.1" value="0.7">
+                    <span class="value-display" id="sleep_conf_threshold_value">0.7</span>
                 </div>
                 <div class="control-item">
                     <label>Time Factor</label>
                     <input type="range" id="sleep_time_factor" min="0.5" max="5" step="0.5" value="1">
+                    <span class="value-display" id="sleep_time_factor_value">1</span>
                 </div>
                 <div class="control-item">
                     <label>Log Min</label>
                     <input type="range" id="sleep_log_min" min="5" max="20" value="10">
+                    <span class="value-display" id="sleep_log_min_value">10</span>
                 </div>
             </div>
         </div>
@@ -376,11 +382,13 @@
             <div class="control-group">
                 <div class="control-item">
                     <label>Swing Var</label>
-                    <input type="range" id="dream_swing_var" min="0.05" max="0.2" step="0.05" value="0.1" class="knob">
+                    <input type="range" id="dream_swing_var" min="0.05" max="0.2" step="0.05" value="0.1">
+                    <span class="value-display" id="dream_swing_var_value">0.1</span>
                 </div>
                 <div class="control-item">
                     <label>Lifecycle Delta</label>
-                    <input type="range" id="dream_lifecycle_delta" min="0.05" max="0.2" step="0.05" value="0.1" class="knob">
+                    <input type="range" id="dream_lifecycle_delta" min="0.05" max="0.2" step="0.05" value="0.1">
+                    <span class="value-display" id="dream_lifecycle_delta_value">0.1</span>
                 </div>
                 <div class="control-item">
                     <label>Temperament</label>
@@ -388,31 +396,38 @@
                 </div>
                 <div class="control-item">
                     <label>Noise Scale</label>
-                    <input type="range" id="dream_noise_scale" min="0.01" max="0.1" step="0.01" value="0.05" class="knob">
+                    <input type="range" id="dream_noise_scale" min="0.01" max="0.1" step="0.01" value="0.05">
+                    <span class="value-display" id="dream_noise_scale_value">0.05</span>
                 </div>
                 <div class="control-item">
                     <label>Memory Weight</label>
-                    <input type="range" id="dream_memory_weight" min="0" max="0.5" step="0.1" value="0.1" class="knob">
+                    <input type="range" id="dream_memory_weight" min="0" max="0.5" step="0.1" value="0.1">
+                    <span class="value-display" id="dream_memory_weight_value">0.1</span>
                 </div>
                 <div class="control-item">
                     <label>Memory Maxlen</label>
                     <input type="range" id="dream_memory_maxlen" min="5" max="20" value="10">
+                    <span class="value-display" id="dream_memory_maxlen_value">10</span>
                 </div>
                 <div class="control-item">
                     <label>Prompt Weight</label>
-                    <input type="range" id="dream_prompt_weight" min="0" max="1" step="0.1" value="0.5" class="knob">
+                    <input type="range" id="dream_prompt_weight" min="0" max="1" step="0.1" value="0.5">
+                    <span class="value-display" id="dream_prompt_weight_value">0.5</span>
                 </div>
                 <div class="control-item">
                     <label>Novelty Boost</label>
-                    <input type="range" id="dream_novelty_boost" min="0" max="0.05" step="0.01" value="0.03" class="knob">
+                    <input type="range" id="dream_novelty_boost" min="0" max="0.05" step="0.01" value="0.03">
+                    <span class="value-display" id="dream_novelty_boost_value">0.03</span>
                 </div>
                 <div class="control-item">
                     <label>Memory Decay</label>
-                    <input type="range" id="dream_memory_decay" min="0" max="1" step="0.1" value="0.95" class="knob">
+                    <input type="range" id="dream_memory_decay" min="0" max="1" step="0.1" value="0.95">
+                    <span class="value-display" id="dream_memory_decay_value">0.95</span>
                 </div>
                 <div class="control-item">
                     <label>Prune Threshold</label>
-                    <input type="range" id="dream_prune_threshold" min="0" max="1" step="0.1" value="0.1" class="knob">
+                    <input type="range" id="dream_prune_threshold" min="0" max="1" step="0.1" value="0.1">
+                    <span class="value-display" id="dream_prune_threshold_value">0.1</span>
                 </div>
             </div>
         </div>
@@ -423,35 +438,43 @@
             <div class="control-group">
                 <div class="control-item">
                     <label>Eager Threshold</label>
-                    <input type="range" id="temp_eager_threshold" min="0.7" max="0.9" step="0.1" value="0.8" class="knob">
+                    <input type="range" id="temp_eager_threshold" min="0.7" max="0.9" step="0.1" value="0.8">
+                    <span class="value-display" id="temp_eager_threshold_value">0.8</span>
                 </div>
                 <div class="control-item">
                     <label>Sluggish Threshold</label>
-                    <input type="range" id="temp_sluggish_threshold" min="0.4" max="0.6" step="0.1" value="0.6" class="knob">
+                    <input type="range" id="temp_sluggish_threshold" min="0.4" max="0.6" step="0.1" value="0.6">
+                    <span class="value-display" id="temp_sluggish_threshold_value">0.6</span>
                 </div>
                 <div class="control-item">
                     <label>Mood Influence</label>
-                    <input type="range" id="temp_mood_influence" min="0" max="1" step="0.1" value="0" class="knob">
+                    <input type="range" id="temp_mood_influence" min="0" max="1" step="0.1" value="0">
+                    <span class="value-display" id="temp_mood_influence_value">0</span>
                 </div>
                 <div class="control-item">
                     <label>Curiosity Boost</label>
-                    <input type="range" id="temp_curiosity_boost" min="0" max="0.5" step="0.1" value="0.5" class="knob">
+                    <input type="range" id="temp_curiosity_boost" min="0" max="0.5" step="0.1" value="0.5">
+                    <span class="value-display" id="temp_curiosity_boost_value">0.5</span>
                 </div>
                 <div class="control-item">
                     <label>Restless Drop</label>
-                    <input type="range" id="temp_restless_drop" min="0" max="0.5" step="0.1" value="0.1" class="knob">
+                    <input type="range" id="temp_restless_drop" min="0" max="0.5" step="0.1" value="0.1">
+                    <span class="value-display" id="temp_restless_drop_value">0.1</span>
                 </div>
                 <div class="control-item">
                     <label>Melancholy Noise</label>
-                    <input type="range" id="temp_melancholy_noise" min="0" max="0.05" step="0.01" value="0.02" class="knob">
+                    <input type="range" id="temp_melancholy_noise" min="0" max="0.05" step="0.01" value="0.02">
+                    <span class="value-display" id="temp_melancholy_noise_value">0.02</span>
                 </div>
                 <div class="control-item">
                     <label>Feedback Strength</label>
-                    <input type="range" id="conf_feedback_strength" min="0" max="1" step="0.1" value="0.5" class="knob">
+                    <input type="range" id="conf_feedback_strength" min="0" max="1" step="0.1" value="0.5">
+                    <span class="value-display" id="conf_feedback_strength_value">0.5</span>
                 </div>
                 <div class="control-item">
                     <label>Smoothing Factor</label>
-                    <input type="range" id="temp_smoothing_factor" min="0" max="1" step="0.1" value="0" class="knob">
+                    <input type="range" id="temp_smoothing_factor" min="0" max="1" step="0.1" value="0">
+                    <span class="value-display" id="temp_smoothing_factor_value">0</span>
                 </div>
             </div>
         </div>
@@ -463,14 +486,17 @@
                 <div class="control-item">
                     <label>LoRA Capacity</label>
                     <input type="range" id="lora_capacity" min="0" max="1000" value="0">
+                    <span class="value-display" id="lora_capacity_value">0</span>
                 </div>
                 <div class="control-item">
                     <label>Max Patience</label>
                     <input type="range" id="max_patience" min="1" max="5" value="2">
+                    <span class="value-display" id="max_patience_value">2</span>
                 </div>
                 <div class="control-item">
                     <label>Accum Steps</label>
                     <input type="range" id="accumulation_steps" min="1" max="8" value="4">
+                    <span class="value-display" id="accumulation_steps_value">4</span>
                 </div>
                 <button onclick="toggleScaffold(true)">Load Scaffold</button>
                 <button onclick="toggleScaffold(false)">Unload Scaffold</button>
@@ -489,15 +515,18 @@
                 </div>
                 <div class="control-item">
                     <label>Scaffold Weight</label>
-                    <input type="range" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5" class="knob">
+                    <input type="range" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5">
+                    <span class="value-display" id="scaffold_weight_value">0.5</span>
                 </div>
                 <div class="control-item">
                     <label>Max Tokens</label>
                     <input type="range" id="max_tokens" min="10" max="500" value="60">
+                    <span class="value-display" id="max_tokens_value">60</span>
                 </div>
                 <div class="control-item">
                     <label>Temperature</label>
-                    <input type="range" id="temperature" min="0.1" max="2.0" step="0.1" value="0.7" class="knob">
+                    <input type="range" id="temperature" min="0.1" max="2.0" step="0.1" value="0.7">
+                    <span class="value-display" id="temperature_value">0.7</span>
                 </div>
                 <div class="control-item">
                     <label>Save Path</label>
@@ -521,7 +550,7 @@
     </div>
 
     <script>
-        // JSON Configuration (from your provided JSON)
+        // JSON Configuration
         const config = {
             "core_config": {
                 "base_model_name": "gpt2",
@@ -587,22 +616,35 @@
                 e.target.value === 'custom' ? 'block' : 'none';
         });
 
+        // Update Slider Value Displays
+        function updateSliderValue(sliderId) {
+            const slider = document.getElementById(sliderId);
+            const valueDisplay = document.getElementById(`${sliderId}_value`);
+            valueDisplay.textContent = slider.value;
+        }
+
+        // Add event listeners to all sliders
+        document.querySelectorAll('input[type="range"]').forEach(slider => {
+            slider.addEventListener('input', () => updateSliderValue(slider.id));
+            updateSliderValue(slider.id); // Initial update
+        });
+
         // Initialize UI from Config
         function initUIFromConfig() {
             document.getElementById('base_model_name').value = config.core_config.base_model_name;
             document.getElementById('scaffold_model_name').value = config.core_config.scaffold_model_name;
-            document.getElementById('cross_attn_layers').value = config.core_config.cross_attn_layers[0]; // Simplified
+            document.getElementById('cross_attn_layers').value = config.core_config.cross_attn_layers[0];
             document.getElementById('quantization').value = config.core_config.quantization;
             document.getElementById('layer_mode').value = config.core_config.layer_selection_mode;
             document.getElementById('custom_layers').value = config.core_config.custom_layers || '';
             document.getElementById('valid_split_ratio').value = config.core_config.valid_split_ratio;
             document.getElementById('random_seed').value = config.core_config.random_seed;
-            document.getElementById('jit_mode').value = 'on'; // Default
+            document.getElementById('jit_mode').value = 'on';
 
             document.getElementById('lora_rank').value = config.lora_config.lora_rank;
             document.getElementById('lora_alpha').value = config.lora_config.lora_alpha;
             document.getElementById('lora_dropout').value = config.lora_config.lora_dropout;
-            document.getElementById('lora_target_modules').value = config.lora_config.lora_target_modules[0]; // Simplified
+            document.getElementById('lora_target_modules').value = config.lora_config.lora_target_modules[0];
 
             document.getElementById('epochs').value = config.training_config.train_epochs;
             document.getElementById('batch_size').value = config.training_config.batch_size;
@@ -640,14 +682,17 @@
             document.getElementById('lora_capacity').value = config.controls_config.lora_capacity || 0;
             document.getElementById('max_patience').value = config.controls_config.max_patience;
             document.getElementById('accumulation_steps').value = config.controls_config.accumulation_steps;
-            document.getElementById('max_tokens').value = 60; // Not in JSON
+            document.getElementById('max_tokens').value = 60;
+
+            // Update all slider displays
+            document.querySelectorAll('input[type="range"]').forEach(slider => updateSliderValue(slider.id));
         }
 
         // Update Config from UI
         function updateConfigFromUI() {
             config.core_config.base_model_name = document.getElementById('base_model_name').value;
             config.core_config.scaffold_model_name = document.getElementById('scaffold_model_name').value;
-            config.core_config.cross_attn_layers = [parseInt(document.getElementById('cross_attn_layers').value)]; // Simplified
+            config.core_config.cross_attn_layers = [parseInt(document.getElementById('cross_attn_layers').value)];
             config.core_config.quantization = document.getElementById('quantization').value;
             config.core_config.layer_selection_mode = document.getElementById('layer_mode').value;
             config.core_config.custom_layers = document.getElementById('custom_layers').value || null;
@@ -658,7 +703,7 @@
             config.lora_config.lora_rank = parseInt(document.getElementById('lora_rank').value);
             config.lora_config.lora_alpha = parseInt(document.getElementById('lora_alpha').value);
             config.lora_config.lora_dropout = parseFloat(document.getElementById('lora_dropout').value);
-            config.lora_config.lora_target_modules = [document.getElementById('lora_target_modules').value]; // Simplified
+            config.lora_config.lora_target_modules = [document.getElementById('lora_target_modules').value];
 
             config.training_config.train_epochs = parseInt(document.getElementById('epochs').value);
             config.training_config.batch_size = parseInt(document.getElementById('batch_size').value);
