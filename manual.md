@@ -7,6 +7,7 @@ Stops the script and exits cleanly.
 Breaks the input loop, calls `cleanup()` to save state and free GPU memory, then shuts down.
 **Use case:**  
 Exit after testing or training.
+
 **Example:**
 ```
 quit
