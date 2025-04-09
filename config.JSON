@@ -50,6 +50,8 @@
     "conf_feedback_strength": 0.5,
     "temp_smoothing_factor": 0.0,
     "dream_memory_decay": 0.95,
-    "dream_prune_threshold": 0.1
+    "dream_prune_threshold": 0.1,
+    "sleep_conf_threshold": 0.7,
+    "sleep_log_min": 10
   }
 }
