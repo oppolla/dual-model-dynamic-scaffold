@@ -80,6 +80,16 @@
     "enable_lora_adapters": true,
     "enable_repetition_check": true,
     "enable_prompt_driven_dreams": true,
-    "enable_lifecycle_weighting": true
+    "enable_lifecycle_weighting": true,
+    "enable_curiosity": true,
+    "curiosity_novelty_threshold_spontaneous": 0.9,
+    "curiosity_novelty_threshold_response": 0.8,
+    "curiosity_pressure_threshold": 0.7,
+    "curiosity_pressure_drop": 0.3,
+    "curiosity_silence_threshold": 20.0,
+    "curiosity_question_cooldown": 60.0,
+    "curiosity_queue_maxlen": 10,
+    "curiosity_weight_ignorance": 0.7,
+    "curiosity_weight_novelty": 0.3
   }
 }
