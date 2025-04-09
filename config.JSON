@@ -31,10 +31,10 @@
     "max_patience": 2,
     "dry_run": false,
     "dry_run_params": {
-    "max_samples": 2,
-    "max_length": 128,
-    "validate_architecture": true,
-    "skip_training": true
+      "max_samples": 2,
+      "max_length": 128,
+      "validate_architecture": true,
+      "skip_training": true
     }
   },
   "controls_config": {
@@ -69,20 +69,17 @@
     "has_woken": false,
     "is_sleeping": false,
     "confidence_history_maxlen": 5,
-    "temperament_history_maxlen": 5
-    "lora_capacity": null,
-    "max_patience": 2,
-    "accumulation_steps": 4,
-  "enable_dreaming": true,
-  "enable_temperament": true,
-  "enable_confidence_tracking": true,
-  "enable_gestation": true,
-  "enable_sleep_training": true,
-  "enable_cross_attention": true,
-  "enable_dynamic_cross_attention": true,
-  "enable_lora_adapters": true,
-  "enable_repetition_check": true,
-  "enable_prompt_driven_dreams": true,
-  "enable_lifecycle_weighting": true,
+    "temperament_history_maxlen": 5,
+    "enable_dreaming": true,
+    "enable_temperament": true,
+    "enable_confidence_tracking": true,
+    "enable_gestation": true,
+    "enable_sleep_training": true,
+    "enable_cross_attention": true,
+    "enable_dynamic_cross_attention": true,
+    "enable_lora_adapters": true,
+    "enable_repetition_check": true,
+    "enable_prompt_driven_dreams": true,
+    "enable_lifecycle_weighting": true
   }
 }
