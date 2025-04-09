@@ -518,14 +518,21 @@
             </div>
         </div>
 
-        <!-- Text Generation -->
+        <!-- Prompt Input (New Section) -->
         <div class="section">
-            <div class="section-title">Text Generation</div>
+            <div class="section-title">Prompt Input</div>
             <div class="control-group">
                 <div class="control-item" style="grid-column: span 2;">
                     <label>Prompt</label>
                     <textarea id="user_input" rows="4" placeholder="Enter your prompt..."></textarea>
                 </div>
+            </div>
+        </div>
+
+        <!-- Text Generation (Updated Without Prompt) -->
+        <div class="section">
+            <div class="section-title">Text Generation</div>
+            <div class="control-group">
                 <div class="control-item">
                     <label>Scaffold Weight</label>
                     <input type="range" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5">
