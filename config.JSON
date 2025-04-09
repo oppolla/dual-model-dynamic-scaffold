@@ -24,7 +24,18 @@
     "sigmoid_scale": 0.5,
     "sigmoid_shift": 5.0,
     "lifecycle_capacity_factor": 0.01,
-    "lifecycle_curve": "sigmoid_linear"
+    "lifecycle_curve": "sigmoid_linear",
+    "accumulation_steps": 4,
+    "exposure_gain_eager": 3,
+    "exposure_gain_default": 2,
+    "max_patience": 2,
+    "dry_run": false,
+    "dry_run_params": {
+    "max_samples": 2,
+    "max_length": 128,
+    "validate_architecture": true,
+    "skip_training": true
+    }
   },
   "controls_config": {
     "sleep_conf_threshold": 0.7,
@@ -51,8 +62,16 @@
     "temp_smoothing_factor": 0.0,
     "dream_memory_decay": 0.95,
     "dream_prune_threshold": 0.1,
+    "use_scaffold_memory": true,
+    "use_token_map_memory": true,
+    "memory_decay_rate": 0.95,
+    "dynamic_cross_attn_mode": null,
+    "has_woken": false,
+    "is_sleeping": false,
+    "confidence_history_maxlen": 5,
+    "temperament_history_maxlen": 5
     "lora_capacity": null,
     "max_patience": 2,
-    "accumulation_steps": 4
+    "accumulation_steps": 4,
   }
 }
