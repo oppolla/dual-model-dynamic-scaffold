@@ -120,6 +120,25 @@ else:
     LIFECYCLE_CURVE = get_config_value(training_config, "lifecycle_curve", "sigmoid_linear")  # "sigmoid_linear" or "exponential"
     DREAM_MEMORY_DECAY = get_config_value(controls_config, "dream_memory_decay", 0.95)  # 0-1, decay per dream
     DREAM_PRUNE_THRESHOLD = get_config_value(controls_config, "dream_prune_threshold", 0.1)  # 0-1, prune below this
+    USE_SCAFFOLD_MEMORY = get_config_value(controls_config, "use_scaffold_memory", True)
+    USE_TOKEN_MAP_MEMORY = get_config_value(controls_config, "use_token_map_memory", True)
+    DYNAMIC_CROSS_ATTN_MODE = get_config_value(controls_config, "dynamic_cross_attn_mode", None)
+    DRY_RUN = get_config_value(training_config, "dry_run", False)
+    dry_run_config = get_config_value(training_config, "dry_run_params", {})
+    DRY_RUN_MAX_SAMPLES = get_config_value(dry_run_config, "max_samples", 2)
+    DRY_RUN_MAX_LENGTH = get_config_value(dry_run_config, "max_length", 128)
+    DRY_RUN_VALIDATE_ARCH = get_config_value(dry_run_config, "validate_architecture", True)
+    DRY_RUN_SKIP_TRAINING = get_config_value(dry_run_config, "skip_training", True)
+    MEMORY_DECAY_RATE = get_config_value(controls_config, "memory_decay_rate", 0.95)
+    HAS_WOKEN = get_config_value(controls_config, "has_woken", False)
+    IS_SLEEPING = get_config_value(controls_config, "is_sleeping", False)
+    ACCUMULATION_STEPS = get_config_value(training_config, "accumulation_steps", 4)
+    EXPOSURE_GAIN_EAGER = get_config_value(training_config, "exposure_gain_eager", 3)
+    EXPOSURE_GAIN_DEFAULT = get_config_value(training_config, "exposure_gain_default", 2)
+    MAX_PATIENCE = get_config_value(training_config, "max_patience", 2)
+    CONFIDENCE_HISTORY_MAXLEN = get_config_value(controls_config, "confidence_history_maxlen", 5)
+    TEMPERAMENT_HISTORY_MAXLEN = get_config_value(controls_config, "temperament_history_maxlen", 5)
+
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
@@ -225,8 +244,13 @@ class BareBonesDMAO_Learn:
         self.quantization_mode = QUANTIZATION_MODE
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
-        self.dry_run = False
-        self.dry_run_params = {'max_samples': 2, 'max_length': 128, 'validate_architecture': True, 'skip_training': True}
+        self.dry_run = DRY_RUN
+        self.dry_run_params = {
+            'max_samples': DRY_RUN_MAX_SAMPLES,
+            'max_length': DRY_RUN_MAX_LENGTH,
+            'validate_architecture': DRY_RUN_VALIDATE_ARCH,
+            'skip_training': DRY_RUN_SKIP_TRAINING
+}
 
         # Load models
         print(f"Loading base model: {BASE_MODEL_NAME}")
@@ -285,18 +309,19 @@ class BareBonesDMAO_Learn:
         self.seen_prompts = set()
         self.best_valid_loss = float('inf')
         self.patience = 0
-        self.max_patience = 2
-        self.has_woken = False
-        self.use_scaffold_memory = True
-        self.use_token_map_memory = True
-        self.memory_decay_rate = 0.95
+        self.max_patience = MAX_PATIENCE
+        self.has_woken = HAS_WOKEN
+        self.use_scaffold_memory = USE_SCAFFOLD_MEMORY
+        self.use_token_map_memory = USE_TOKEN_MAP_MEMORY
+        self.memory_decay_rate = MEMORY_DECAY_RATE
         self.logger = ThreadSafeLogger("log.jsonl")
         self.history = ConversationHistory()
         self.last_trained = 0
-        self.dynamic_cross_attn_mode = None
+        self.dynamic_cross_attn_mode = DYNAMIC_CROSS_ATTN_MODE
         self.sleep_confidence_sum = 0.0
         self.sleep_confidence_count = 0
-        self.confidence_history = deque(maxlen=5)
+        self.confidence_history = deque(maxlen=CONFIDENCE_HISTORY_MAXLEN)
+        self.temperament_history = deque(maxlen=TEMPERAMENT_HISTORY_MAXLEN)
         self.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * self.lifecycle_capacity_factor
         self.last_weight = 0.0
         self.is_sleeping = False
@@ -309,7 +334,6 @@ class BareBonesDMAO_Learn:
         # New state for features
         self.temperament_score = 0.0
         self.last_temperament_score = 0.0
-        self.temperament_history = deque(maxlen=5)
         self.dream_memory = deque(maxlen=self.dream_memory_maxlen)
         self.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * LIFECYCLE_CAPACITY_FACTOR
         self.last_prompt_embedding = None  # Cache for Prompt-Driven Dreams
@@ -341,6 +365,7 @@ class BareBonesDMAO_Learn:
         self.temp_smoothing_factor = TEMP_SMOOTHING_FACTOR
         self.lifecycle_capacity_factor = LIFECYCLE_CAPACITY_FACTOR
         self.lifecycle_curve = LIFECYCLE_CURVE
+        
 
         # Load state if exists
         self.load_state()
@@ -367,7 +392,7 @@ class BareBonesDMAO_Learn:
         prompt = " "
         with torch.no_grad():
             response = self.generate(prompt, max_new_tokens=15, temperature=1.7, top_k=30, do_sample=True)
-        self.has_woken = True
+        self.is_sleeping = IS_SLEEPING
         print(f"\n{response}")
         self.logger.write({"event": "wake_up", "response": response, "timestamp": time.time(), "conversation_id": self.history.conversation_id})
         return response
@@ -962,7 +987,7 @@ class BareBonesDMAO_Learn:
             print("Warning: Invalid loss. Skipping batch.")
             return None
     
-        accumulation_steps = 4
+        accumulation_steps = ACCUMULATION_STEPS
         scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else []), max_norm=1.0)
@@ -979,7 +1004,7 @@ class BareBonesDMAO_Learn:
             self.optimizer.zero_grad()
         self.global_step += 1
     
-        exposure_gain = 3 if self.temperament_score > 0.5 else 2
+        exposure_gain = EXPOSURE_GAIN_EAGER if self.temperament_score > 0.5 else EXPOSURE_GAIN_DEFAULT
         for prompt in prompts:
             if prompt not in self.seen_prompts:
                 self.seen_prompts.add(prompt)
