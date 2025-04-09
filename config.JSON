@@ -73,5 +73,16 @@
     "lora_capacity": null,
     "max_patience": 2,
     "accumulation_steps": 4,
+  "enable_dreaming": true,
+  "enable_temperament": true,
+  "enable_confidence_tracking": true,
+  "enable_gestation": true,
+  "enable_sleep_training": true,
+  "enable_cross_attention": true,
+  "enable_dynamic_cross_attention": true,
+  "enable_lora_adapters": true,
+  "enable_repetition_check": true,
+  "enable_prompt_driven_dreams": true,
+  "enable_lifecycle_weighting": true,
   }
 }
