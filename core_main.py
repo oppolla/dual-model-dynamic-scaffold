@@ -269,7 +269,7 @@ class ThreadSafeLogger:
             print(f"Log clear failed: {e}")
             raise
 
-class BareBonesDMAO_Learn:
+class SOVLSystem:
     def __init__(self):
         self.quantization_mode = QUANTIZATION_MODE
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
@@ -380,7 +380,6 @@ class BareBonesDMAO_Learn:
         self.base_temperature = BASE_TEMPERATURE
         self.save_path_prefix = SAVE_PATH_PREFIX
         self.dream_memory_weight = DREAM_MEMORY_WEIGHT
-        self.dream_memory_maxlen = DREAM_MEMORY_MAXLEN
         self.dream_memory_decay = DREAM_MEMORY_DECAY
         self.dream_prune_threshold = DREAM_PRUNE_THRESHOLD
         self.dream_prompt_weight = DREAM_PROMPT_WEIGHT
@@ -612,10 +611,10 @@ class BareBonesDMAO_Learn:
                     self.last_trained = meta.get("last_trained", 0)
                     self.temperament_score = meta.get("temperament_score", 0.0)
                     self.last_temperament_score = meta.get("last_temperament_score", 0.0)
-                    self.temperament_history = deque(meta.get("temperament_history", []), maxlen=5)
+                    self.temperament_history = deque(meta.get("temperament_history", []), maxlen=TEMPERAMENT_HISTORY_MAXLEN)
                     self.dream_memory = deque([(torch.tensor(m, dtype=torch.float32).to(DEVICE), w) for m, w in meta.get("dream_memory", [])], maxlen=self.dream_memory_maxlen)
                     self.seen_prompts = set(meta.get("seen_prompts", []))
-                    self.confidence_history = deque(meta.get("confidence_history", []), maxlen=5)
+                    self.confidence_history = deque(meta.get("confidence_history", []), maxlen=CONFIDENCE_HISTORY_MAXLEN)
                     self.last_weight = meta.get("last_weight", 0.0)
                 print("Metadata loaded.")
         except Exception as e:
@@ -1259,13 +1258,13 @@ if not TRAIN_DATA or not VALID_DATA:
 print("Quantization mode:", QUANTIZATION_MODE)
 
 if __name__ == "__main__":
-    print("\nInitializing Bare Bones DMAO System...")
-    dmao_system = None
+    print("\nInitializing SOVL System...")
+    sovl_system = None
     try:
-        dmao_system = BareBonesDMAO_Learn()
+        sovl_system = SOVLSystem()
         if "--dry-run" in sys.argv:
-            dmao_system.enable_dry_run(max_samples=2, max_length=64)
-        dmao_system.wake_up()
+            sovl_system.enable_dry_run(max_samples=2, max_length=64)
+        sovl_system.wake_up()
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', "
               "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost>', "
@@ -1286,62 +1285,62 @@ if __name__ == "__main__":
             if cmd in ['quit', 'exit']:
                 break
             elif cmd == 'train':
-                dmao_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
-                if dmao_system.dry_run:
+                sovl_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
+                if sovl_system.dry_run:
                     break
             elif cmd in ['int8', 'int4', 'fp16']:
-                dmao_system.set_quantization_mode(cmd)
+                sovl_system.set_quantization_mode(cmd)
                 print(f"Re-initializing with {cmd.upper()} quantization...")
-                dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()
+                sovl_system = SOVLSystem()
+                sovl_system.wake_up()
             elif cmd == 'dynamic':
-                dmao_system.toggle_dynamic_layers(True)
+                sovl_system.toggle_dynamic_layers(True)
                 print("Re-initializing with dynamic layers...")
-                dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()
+                sovl_system = SOVLSystem()
+                sovl_system.wake_up()
             elif cmd == 'fixed':
-                dmao_system.toggle_dynamic_layers(False)
+                sovl_system.toggle_dynamic_layers(False)
                 print("Re-initializing with fixed layers...")
-                dmao_system = BareBonesDMAO_Learn()
-                dmao_system.wake_up()
+                sovl_system = SOVLSystem()
+                sovl_system.wake_up()
             elif cmd == 'new':
-                dmao_system.new_conversation()
+                sovl_system.new_conversation()
             elif cmd == 'save':
                 path = parts[1] if len(parts) > 1 else None
-                dmao_system.save_state(path)
+                sovl_system.save_state(path)
             elif cmd == 'load':
                 path = parts[1] if len(parts) > 1 else None
-                dmao_system.load_state(path)
+                sovl_system.load_state(path)
             elif cmd == 'sleep':
                 try:
                     if len(parts) != 4:
                         raise ValueError("Usage: sleep <conf> <time> <log>")
-                    dmao_system.set_sleep_params(float(parts[1]), float(parts[2]), int(parts[3]))
+                    sovl_system.set_sleep_params(float(parts[1]), float(parts[2]), int(parts[3]))
                 except ValueError as e:
                     print(f"Error: {e}")
             elif cmd == 'dream' and len(parts) == 11:
-                dmao_system.tune_dream(float(parts[1]), float(parts[2]), parts[3].lower() == 'true', float(parts[4]), float(parts[5]), int(parts[6]), float(parts[7]), float(parts[8]), float(parts[9]), float(parts[10]))
+                sovl_system.tune_dream(float(parts[1]), float(parts[2]), parts[3].lower() == 'true', float(parts[4]), float(parts[5]), int(parts[6]), float(parts[7]), float(parts[8]), float(parts[9]), float(parts[10]))
             elif cmd == 'temp' and len(parts) == 9:
-                dmao_system.adjust_temperament(float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7]), float(parts[8]))
+                sovl_system.adjust_temperament(float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7]), float(parts[8]))
             elif cmd == 'blend' and len(parts) == 3:
-                dmao_system.set_global_blend(float(parts[1]), float(parts[2]))
+                sovl_system.set_global_blend(float(parts[1]), float(parts[2]))
             elif cmd == 'lifecycle' and len(parts) == 3:
-                dmao_system.tune_lifecycle(float(parts[1]), parts[2])
+                sovl_system.tune_lifecycle(float(parts[1]), parts[2])
             elif cmd == 'cross' and len(parts) >= 2:
                 args = parts[1:]
                 if args[0] == 'weight' and len(args) == 2:
-                    dmao_system.tune_cross_attention(weight=float(args[1]))
+                    sovl_system.tune_cross_attention(weight=float(args[1]))
                 elif args[0] == 'blend' and len(args) == 2:
-                    dmao_system.tune_cross_attention(blend_strength=float(args[1]))
+                    sovl_system.tune_cross_attention(blend_strength=float(args[1]))
                 elif args[0] == 'layers' and len(args) > 1:
                     layer_weights = [float(w) for w in args[1:]]
-                    dmao_system.tune_cross_attention(layer_weights=layer_weights)
+                    sovl_system.tune_cross_attention(layer_weights=layer_weights)
                 elif args[0] in ['confidence', 'temperament', 'off']:
-                    dmao_system.tune_cross_attention(dynamic_mode=args[0])
+                    sovl_system.tune_cross_attention(dynamic_mode=args[0])
                 else:
                     print("Usage: cross weight <float> | blend <float> | layers <float...> | confidence | temperament | off")
             elif cmd in ['scaffold_mem', 'token_mem', 'both_mem', 'no_mem']:
-                dmao_system.toggle_memory(cmd)
+                sovl_system.toggle_memory(cmd)
             elif not user_cmd:
                 continue
             else:
@@ -1350,7 +1349,7 @@ if __name__ == "__main__":
                     print("Valid commands are:", ', '.join(valid_commands))
                 else:
                     print("\n--- Generating Response ---")
-                    response = dmao_system.generate(user_cmd, max_new_tokens=60, temperature=dmao_system.base_temperature, top_k=50, do_sample=True)
+                    response = sovl_system.generate(user_cmd, max_new_tokens=60, temperature=sovl_system.base_temperature, top_k=50, do_sample=True)
                     print("\nResponse:", response)
                     print("-" * 20)
 
@@ -1363,9 +1362,9 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
     finally:
-        if dmao_system is not None:
-            dmao_system.cleanup()
-            del dmao_system
+        if sovl_system is not None:
+            sovl_system.cleanup()
+            del sovl_system
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print("\nExiting.")
