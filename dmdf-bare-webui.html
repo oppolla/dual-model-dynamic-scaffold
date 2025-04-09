@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DMDF Synth Control Panel</title>
+    <title>SOVL System Control Panel</title>
     <style>
+    /* Your existing CSS remains unchanged */
     body {
         font-family: 'Verdana', sans-serif;
         margin: 0;
@@ -161,13 +162,23 @@
         border-radius: 3px;
         margin-top: 15px;
     }
-</style>
+    textarea {
+        width: 100%;
+        padding: 5px;
+        border: 1px solid #444;
+        border-radius: 3px;
+        background: #1e1e1e;
+        color: #e0e0e0;
+        font-size: 0.8em;
+        resize: vertical;
+    }
+    </style>
 </head>
 <body>
     <div class="container">
-        <h1>Scaffold Control Panel</h1>
+        <h1>SOVL System Control Panel</h1>
 
-        <!-- Core Config -->
+        <!-- Core Configuration -->
         <div class="section">
             <div class="section-title">Core Configuration</div>
             <div class="control-group">
@@ -202,7 +213,7 @@
                 </div>
                 <div class="control-item">
                     <label>Layer Mode</label>
-                    <select id="layer_mode">
+                    <select id="layer_selection_mode">
                         <option value="early">Early</option>
                         <option value="late">Late</option>
                         <option value="balanced">Balanced</option>
@@ -223,17 +234,10 @@
                     <input type="range" id="random_seed" min="0" max="100" value="42">
                     <span class="value-display" id="random_seed_value">42</span>
                 </div>
-                <div class="control-item">
-                    <label>Scaffold JIT</label>
-                    <select id="jit_mode">
-                        <option value="on">Enabled</option>
-                        <option value="off">Disabled</option>
-                    </select>
-                </div>
             </div>
         </div>
 
-        <!-- LoRA Config -->
+        <!-- LoRA Configuration -->
         <div class="section">
             <div class="section-title">LoRA Configuration</div>
             <div class="control-group">
@@ -254,25 +258,29 @@
                 </div>
                 <div class="control-item">
                     <label>Target Modules</label>
-                    <select id="lora_target_modules">
-                        <option value="c_attn">c_attn</option>
-                        <option value="c_proj">c_proj</option>
-                        <option value="c_fc">c_fc</option>
+                    <select id="lora_target_modules" multiple>
+                        <option value="c_attn" selected>c_attn</option>
+                        <option value="c_proj" selected>c_proj</option>
+                        <option value="c_fc" selected>c_fc</option>
                         <option value="q_proj">q_proj</option>
                         <option value="v_proj">v_proj</option>
                     </select>
                 </div>
+                <div class="control-item">
+                    <label>Enable LoRA</label>
+                    <input type="checkbox" id="enable_lora_adapters" checked>
+                </div>
             </div>
         </div>
 
-        <!-- Training Controls -->
+        <!-- Training Parameters -->
         <div class="section">
             <div class="section-title">Training Parameters</div>
             <div class="control-group">
                 <div class="control-item">
                     <label>Epochs</label>
-                    <input type="range" id="epochs" min="1" max="10" value="3">
-                    <span class="value-display" id="epochs_value">3</span>
+                    <input type="range" id="train_epochs" min="1" max="10" value="3">
+                    <span class="value-display" id="train_epochs_value">3</span>
                 </div>
                 <div class="control-item">
                     <label>Batch Size</label>
@@ -281,23 +289,13 @@
                 </div>
                 <div class="control-item">
                     <label>Learning Rate</label>
-                    <input type="range" id="lr" min="0.00001" max="0.001" step="0.00001" value="0.0003">
-                    <span class="value-display" id="lr_value">0.0003</span>
+                    <input type="range" id="learning_rate" min="0.00001" max="0.001" step="0.00001" value="0.0003">
+                    <span class="value-display" id="learning_rate_value">0.0003</span>
                 </div>
                 <div class="control-item">
                     <label>Max Seq Length</label>
-                    <input type="range" id="max_seq" min="64" max="256" value="128">
-                    <span class="value-display" id="max_seq_value">128</span>
-                </div>
-                <div class="control-item">
-                    <label>Sigmoid Scale</label>
-                    <input type="range" id="sigmoid_scale" min="0" max="1" step="0.1" value="0.5">
-                    <span class="value-display" id="sigmoid_scale_value">0.5</span>
-                </div>
-                <div class="control-item">
-                    <label>Sigmoid Shift</label>
-                    <input type="range" id="sigmoid_shift" min="0" max="10" value="5">
-                    <span class="value-display" id="sigmoid_shift_value">5</span>
+                    <input type="range" id="max_seq_length" min="64" max="256" value="128">
+                    <span class="value-display" id="max_seq_length_value">128</span>
                 </div>
                 <div class="control-item">
                     <label>Capacity Factor</label>
@@ -311,12 +309,32 @@
                         <option value="exponential">Exponential</option>
                     </select>
                 </div>
+                <div class="control-item">
+                    <label>Accum Steps</label>
+                    <input type="range" id="accumulation_steps" min="1" max="8" value="4">
+                    <span class="value-display" id="accumulation_steps_value">4</span>
+                </div>
+                <div class="control-item">
+                    <label>Max Patience</label>
+                    <input type="range" id="max_patience" min="1" max="5" value="2">
+                    <span class="value-display" id="max_patience_value">2</span>
+                </div>
+                <div class="control-item">
+                    <label>Eager Gain</label>
+                    <input type="range" id="exposure_gain_eager" min="1" max="5" value="3">
+                    <span class="value-display" id="exposure_gain_eager_value">3</span>
+                </div>
+                <div class="control-item">
+                    <label>Default Gain</label>
+                    <input type="range" id="exposure_gain_default" min="1" max="5" value="2">
+                    <span class="value-display" id="exposure_gain_default_value">2</span>
+                </div>
             </div>
         </div>
 
-        <!-- Sleep Controls -->
+        <!-- Sleep & Dreaming -->
         <div class="section">
-            <div class="section-title">Sleep Controls</div>
+            <div class="section-title">Sleep & Dreaming</div>
             <div class="control-group">
                 <div class="control-item">
                     <label>Conf Threshold</label>
@@ -333,13 +351,6 @@
                     <input type="range" id="sleep_log_min" min="5" max="20" value="10">
                     <span class="value-display" id="sleep_log_min_value">10</span>
                 </div>
-            </div>
-        </div>
-
-        <!-- Dream Controls -->
-        <div class="section">
-            <div class="section-title">Dream Controls</div>
-            <div class="control-group">
                 <div class="control-item">
                     <label>Swing Var</label>
                     <input type="range" id="dream_swing_var" min="0.05" max="0.2" step="0.05" value="0.1">
@@ -349,10 +360,6 @@
                     <label>Lifecycle Delta</label>
                     <input type="range" id="dream_lifecycle_delta" min="0.05" max="0.2" step="0.05" value="0.1">
                     <span class="value-display" id="dream_lifecycle_delta_value">0.1</span>
-                </div>
-                <div class="control-item">
-                    <label>Temperament</label>
-                    <input type="checkbox" id="dream_temperament_on" checked>
                 </div>
                 <div class="control-item">
                     <label>Noise Scale</label>
@@ -388,6 +395,26 @@
                     <label>Prune Threshold</label>
                     <input type="range" id="dream_prune_threshold" min="0" max="1" step="0.1" value="0.1">
                     <span class="value-display" id="dream_prune_threshold_value">0.1</span>
+                </div>
+                <div class="control-item">
+                    <label>Enable Dreaming</label>
+                    <input type="checkbox" id="enable_dreaming" checked>
+                </div>
+                <div class="control-item">
+                    <label>Dream Temperament</label>
+                    <input type="checkbox" id="dream_temperament_on" checked>
+                </div>
+                <div class="control-item">
+                    <label>Prompt-Driven</label>
+                    <input type="checkbox" id="enable_prompt_driven_dreams" checked>
+                </div>
+                <div class="control-item">
+                    <label>Enable Gestation</label>
+                    <input type="checkbox" id="enable_gestation" checked>
+                </div>
+                <div class="control-item">
+                    <label>Sleep Training</label>
+                    <input type="checkbox" id="enable_sleep_training" checked>
                 </div>
             </div>
         </div>
@@ -436,6 +463,14 @@
                     <input type="range" id="temp_smoothing_factor" min="0" max="1" step="0.1" value="0">
                     <span class="value-display" id="temp_smoothing_factor_value">0</span>
                 </div>
+                <div class="control-item">
+                    <label>Enable Temperament</label>
+                    <input type="checkbox" id="enable_temperament" checked>
+                </div>
+                <div class="control-item">
+                    <label>Confidence Tracking</label>
+                    <input type="checkbox" id="enable_confidence_tracking" checked>
+                </div>
             </div>
         </div>
 
@@ -444,28 +479,46 @@
             <div class="section-title">Runtime Controls</div>
             <div class="control-group">
                 <div class="control-item">
-                    <label>LoRA Capacity</label>
-                    <input type="range" id="lora_capacity" min="0" max="1000" value="0">
-                    <span class="value-display" id="lora_capacity_value">0</span>
+                    <label>Scaffold Weight Cap</label>
+                    <input type="range" id="scaffold_weight_cap" min="0" max="1" step="0.1" value="0.9">
+                    <span class="value-display" id="scaffold_weight_cap_value">0.9</span>
                 </div>
                 <div class="control-item">
-                    <label>Max Patience</label>
-                    <input type="range" id="max_patience" min="1" max="5" value="2">
-                    <span class="value-display" id="max_patience_value">2</span>
+                    <label>Memory Decay</label>
+                    <input type="range" id="memory_decay_rate" min="0" max="1" step="0.1" value="0.95">
+                    <span class="value-display" id="memory_decay_rate_value">0.95</span>
                 </div>
                 <div class="control-item">
-                    <label>Accum Steps</label>
-                    <input type="range" id="accumulation_steps" min="1" max="8" value="4">
-                    <span class="value-display" id="accumulation_steps_value">4</span>
+                    <label>Scaffold Memory</label>
+                    <input type="checkbox" id="use_scaffold_memory" checked>
+                </div>
+                <div class="control-item">
+                    <label>Token Map Memory</label>
+                    <input type="checkbox" id="use_token_map_memory" checked>
+                </div>
+                <div class="control-item">
+                    <label>Dynamic Cross Attn</label>
+                    <input type="checkbox" id="enable_dynamic_cross_attention" checked>
+                </div>
+                <div class="control-item">
+                    <label>Cross Attention</label>
+                    <input type="checkbox" id="enable_cross_attention" checked>
+                </div>
+                <div class="control-item">
+                    <label>Repetition Check</label>
+                    <input type="checkbox" id="enable_repetition_check" checked>
+                </div>
+                <div class="control-item">
+                    <label>Lifecycle Weighting</label>
+                    <input type="checkbox" id="enable_lifecycle_weighting" checked>
                 </div>
                 <button onclick="toggleScaffold(true)">Load Scaffold</button>
                 <button onclick="toggleScaffold(false)">Unload Scaffold</button>
-                <button onclick="toggleDynamicLayers()">Toggle Layers</button>
                 <button onclick="resetSystem()">Reinitialize</button>
             </div>
         </div>
 
-        <!-- Generation Interface -->
+        <!-- Text Generation -->
         <div class="section">
             <div class="section-title">Text Generation</div>
             <div class="control-group">
@@ -485,8 +538,8 @@
                 </div>
                 <div class="control-item">
                     <label>Temperature</label>
-                    <input type="range" id="temperature" min="0.1" max="2.0" step="0.1" value="0.7">
-                    <span class="value-display" id="temperature_value">0.7</span>
+                    <input type="range" id="base_temperature" min="0.1" max="2.0" step="0.1" value="0.7">
+                    <span class="value-display" id="base_temperature_value">0.7</span>
                 </div>
                 <div class="control-item">
                     <label>Save Path</label>
@@ -510,7 +563,7 @@
     </div>
 
     <script>
-        // JSON Configuration
+        // Updated JSON Configuration
         const config = {
             "core_config": {
                 "base_model_name": "gpt2",
@@ -534,10 +587,12 @@
                 "train_epochs": 3,
                 "batch_size": 1,
                 "max_seq_length": 128,
-                "sigmoid_scale": 0.5,
-                "sigmoid_shift": 5.0,
                 "lifecycle_capacity_factor": 0.01,
-                "lifecycle_curve": "sigmoid_linear"
+                "lifecycle_curve": "sigmoid_linear",
+                "accumulation_steps": 4,
+                "exposure_gain_eager": 3,
+                "exposure_gain_default": 2,
+                "max_patience": 2
             },
             "controls_config": {
                 "sleep_conf_threshold": 0.7,
@@ -564,14 +619,29 @@
                 "temp_smoothing_factor": 0.0,
                 "dream_memory_decay": 0.95,
                 "dream_prune_threshold": 0.1,
-                "lora_capacity": null,
-                "max_patience": 2,
-                "accumulation_steps": 4
+                "use_scaffold_memory": true,
+                "use_token_map_memory": true,
+                "memory_decay_rate": 0.95,
+                "has_woken": false,
+                "is_sleeping": false,
+                "confidence_history_maxlen": 5,
+                "temperament_history_maxlen": 5,
+                "enable_dreaming": true,
+                "enable_temperament": true,
+                "enable_confidence_tracking": true,
+                "enable_gestation": true,
+                "enable_sleep_training": true,
+                "enable_cross_attention": true,
+                "enable_dynamic_cross_attention": true,
+                "enable_lora_adapters": true,
+                "enable_repetition_check": true,
+                "enable_prompt_driven_dreams": true,
+                "enable_lifecycle_weighting": true
             }
         };
 
         // Dynamic UI Interactions
-        document.getElementById('layer_mode').addEventListener('change', (e) => {
+        document.getElementById('layer_selection_mode').addEventListener('change', (e) => {
             document.getElementById('custom_layers_container').style.display = 
                 e.target.value === 'custom' ? 'block' : 'none';
         });
@@ -583,10 +653,9 @@
             valueDisplay.textContent = slider.value;
         }
 
-        // Add event listeners to all sliders
         document.querySelectorAll('input[type="range"]').forEach(slider => {
             slider.addEventListener('input', () => updateSliderValue(slider.id));
-            updateSliderValue(slider.id); // Initial update
+            updateSliderValue(slider.id);
         });
 
         // Initialize UI from Config
@@ -595,25 +664,29 @@
             document.getElementById('scaffold_model_name').value = config.core_config.scaffold_model_name;
             document.getElementById('cross_attn_layers').value = config.core_config.cross_attn_layers[0];
             document.getElementById('quantization').value = config.core_config.quantization;
-            document.getElementById('layer_mode').value = config.core_config.layer_selection_mode;
+            document.getElementById('layer_selection_mode').value = config.core_config.layer_selection_mode;
             document.getElementById('custom_layers').value = config.core_config.custom_layers || '';
             document.getElementById('valid_split_ratio').value = config.core_config.valid_split_ratio;
             document.getElementById('random_seed').value = config.core_config.random_seed;
-            document.getElementById('jit_mode').value = 'on';
 
             document.getElementById('lora_rank').value = config.lora_config.lora_rank;
             document.getElementById('lora_alpha').value = config.lora_config.lora_alpha;
             document.getElementById('lora_dropout').value = config.lora_config.lora_dropout;
-            document.getElementById('lora_target_modules').value = config.lora_config.lora_target_modules[0];
+            Array.from(document.getElementById('lora_target_modules').options).forEach(opt => {
+                opt.selected = config.lora_config.lora_target_modules.includes(opt.value);
+            });
+            document.getElementById('enable_lora_adapters').checked = config.controls_config.enable_lora_adapters;
 
-            document.getElementById('epochs').value = config.training_config.train_epochs;
+            document.getElementById('train_epochs').value = config.training_config.train_epochs;
             document.getElementById('batch_size').value = config.training_config.batch_size;
-            document.getElementById('lr').value = config.training_config.learning_rate;
-            document.getElementById('max_seq').value = config.training_config.max_seq_length;
-            document.getElementById('sigmoid_scale').value = config.training_config.sigmoid_scale;
-            document.getElementById('sigmoid_shift').value = config.training_config.sigmoid_shift;
+            document.getElementById('learning_rate').value = config.training_config.learning_rate;
+            document.getElementById('max_seq_length').value = config.training_config.max_seq_length;
             document.getElementById('lifecycle_capacity_factor').value = config.training_config.lifecycle_capacity_factor;
             document.getElementById('lifecycle_curve').value = config.training_config.lifecycle_curve;
+            document.getElementById('accumulation_steps').value = config.training_config.accumulation_steps;
+            document.getElementById('max_patience').value = config.training_config.max_patience;
+            document.getElementById('exposure_gain_eager').value = config.training_config.exposure_gain_eager;
+            document.getElementById('exposure_gain_default').value = config.training_config.exposure_gain_default;
 
             document.getElementById('sleep_conf_threshold').value = config.controls_config.sleep_conf_threshold;
             document.getElementById('sleep_time_factor').value = config.controls_config.sleep_time_factor;
@@ -622,29 +695,42 @@
             document.getElementById('dream_lifecycle_delta').value = config.controls_config.dream_lifecycle_delta;
             document.getElementById('dream_temperament_on').checked = config.controls_config.dream_temperament_on;
             document.getElementById('dream_noise_scale').value = config.controls_config.dream_noise_scale;
-            document.getElementById('temp_eager_threshold').value = config.controls_config.temp_eager_threshold;
-            document.getElementById('temp_sluggish_threshold').value = config.controls_config.temp_sluggish_threshold;
-            document.getElementById('temp_mood_influence').value = config.controls_config.temp_mood_influence;
-            document.getElementById('scaffold_weight').value = config.controls_config.scaffold_weight_cap * 0.5;
-            document.getElementById('temperature').value = config.controls_config.base_temperature;
-            document.getElementById('save_path_prefix').value = config.controls_config.save_path_prefix;
             document.getElementById('dream_memory_weight').value = config.controls_config.dream_memory_weight;
             document.getElementById('dream_memory_maxlen').value = config.controls_config.dream_memory_maxlen;
             document.getElementById('dream_prompt_weight').value = config.controls_config.dream_prompt_weight;
             document.getElementById('dream_novelty_boost').value = config.controls_config.dream_novelty_boost;
+            document.getElementById('dream_memory_decay').value = config.controls_config.dream_memory_decay;
+            document.getElementById('dream_prune_threshold').value = config.controls_config.dream_prune_threshold;
+            document.getElementById('enable_dreaming').checked = config.controls_config.enable_dreaming;
+            document.getElementById('enable_prompt_driven_dreams').checked = config.controls_config.enable_prompt_driven_dreams;
+            document.getElementById('enable_gestation').checked = config.controls_config.enable_gestation;
+            document.getElementById('enable_sleep_training').checked = config.controls_config.enable_sleep_training;
+
+            document.getElementById('temp_eager_threshold').value = config.controls_config.temp_eager_threshold;
+            document.getElementById('temp_sluggish_threshold').value = config.controls_config.temp_sluggish_threshold;
+            document.getElementById('temp_mood_influence').value = config.controls_config.temp_mood_influence;
             document.getElementById('temp_curiosity_boost').value = config.controls_config.temp_curiosity_boost;
             document.getElementById('temp_restless_drop').value = config.controls_config.temp_restless_drop;
             document.getElementById('temp_melancholy_noise').value = config.controls_config.temp_melancholy_noise;
             document.getElementById('conf_feedback_strength').value = config.controls_config.conf_feedback_strength;
             document.getElementById('temp_smoothing_factor').value = config.controls_config.temp_smoothing_factor;
-            document.getElementById('dream_memory_decay').value = config.controls_config.dream_memory_decay;
-            document.getElementById('dream_prune_threshold').value = config.controls_config.dream_prune_threshold;
-            document.getElementById('lora_capacity').value = config.controls_config.lora_capacity || 0;
-            document.getElementById('max_patience').value = config.controls_config.max_patience;
-            document.getElementById('accumulation_steps').value = config.controls_config.accumulation_steps;
+            document.getElementById('enable_temperament').checked = config.controls_config.enable_temperament;
+            document.getElementById('enable_confidence_tracking').checked = config.controls_config.enable_confidence_tracking;
+
+            document.getElementById('scaffold_weight_cap').value = config.controls_config.scaffold_weight_cap;
+            document.getElementById('memory_decay_rate').value = config.controls_config.memory_decay_rate;
+            document.getElementById('use_scaffold_memory').checked = config.controls_config.use_scaffold_memory;
+            document.getElementById('use_token_map_memory').checked = config.controls_config.use_token_map_memory;
+            document.getElementById('enable_dynamic_cross_attention').checked = config.controls_config.enable_dynamic_cross_attention;
+            document.getElementById('enable_cross_attention').checked = config.controls_config.enable_cross_attention;
+            document.getElementById('enable_repetition_check').checked = config.controls_config.enable_repetition_check;
+            document.getElementById('enable_lifecycle_weighting').checked = config.controls_config.enable_lifecycle_weighting;
+
+            document.getElementById('scaffold_weight').value = config.controls_config.scaffold_weight_cap * 0.5;
+            document.getElementById('base_temperature').value = config.controls_config.base_temperature;
+            document.getElementById('save_path_prefix').value = config.controls_config.save_path_prefix;
             document.getElementById('max_tokens').value = 60;
 
-            // Update all slider displays
             document.querySelectorAll('input[type="range"]').forEach(slider => updateSliderValue(slider.id));
         }
 
@@ -654,25 +740,28 @@
             config.core_config.scaffold_model_name = document.getElementById('scaffold_model_name').value;
             config.core_config.cross_attn_layers = [parseInt(document.getElementById('cross_attn_layers').value)];
             config.core_config.quantization = document.getElementById('quantization').value;
-            config.core_config.layer_selection_mode = document.getElementById('layer_mode').value;
+            config.core_config.layer_selection_mode = document.getElementById('layer_selection_mode').value;
             config.core_config.custom_layers = document.getElementById('custom_layers').value || null;
             config.core_config.valid_split_ratio = parseFloat(document.getElementById('valid_split_ratio').value);
             config.core_config.random_seed = parseInt(document.getElementById('random_seed').value);
-            config.core_config.use_dynamic_layers = document.getElementById('layer_mode').value === 'dynamic';
+            config.core_config.use_dynamic_layers = document.getElementById('layer_selection_mode').value === 'dynamic';
 
             config.lora_config.lora_rank = parseInt(document.getElementById('lora_rank').value);
             config.lora_config.lora_alpha = parseInt(document.getElementById('lora_alpha').value);
             config.lora_config.lora_dropout = parseFloat(document.getElementById('lora_dropout').value);
-            config.lora_config.lora_target_modules = [document.getElementById('lora_target_modules').value];
+            config.lora_config.lora_target_modules = Array.from(document.getElementById('lora_target_modules').selectedOptions).map(opt => opt.value);
+            config.controls_config.enable_lora_adapters = document.getElementById('enable_lora_adapters').checked;
 
-            config.training_config.train_epochs = parseInt(document.getElementById('epochs').value);
+            config.training_config.train_epochs = parseInt(document.getElementById('train_epochs').value);
             config.training_config.batch_size = parseInt(document.getElementById('batch_size').value);
-            config.training_config.learning_rate = parseFloat(document.getElementById('lr').value);
-            config.training_config.max_seq_length = parseInt(document.getElementById('max_seq').value);
-            config.training_config.sigmoid_scale = parseFloat(document.getElementById('sigmoid_scale').value);
-            config.training_config.sigmoid_shift = parseFloat(document.getElementById('sigmoid_shift').value);
+            config.training_config.learning_rate = parseFloat(document.getElementById('learning_rate').value);
+            config.training_config.max_seq_length = parseInt(document.getElementById('max_seq_length').value);
             config.training_config.lifecycle_capacity_factor = parseFloat(document.getElementById('lifecycle_capacity_factor').value);
             config.training_config.lifecycle_curve = document.getElementById('lifecycle_curve').value;
+            config.training_config.accumulation_steps = parseInt(document.getElementById('accumulation_steps').value);
+            config.training_config.max_patience = parseInt(document.getElementById('max_patience').value);
+            config.training_config.exposure_gain_eager = parseInt(document.getElementById('exposure_gain_eager').value);
+            config.training_config.exposure_gain_default = parseInt(document.getElementById('exposure_gain_default').value);
 
             config.controls_config.sleep_conf_threshold = parseFloat(document.getElementById('sleep_conf_threshold').value);
             config.controls_config.sleep_time_factor = parseFloat(document.getElementById('sleep_time_factor').value);
@@ -681,26 +770,39 @@
             config.controls_config.dream_lifecycle_delta = parseFloat(document.getElementById('dream_lifecycle_delta').value);
             config.controls_config.dream_temperament_on = document.getElementById('dream_temperament_on').checked;
             config.controls_config.dream_noise_scale = parseFloat(document.getElementById('dream_noise_scale').value);
-            config.controls_config.temp_eager_threshold = parseFloat(document.getElementById('temp_eager_threshold').value);
-            config.controls_config.temp_sluggish_threshold = parseFloat(document.getElementById('temp_sluggish_threshold').value);
-            config.controls_config.temp_mood_influence = parseFloat(document.getElementById('temp_mood_influence').value);
-            config.controls_config.scaffold_weight_cap = parseFloat(document.getElementById('scaffold_weight').value);
-            config.controls_config.base_temperature = parseFloat(document.getElementById('temperature').value);
-            config.controls_config.save_path_prefix = document.getElementById('save_path_prefix').value;
             config.controls_config.dream_memory_weight = parseFloat(document.getElementById('dream_memory_weight').value);
             config.controls_config.dream_memory_maxlen = parseInt(document.getElementById('dream_memory_maxlen').value);
             config.controls_config.dream_prompt_weight = parseFloat(document.getElementById('dream_prompt_weight').value);
             config.controls_config.dream_novelty_boost = parseFloat(document.getElementById('dream_novelty_boost').value);
+            config.controls_config.dream_memory_decay = parseFloat(document.getElementById('dream_memory_decay').value);
+            config.controls_config.dream_prune_threshold = parseFloat(document.getElementById('dream_prune_threshold').value);
+            config.controls_config.enable_dreaming = document.getElementById('enable_dreaming').checked;
+            config.controls_config.enable_prompt_driven_dreams = document.getElementById('enable_prompt_driven_dreams').checked;
+            config.controls_config.enable_gestation = document.getElementById('enable_gestation').checked;
+            config.controls_config.enable_sleep_training = document.getElementById('enable_sleep_training').checked;
+
+            config.controls_config.temp_eager_threshold = parseFloat(document.getElementById('temp_eager_threshold').value);
+            config.controls_config.temp_sluggish_threshold = parseFloat(document.getElementById('temp_sluggish_threshold').value);
+            config.controls_config.temp_mood_influence = parseFloat(document.getElementById('temp_mood_influence').value);
             config.controls_config.temp_curiosity_boost = parseFloat(document.getElementById('temp_curiosity_boost').value);
             config.controls_config.temp_restless_drop = parseFloat(document.getElementById('temp_restless_drop').value);
             config.controls_config.temp_melancholy_noise = parseFloat(document.getElementById('temp_melancholy_noise').value);
             config.controls_config.conf_feedback_strength = parseFloat(document.getElementById('conf_feedback_strength').value);
             config.controls_config.temp_smoothing_factor = parseFloat(document.getElementById('temp_smoothing_factor').value);
-            config.controls_config.dream_memory_decay = parseFloat(document.getElementById('dream_memory_decay').value);
-            config.controls_config.dream_prune_threshold = parseFloat(document.getElementById('dream_prune_threshold').value);
-            config.controls_config.lora_capacity = parseInt(document.getElementById('lora_capacity').value) || null;
-            config.controls_config.max_patience = parseInt(document.getElementById('max_patience').value);
-            config.controls_config.accumulation_steps = parseInt(document.getElementById('accumulation_steps').value);
+            config.controls_config.enable_temperament = document.getElementById('enable_temperament').checked;
+            config.controls_config.enable_confidence_tracking = document.getElementById('enable_confidence_tracking').checked;
+
+            config.controls_config.scaffold_weight_cap = parseFloat(document.getElementById('scaffold_weight_cap').value);
+            config.controls_config.memory_decay_rate = parseFloat(document.getElementById('memory_decay_rate').value);
+            config.controls_config.use_scaffold_memory = document.getElementById('use_scaffold_memory').checked;
+            config.controls_config.use_token_map_memory = document.getElementById('use_token_map_memory').checked;
+            config.controls_config.enable_dynamic_cross_attention = document.getElementById('enable_dynamic_cross_attention').checked;
+            config.controls_config.enable_cross_attention = document.getElementById('enable_cross_attention').checked;
+            config.controls_config.enable_repetition_check = document.getElementById('enable_repetition_check').checked;
+            config.controls_config.enable_lifecycle_weighting = document.getElementById('enable_lifecycle_weighting').checked;
+
+            config.controls_config.base_temperature = parseFloat(document.getElementById('base_temperature').value);
+            config.controls_config.save_path_prefix = document.getElementById('save_path_prefix').value;
         }
 
         // Control Handlers
@@ -710,13 +812,6 @@
 
         function toggleScaffold(enable) {
             updateStatus(`Scaffold ${enable ? 'loaded' : 'unloaded'}`);
-            updateConfigFromUI();
-        }
-
-        function toggleDynamicLayers() {
-            const current = document.getElementById('layer_mode').value;
-            document.getElementById('layer_mode').value = current === 'dynamic' ? 'balanced' : 'dynamic';
-            updateStatus(`Dynamic layers ${current === 'dynamic' ? 'disabled' : 'enabled'}`);
             updateConfigFromUI();
         }
 
@@ -750,18 +845,18 @@
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'dmdf_config.json';
+            a.download = 'sovl_config.json';
             a.click();
             URL.revokeObjectURL(url);
-            updateStatus('Config exported as dmdf_config.json');
+            updateStatus('Config exported as sovl_config.json');
         }
 
         function collectTrainingParams() {
             return {
-                epochs: parseInt(document.getElementById('epochs').value),
+                epochs: parseInt(document.getElementById('train_epochs').value),
                 batch_size: parseInt(document.getElementById('batch_size').value),
-                lr: parseFloat(document.getElementById('lr').value),
-                max_seq: parseInt(document.getElementById('max_seq').value)
+                learning_rate: parseFloat(document.getElementById('learning_rate').value),
+                max_seq_length: parseInt(document.getElementById('max_seq_length').value)
             };
         }
 
@@ -770,7 +865,7 @@
                 prompt: document.getElementById('user_input').value,
                 scaffold_weight: parseFloat(document.getElementById('scaffold_weight').value),
                 max_tokens: parseInt(document.getElementById('max_tokens').value),
-                temperature: parseFloat(document.getElementById('temperature').value)
+                temperature: parseFloat(document.getElementById('base_temperature').value)
             };
         }
 
@@ -785,7 +880,7 @@
             ctx.strokeStyle = '#00ff99';
             ctx.lineWidth = 2;
             ctx.beginPath();
-            const temp = parseFloat(document.getElementById('temperature').value);
+            const temp = parseFloat(document.getElementById('base_temperature').value);
             const weight = parseFloat(document.getElementById('scaffold_weight').value);
             for (let x = 0; x < canvas.width; x++) {
                 const y = canvas.height / 2 + Math.sin(x * 0.05 + temp) * 30 * weight;
