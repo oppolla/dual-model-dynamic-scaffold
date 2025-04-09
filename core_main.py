@@ -32,11 +32,15 @@ def load_jsonl(file_path):
         print(f"Error: I/O error({e.errno}): {e.strerror}.")
     except Exception as e:
         print(f"Unexpected error: {e}")
+    if len(data) < 10:  # Minimum threshold for meaningful training
+        print(f"Error: Loaded only {len(data)} entries from {file_path}. Need at least 10 for training.")
+        sys.exit(1)
     return data
 
 def calculate_confidence_score(logits, generated_ids):
     if not logits or not isinstance(logits, (list, tuple)) or len(logits) == 0 or len(logits) != len(generated_ids):
-        return 0.5  # Bad input or mismatch
+        print(f"Warning: Logits length {len(logits) if logits else 'N/A'} != generated_ids length {len(generated_ids)}. Defaulting confidence to 0.5.")
+        return 0.5
     try:
         stacked_logits = torch.stack(logits)
         probs = torch.softmax(stacked_logits, dim=-1)
@@ -155,6 +159,15 @@ else:
     print(f"Using device: {DEVICE}")
 
     def _validate_config():
+        required_keys = ["core_config.base_model_name", "training_config.learning_rate"]
+        for key in required_keys:
+            keys = key.split('.')
+            value = config
+            for k in keys:
+                value = value.get(k, {})
+            if not value:
+                print(f"Error: Required config key '{key}' missing!")
+                sys.exit(1)
         assert isinstance(CROSS_ATTN_LAYERS, list), "CROSS_ATTN_LAYERS must be a list!"
         if not USE_DYNAMIC_LAYERS:
             base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
@@ -779,6 +792,10 @@ class BareBonesDMAO_Learn:
             self._reset_sleep_state()
             return False
 
+        if resume and (not self.sleep_batch or not self.sleep_optimizer):
+            print("Warning: Resume requested but sleep state invalid. Starting fresh.")
+            resume = False
+
         if not resume:
             self.is_sleeping = True
             self.sleep_progress = 0
@@ -848,13 +865,15 @@ class BareBonesDMAO_Learn:
         if self.enable_prompt_driven_dreams:
             weights = []
             for i, entry in enumerate(log_entries):
+                if "prompt" not in entry:
+                    continue
                 log_inputs = self.base_tokenizer(entry["prompt"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
                 log_hidden = self.scaffolds[0](**log_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
                 similarity = F.cosine_similarity(prompt_hidden, log_hidden).item()
                 recency = (i + 1) / len(log_entries)
                 weight = self.dream_prompt_weight * similarity + (1 - self.dream_prompt_weight) * recency
                 weights.append(weight)
-            dream_entry = random.choices(log_entries, weights=weights, k=1)[0]
+            dream_entry = random.choices(log_entries, weights=weights, k=1)[0] if weights else random.choice(log_entries)
         else:
             dream_entry = random.choice(log_entries)
         dream_prompt = dream_entry["prompt"]
@@ -876,7 +895,7 @@ class BareBonesDMAO_Learn:
             self.dream_memory = deque([(t, w) for t, w in self.dream_memory if w >= self.dream_prune_threshold], maxlen=self.dream_memory_maxlen)
             self.dream_memory.append((dream_layer, 1.0))
 
-        print(f"Dreaming from prompt similarity: {max(weights):.2f}, novelty boost: {self.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(self.dream_memory)}")
+        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(self.dream_memory)}")
         print("--- Dream Concluded ---")
 
     def _sleep_train(self):
@@ -927,7 +946,7 @@ class BareBonesDMAO_Learn:
         avg_confidence = self.sleep_confidence_sum / self.sleep_confidence_count if self.sleep_confidence_count > 0 else 0.5
         lifecycle_stage = self.data_exposure / self.lora_capacity
         base_score = 2.0 * (avg_confidence - 0.5)
-
+    
         if lifecycle_stage < 0.25:
             bias = self.temp_curiosity_boost * (1 - lifecycle_stage / 0.25)
         elif lifecycle_stage < 0.75:
@@ -937,14 +956,15 @@ class BareBonesDMAO_Learn:
                 bias -= 0.2 * variance
         else:
             bias = -self.temp_curiosity_boost * (lifecycle_stage - 0.75) / 0.25
-
+    
         target_score = base_score + bias + (self.conf_feedback_strength * (avg_confidence - 0.5))
         target_score = max(-1.0, min(1.0, target_score))
         alpha = 0.1 * (1 - self.temp_smoothing_factor)
         self.temperament_score = (1 - alpha) * self.temperament_score + alpha * target_score
         self.temperament_score = max(-1.0, min(1.0, self.temperament_score))
+        self.temperament_history = deque(self.temperament_history, maxlen=TEMPERAMENT_HISTORY_MAXLEN)
         self.temperament_history.append(self.temperament_score)
-
+    
         label = "melancholic" if self.temperament_score <= -0.5 else "restless" if self.temperament_score <= 0.0 else "calm" if self.temperament_score <= 0.5 else "curious"
         print(f"Temperament score: {self.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
 
@@ -959,49 +979,50 @@ class BareBonesDMAO_Learn:
                 loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), inputs.input_ids.view(-1), ignore_index=-100)
                 print(f"Dry run loss: {loss.item()}")
             return None
-    
+
         if not self.optimizer:
             print("Optimizer not set up. Setting up optimizer now.")
             num_training_steps = (len(TRAIN_DATA) // BATCH_SIZE) * TRAIN_EPOCHS
             self.setup_optimizer(num_training_steps)
-    
+
         self.scaffolds[0].train()
         self.base_model.eval()
-    
+
         prompts = [item['prompt'] for item in batch]
         completions = [item['completion'] for item in batch]
         full_texts = [p + c for p, c in zip(prompts, completions)]
-    
+
         base_inputs = self.base_tokenizer(full_texts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
         base_input_ids = base_inputs.input_ids
         base_attention_mask = base_inputs.attention_mask
-    
+
         prompts_base = self.base_tokenizer(prompts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH)
         scaffold_input_ids = self.map_sequence(prompts_base.input_ids)
         scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
         scaffold_inputs = {'input_ids': scaffold_input_ids, 'attention_mask': scaffold_attention_mask}
-    
+
         labels = base_input_ids.clone()
         labels[labels == self.base_tokenizer.pad_token_id] = -100
         prompt_mask = self.base_tokenizer(prompts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH).attention_mask.to(DEVICE)
         labels = torch.where(prompt_mask.bool(), -100, base_input_ids)
-    
+
         with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
             scaffold_outputs = self.scaffolds[0](**scaffold_inputs, output_hidden_states=True)
             scaffold_hidden_states = scaffold_outputs.hidden_states[-1]
             with self._scaffold_context(scaffold_hidden_states):
                 outputs = self.base_model(input_ids=base_input_ids, attention_mask=base_attention_mask)
-            loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
-    
+                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
+
         if torch.isnan(loss) or torch.isinf(loss):
             print("Warning: Invalid loss. Skipping batch.")
+            self.optimizer.zero_grad()  # Clear gradients to avoid corruption
             return None
-    
+
         accumulation_steps = ACCUMULATION_STEPS
         scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
         torch.nn.utils.clip_grad_norm_(list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else []), max_norm=1.0)
-    
+
         if (self.global_step + 1) % accumulation_steps == 0:
             if self.use_scaffold_memory:
                 confidence = calculate_confidence_score(outputs.logits, base_input_ids)
@@ -1013,7 +1034,7 @@ class BareBonesDMAO_Learn:
             self.scheduler.step()
             self.optimizer.zero_grad()
         self.global_step += 1
-    
+
         exposure_gain = EXPOSURE_GAIN_EAGER if self.temperament_score > 0.5 else EXPOSURE_GAIN_DEFAULT
         for prompt in prompts:
             if prompt not in self.seen_prompts:
@@ -1021,7 +1042,7 @@ class BareBonesDMAO_Learn:
                 self.data_exposure += exposure_gain
         if self.use_token_map_memory:
             self._update_token_map_memory(prompts[0], calculate_confidence_score(outputs.logits, base_input_ids))
-    
+
         return loss.item()
 
     def run_training_cycle(self, train_data, valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
@@ -1090,21 +1111,21 @@ class BareBonesDMAO_Learn:
                 time.sleep(0.5)
                 print("\r                   ", end="")
                 self._reset_sleep_state()
-    
+
             start_time = time.time()
             base_inputs = self.base_tokenizer(prompt, return_tensors='pt').to(DEVICE)
             input_ids = base_inputs['input_ids']
             input_length = input_ids.shape[1]
-    
+
             scaffold_inputs = self.tokenize_and_map(prompt)
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-    
+
             temp = self.base_temperature
             if self.enable_temperament and self.temp_mood_influence > 0:
                 temp_adjustment = self.temp_mood_influence * 0.3 * self.temperament_score
                 temp += temp_adjustment
                 temp = max(0.5, min(1.5, temp))
-    
+
             if self.enable_dynamic_cross_attention and self.dynamic_cross_attn_mode:
                 if self.dynamic_cross_attn_mode == 'confidence' and self.confidence_history:
                     avg_conf = sum(self.confidence_history) / len(self.confidence_history)
@@ -1113,7 +1134,7 @@ class BareBonesDMAO_Learn:
                 elif self.dynamic_cross_attn_mode == 'temperament':
                     dynamic_weight = max(0.5, min(2.0, 1.0 + self.temperament_score))
                     self.set_scaffold_influence(weight=dynamic_weight)
-    
+
             self._clear_scaffold_cache()
             with self._scaffold_context(scaffold_hidden_states):
                 self.set_scaffold_influence(weight=scaffold_weight)
@@ -1127,7 +1148,7 @@ class BareBonesDMAO_Learn:
                     output_scores=True,
                     **kwargs
                 )
-    
+
             generated_ids = outputs.sequences[0][input_length:]
             confidence_score = 0.5
             if self.enable_confidence_tracking:
@@ -1135,11 +1156,11 @@ class BareBonesDMAO_Learn:
                 self.sleep_confidence_sum += confidence_score
                 self.sleep_confidence_count += 1
                 self.confidence_history.append(confidence_score)
-    
+
             if self.enable_repetition_check and self.has_repetition(generated_ids, n=3):
                 print("Warning: Repetition detected. Truncating.")
                 original_text = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
-                for i in range(len(generated_ids) - 3):
+                for i in range(len(generated_ids) - 6):
                     if all(generated_ids[i + j] == generated_ids[i + j + 3] for j in range(3)):
                         generated_ids = generated_ids[:i + 3]
                         break
@@ -1154,15 +1175,17 @@ class BareBonesDMAO_Learn:
             return "Something broke—check logs!"
         except Exception:
             raise  # Re-raise unhandled exceptions
-    
+
         self.logger.write({"prompt": prompt, "response": response, "timestamp": start_time, "conversation_id": self.history.conversation_id, "confidence_score": confidence_score})
         self.history.add_message(prompt, response)
         if self.use_token_map_memory:
             self._update_token_map_memory(prompt, confidence_score)
-    
+
         if self.enable_gestation and self._should_gestate():
             self._gestate()
         print(f"Generation took {time.time() - start_time:.2f} seconds.")
+        if DEVICE.type == 'cuda':
+            torch.cuda.empty_cache()  # Free GPU memory after generation
         return response
 
     @torch.no_grad()
@@ -1199,16 +1222,21 @@ class BareBonesDMAO_Learn:
         self.save_state()
         self._clear_scaffold_cache()
         for attr in ['base_model', 'scaffolds', 'optimizer', 'scheduler']:
-            if hasattr(self, attr):
-                try:
-                    if attr == 'scaffolds':
-                        for scaffold in self.scaffolds:
-                            del scaffold
-                    else:
-                        delattr(self, attr)
-                except Exception as e:
-                    print(f"Failed to delete {attr}: {e}")
-        self._clear_scaffold_cache()
+            try:
+                if attr == 'scaffolds':
+                    for scaffold in self.scaffolds:
+                        del scaffold
+                else:
+                    delattr(self, attr)
+            except Exception as e:
+                print(f"Failed to delete {attr}: {e}")
+        try:
+            if self.last_prompt_embedding is not None:
+                self.last_prompt_embedding = None
+        except Exception as e:
+            print(f"Failed to clear last_prompt_embedding: {e}")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         print("Cleanup completed.")
 
     def new_conversation(self):
@@ -1284,8 +1312,13 @@ if __name__ == "__main__":
             elif cmd == 'load':
                 path = parts[1] if len(parts) > 1 else None
                 dmao_system.load_state(path)
-            elif cmd == 'sleep' and len(parts) == 4:
-                dmao_system.set_sleep_params(float(parts[1]), float(parts[2]), int(parts[3]))
+            elif cmd == 'sleep':
+                try:
+                    if len(parts) != 4:
+                        raise ValueError("Usage: sleep <conf> <time> <log>")
+                    dmao_system.set_sleep_params(float(parts[1]), float(parts[2]), int(parts[3]))
+                except ValueError as e:
+                    print(f"Error: {e}")
             elif cmd == 'dream' and len(parts) == 11:
                 dmao_system.tune_dream(float(parts[1]), float(parts[2]), parts[3].lower() == 'true', float(parts[4]), float(parts[5]), int(parts[6]), float(parts[7]), float(parts[8]), float(parts[9]), float(parts[10]))
             elif cmd == 'temp' and len(parts) == 9:
