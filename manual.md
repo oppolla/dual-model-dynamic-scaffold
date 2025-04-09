@@ -284,6 +284,156 @@ Loop ignores empty strings.
 [Enter]
 Output: (new prompt line)
 ```
+## Configuration (config.json)
+### core_config
+- base_model_name: Base model (e.g., "gpt2"). Defines the primary language model.
 
-Let me know if you'd like the configuration section converted next!
-```
+- scaffold_model_name: Scaffold model (e.g., "gpt2"). Guides the base model via cross-attention.
+
+- cross_attn_layers: Fixed layers for cross-attention (e.g., [5, 7]). Ignored if use_dynamic_layers is true.
+
+- use_dynamic_layers: If true, selects layers dynamically based on layer_selection_mode.
+
+- layer_selection_mode: Dynamic layer strategy ("early", "late", "balanced", "custom").
+
+- custom_layers: Custom layer list for "custom" mode (e.g., [0, 2, 4]).
+
+- valid_split_ratio: Validation data split (e.g., 0.2 = 20%).
+
+- random_seed: Seed for reproducibility (e.g., 42).
+
+- quantization: Precision mode ("fp16", "int8", "int4").
+
+### lora_config
+- lora_rank: LoRA rank (e.g., 8). Controls adaptation capacity.
+
+- lora_alpha: LoRA scaling factor (e.g., 16).
+
+- lora_dropout: Dropout rate for LoRA (e.g., 0.1).
+
+- lora_target_modules: Modules to adapt (e.g., ["q_proj", "v_proj"]).
+
+### training_config
+- learning_rate: Learning rate (e.g., 2e-5).
+
+- train_epochs: Number of epochs (e.g., 3).
+
+- batch_size: Batch size (e.g., 2).
+
+- max_seq_length: Max token length (e.g., 512).
+
+- sigmoid_scale: Sigmoid scaling for lifecycle (e.g., 0.5).
+
+- sigmoid_shift: Sigmoid shift for lifecycle (e.g., 5.0).
+
+- lifecycle_capacity_factor: Capacity factor for lifecycle weighting (e.g., 0.01).
+
+- lifecycle_curve: Lifecycle curve type ("sigmoid_linear", "exponential").
+
+- accumulation_steps: Gradient accumulation steps (e.g., 4).
+
+- exposure_gain_eager: Exposure gain when eager (e.g., 3).
+
+- exposure_gain_default: Default exposure gain (e.g., 2).
+
+- max_patience: Early stopping patience (e.g., 2).
+
+- dry_run: If true, enables dry-run mode.
+
+### dry_run_params:
+- max_samples: Max samples in dry run (e.g., 2).
+
+- max_length: Max length in dry run (e.g., 128).
+
+- validate_architecture: If true, validates architecture.
+
+- skip_training: If true, skips full training.
+
+### controls_config
+- sleep_conf_threshold: Confidence threshold for gestation (0.5–0.9, e.g., 0.7). Triggers gestation if average confidence exceeds this.
+
+- sleep_time_factor: Time factor for gestation (0.5–5.0, e.g., 1.0). Scales sleep duration.
+
+- sleep_log_min: Minimum log entries for gestation (5–20, e.g., 10).
+
+- dream_swing_var: Variance threshold for dreaming (0.05–0.2, e.g., 0.1). Triggers dreaming if confidence varies widely.
+
+- dream_lifecycle_delta: Lifecycle change for dreaming (0.05–0.2, e.g., 0.1). Triggers if temperament shifts significantly.
+
+- dream_temperament_on: If true, temperament affects dreaming (e.g., true).
+
+- dream_noise_scale: Noise scale for dreaming (0.01–0.1, e.g., 0.05). Adds randomness to dream states.
+
+- temp_eager_threshold: Eager temperament threshold (0.7–0.9, e.g., 0.8). Above this, system is "curious."
+
+- temp_sluggish_threshold: Sluggish threshold (0.4–0.6, e.g., 0.6). Below this, system is "restless."
+
+- temp_mood_influence: Mood impact on temperature (0–1, e.g., 0.0). Adjusts generation randomness.
+
+- scaffold_weight_cap: Max scaffold influence (0.5–1.0, e.g., 0.9).
+
+- base_temperature: Default generation temperature (0.5–1.5, e.g., 0.7).
+
+- save_path_prefix: File prefix for saving state (e.g., "state").
+
+- dream_memory_weight: Dream memory influence (0–0.5, e.g., 0.1). Blends past dreams into scaffold context.
+
+- dream_memory_maxlen: Max dream memory size (5–20, e.g., 10).
+
+- dream_prompt_weight: Prompt similarity weight in dreams (0–1, e.g., 0.5).
+
+- dream_novelty_boost: Novelty boost for new prompts (0–0.05, e.g., 0.03).
+
+- temp_curiosity_boost: Curiosity boost for temperament (0–0.5, e.g., 0.5).
+
+- temp_restless_drop: Restless drop for temperament (0–0.5, e.g., 0.1).
+
+- temp_melancholy_noise: Noise when melancholic (0–0.05, e.g., 0.02).
+
+- conf_feedback_strength: Confidence feedback strength (0–1, e.g., 0.5). Affects temperament updates.
+
+- temp_smoothing_factor: Temperament smoothing (0–1, e.g., 0.0). Reduces abrupt changes.
+
+- dream_memory_decay: Dream memory decay rate (0–1, e.g., 0.95). Reduces old dream weights.
+
+- dream_prune_threshold: Threshold to prune dreams (0–1, e.g., 0.1).
+
+- use_scaffold_memory: If true, uses scaffold memory for adaptation (e.g., true).
+
+- use_token_map_memory: If true, uses token map memory (e.g., true).
+
+- memory_decay_rate: Memory decay rate (0–1, e.g., 0.95).
+
+- dynamic_cross_attn_mode: Dynamic cross-attention mode (null, "confidence", "temperament").
+
+- has_woken: If true, system has woken up (e.g., false).
+
+- is_sleeping: If true, system is in gestation (e.g., false).
+
+- confidence_history_maxlen: Max confidence history size (e.g., 5).
+
+- temperament_history_maxlen: Max temperament history size (e.g., 5).
+
+- enable_dreaming: If true, enables dreaming (e.g., true).
+
+- enable_temperament: If true, enables temperament (e.g., true).
+
+- enable_confidence_tracking: If true, tracks confidence (e.g., true).
+
+- enable_gestation: If true, enables gestation (e.g., true).
+
+- enable_sleep_training: If true, enables sleep training (e.g., true).
+
+- enable_cross_attention: If true, enables cross-attention (e.g., true).
+
+- enable_dynamic_cross_attention: If true, enables dynamic cross-attention (e.g., true).
+
+- enable_lora_adapters: If true, uses LoRA (e.g., true).
+
+- enable_repetition_check: If true, checks for repetition (e.g., true).
+
+- enable_prompt_driven_dreams: If true, dreams are prompt-driven (e.g., true).
+
+- enable_lifecycle_weighting: If true, uses lifecycle weighting (e.g., true).
+
+
