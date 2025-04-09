@@ -22,6 +22,7 @@ Runs a training cycle on `TRAIN_DATA` and `VALID_DATA`.
 Executes `run_training_cycle()` with settings from `config.json` (e.g., `train_epochs`, `batch_size`). Trains the scaffold model with LoRA, applies lifecycle weighting, and logs progress. In dry-run mode, it limits to one epoch.
 **Use case:**  
 Train the model with `sample_log.jsonl` to refine scaffold influence.
+
 **Example:**
 ```
 train
@@ -38,6 +39,7 @@ Sets quantization to INT8 (8-bit integer) and reinitializes the system.
 Updates `quantization_mode` to `"int8"`, reloads models using bitsandbytes for lower memory usage.
 **Use case:**  
 Reduce GPU memory footprint for larger batches or models.
+
 **Example:**
 ```
 int8
@@ -52,6 +54,7 @@ Sets quantization to INT4 (4-bit integer) and reinitializes the system.
 Updates `quantization_mode` to `"int4"`, reloads models with extreme memory optimization.
 **Use case:**  
 Maximize memory efficiency for resource-constrained environments.
+
 **Example:**
 ```
 int4
@@ -66,6 +69,7 @@ Sets quantization to FP16 (16-bit floating point) and reinitializes the system.
 Updates `quantization_mode` to `"fp16"` (default), reloads models with half-precision floats.
 **Use case:**  
 Balance speed and accuracy (default mode).
+
 **Example:**
 ```
 fp16
@@ -94,6 +98,7 @@ Disables dynamic layer selection and reinitializes the system.
 Sets `USE_DYNAMIC_LAYERS` to `False`, uses fixed `CROSS_ATTN_LAYERS` from `config.json`, then restarts.
 **Use case:**  
 Use predefined layers (e.g., `[5, 7]`) for consistency.
+
 **Example:**
 ```
 fixed
@@ -108,6 +113,7 @@ Starts a new conversation, resetting history.
 Calls `new_conversation()`, clears `ConversationHistory` (max 10 messages), assigns a new `conversation_id`, and clears scaffold cache.
 **Use case:**  
 Reset context for a fresh interaction.
+
 **Example:**
 ```
 new
@@ -135,6 +141,7 @@ Loads a saved system state from files.
 Calls `load_state()`, restores scaffold weights, cross-attention weights, token map, and metadata from files with a prefix.
 **Use case:**  
 Resume a previous session or experiment.
+
 **Example:**
 ```
 load my_model
@@ -151,6 +158,7 @@ Adjusts sleep/gestation parameters.
 Updates `sleep_conf_threshold` (0.5–0.9), `sleep_time_factor` (0.5–5.0), and `sleep_log_min` (5–20) for triggering gestation.
 **Use case:**  
 Tune when the system enters gestation mode based on confidence and log size.
+
 **Example:**
 ```
 sleep 0.75 2.0 15
@@ -164,6 +172,7 @@ Tunes dreaming behavior parameters.
 Adjusts 10 parameters to control dream generation and memory.
 **Use case:**  
 Customize how the system "dreams" to adapt its scaffold model.
+
 **Example:**
 ```
 dream 0.15 0.12 true 0.07 0.2 12 0.6 0.04 0.9 0.15
@@ -190,6 +199,7 @@ Sets global scaffold weight cap and base temperature.
 Updates `scaffold_weight_cap` (0.5–1.0) and `base_temperature` (0.5–1.5).
 **Use case:**  
 Control overall scaffold influence and generation randomness.
+
 **Example:**
 ```
 blend 0.95 0.8
@@ -203,6 +213,7 @@ Tunes lifecycle parameters.
 Updates `lifecycle_capacity_factor` (0.001–0.1) and `lifecycle_curve` ("sigmoid_linear" or "exponential").
 **Use case:**  
 Adjust how scaffold influence grows with data exposure.
+
 **Example:**
 ```
 lifecycle 0.02 exponential
@@ -221,6 +232,7 @@ Tunes cross-attention settings.
 - `off`: Disables dynamic weighting.
 **Use case:**  
 Customize how scaffold affects base model.
+
 **Examples:**
 ```
 cross weight 0.7
@@ -252,6 +264,7 @@ Generates a response using the current model state.
 Calls `generate()` with defaults, logs to `log.jsonl`, and applies scaffold influence, temperament, and dreaming if enabled.
 **Use case:**  
 Test model output interactively.
+
 **Example:**
 ```
 Hello!
@@ -265,6 +278,7 @@ Output: --- Generating Response ---
 Skips and waits for next input.
 **How it works:**  
 Loop ignores empty strings.
+
 **Example:**
 ```
 [Enter]
