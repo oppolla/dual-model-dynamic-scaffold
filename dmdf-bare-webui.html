@@ -178,6 +178,25 @@
     <div class="container">
         <h1>SOVL System Control Panel</h1>
 
+        <!-- Prompt Input (Moved to Top) -->
+        <div class="section">
+            <div class="section-title">Prompt Input</div>
+            <div class="control-group">
+                <div class="control-item" style="grid-column: 1 / -1;">
+                    <label>Prompt</label>
+                    <textarea id="user_input" rows="4" placeholder="Enter your prompt..."></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- Output Section (Moved to Top) -->
+        <div class="section">
+            <div class="section-title">Output</div>
+            <div class="status-bar" id="status">System Ready</div>
+            <div class="response" id="response"></div>
+            <canvas class="visualizer" id="visualizer"></canvas>
+        </div>
+
         <!-- Core Configuration -->
         <div class="section">
             <div class="section-title">Core Configuration</div>
@@ -518,17 +537,6 @@
             </div>
         </div>
 
-        <!-- Prompt Input (New Section) -->
-        <div class="section">
-            <div class="section-title">Prompt Input</div>
-            <div class="control-group">
-                <div class="control-item" style="grid-column: 1 / -1;">
-                    <label>Prompt</label>
-                    <textarea id="user_input" rows="4" placeholder="Enter your prompt..."></textarea>
-                </div>
-            </div>
-        </div>
-
         <!-- Text Generation (Updated Without Prompt) -->
         <div class="section">
             <div class="section-title">Text Generation</div>
@@ -558,14 +566,6 @@
                 <button onclick="startTraining()">Train Model</button>
                 <button onclick="exportConfig()">Export Config</button>
             </div>
-        </div>
-
-        <!-- Output Section -->
-        <div class="section">
-            <div class="section-title">Output</div>
-            <div class="status-bar" id="status">System Ready</div>
-            <div class="response" id="response"></div>
-            <canvas class="visualizer" id="visualizer"></canvas>
         </div>
     </div>
 
