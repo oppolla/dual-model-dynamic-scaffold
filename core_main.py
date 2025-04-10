@@ -154,6 +154,22 @@ else:
     ENABLE_REPETITION_CHECK = get_config_value(controls_config, "enable_repetition_check", True)
     ENABLE_PROMPT_DRIVEN_DREAMS = get_config_value(controls_config, "enable_prompt_driven_dreams", True)
     ENABLE_LIFECYCLE_WEIGHTING = get_config_value(controls_config, "enable_lifecycle_weighting", True)
+    # TCQS Controls
+    ENABLE_CURIOSITY = get_config_value(controls_config, "enable_curiosity", True)
+    CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = get_config_value(controls_config, "curiosity_novelty_threshold_spontaneous", 0.9)
+    CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = get_config_value(controls_config, "curiosity_novelty_threshold_response", 0.8)
+    CURIOSITY_PRESSURE_THRESHOLD = get_config_value(controls_config, "curiosity_pressure_threshold", 0.7)
+    CURIOSITY_PRESSURE_DROP = get_config_value(controls_config, "curiosity_pressure_drop", 0.3)
+    CURIOSITY_SILENCE_THRESHOLD = get_config_value(controls_config, "curiosity_silence_threshold", 20.0)
+    CURIOSITY_QUESTION_COOLDOWN = get_config_value(controls_config, "curiosity_question_cooldown", 60.0)
+    CURIOSITY_QUEUE_MAXLEN = get_config_value(controls_config, "curiosity_queue_maxlen", 10)
+    CURIOSITY_WEIGHT_IGNORANCE = get_config_value(controls_config, "curiosity_weight_ignorance", 0.7)
+    CURIOSITY_WEIGHT_NOVELTY = get_config_value(controls_config, "curiosity_weight_novelty", 0.3)
+     # Curiosity Generation Controls
+    CURIOSITY_MAX_NEW_TOKENS = get_config_value(controls_config, "curiosity_max_new_tokens", 8)
+    CURIOSITY_BASE_TEMPERATURE = get_config_value(controls_config, "curiosity_base_temperature", 1.1)
+    CURIOSITY_TEMPERAMENT_INFLUENCE = get_config_value(controls_config, "curiosity_temperament_influence", 0.4)
+    CURIOSITY_TOP_K = get_config_value(controls_config, "curiosity_top_k", 30)
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
@@ -232,6 +248,32 @@ class ConversationHistory:
 
     def add_message(self, prompt, response):
         self.messages.append({"prompt": prompt, "response": response})
+
+class TrueCuriosity:
+    def __init__(self, sovl_system):
+        self.sovl = sovl_system
+        self.novelty_cache = deque(maxlen=100)
+    def calculate_metric(self, question: str) -> float:
+        q_inputs = self.sovl.base_tokenizer(question, return_tensors='pt', truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
+        with torch.no_grad():
+            q_emb = self.sovl.scaffolds[0](**q_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
+        base_conf = calculate_confidence_score(self.sovl.base_model(**q_inputs).logits, q_inputs.input_ids)
+        scaf_conf = calculate_confidence_score(self.sovl.scaffolds[0](**q_inputs).logits, q_inputs.input_ids)
+        mem_sim = 0
+        if self.sovl.dream_memory:
+            dream_embs, _ = zip(*self.sovl.dream_memory)
+            mem_sim = max([F.cosine_similarity(q_emb, emb).item() for emb in dream_embs])
+        ignorance = 1 - max(base_conf, scaf_conf)
+        novelty = 1 - mem_sim
+        return ignorance * self.sovl.curiosity_weight_ignorance + novelty * self.sovl.curiosity_weight_novelty
+class CuriosityPressure:
+    def __init__(self):
+        self.value = 0.0
+    def update(self, temperament: float, confidence: float, silence: float):
+        self.value += (temperament * 0.1 + (1 - confidence) * 0.05 + silence * 0.02)
+        self.value = max(0.0, min(1.0, self.value))
+    def should_erupt(self, threshold):
+        return self.value > threshold and random.random() < 0.3
 
 class ThreadSafeLogger:
     def __init__(self, filename="log.jsonl"):
@@ -402,8 +444,154 @@ class SOVLSystem:
         self.enable_repetition_check = ENABLE_REPETITION_CHECK
         self.enable_prompt_driven_dreams = ENABLE_PROMPT_DRIVEN_DREAMS
         self.enable_lifecycle_weighting = ENABLE_LIFECYCLE_WEIGHTING
+        self.enable_curiosity = ENABLE_CURIOSITY
+        self.curiosity_novelty_threshold_spontaneous = CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS
+        self.curiosity_novelty_threshold_response = CURIOSITY_NOVELTY_THRESHOLD_RESPONSE
+        self.curiosity_pressure_threshold = CURIOSITY_PRESSURE_THRESHOLD
+        self.curiosity_pressure_drop = CURIOSITY_PRESSURE_DROP
+        self.curiosity_silence_threshold = CURIOSITY_SILENCE_THRESHOLD
+        self.curiosity_question_cooldown = CURIOSITY_QUESTION_COOLDOWN
+        self.curiosity_queue_maxlen = CURIOSITY_QUEUE_MAXLEN
+        self.curiosity_weight_ignorance = CURIOSITY_WEIGHT_IGNORANCE
+        self.curiosity_weight_novelty = CURIOSITY_WEIGHT_NOVELTY
+
+        self.curiosity = self.TrueCuriosity(self) if self.enable_curiosity else None
+        self.unanswered_q = deque(maxlen=self.curiosity_queue_maxlen) if self.enable_curiosity else deque(maxlen=10)
+        self.pressure = self.CuriosityPressure() if self.enable_curiosity else None
+        self.last_question_time = time.time()
+        self.metrics = {
+            "curiosity_eruptions": 0,
+            "spontaneous_questions": 0,
+            "answered_questions": 0,
+            "avg_novelty": 0.0,
+            "eruption_count": 0
+        }
+        self.curiosity_max_new_tokens = CURIOSITY_MAX_NEW_TOKENS
+        self.curiosity_base_temperature = CURIOSITY_BASE_TEMPERATURE
+        self.curiosity_temperament_influence = CURIOSITY_TEMPERAMENT_INFLUENCE
+        self.curiosity_top_k = CURIOSITY_TOP_K
 
         self.load_state()
+
+    def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
+        if not self.enable_curiosity:
+            return None
+        
+        # Seed from context or dream memory, or nothing
+        if not context and self.dream_memory:
+            dream_embs, _ = zip(*self.dream_memory)
+            seed = self.generate("", max_new_tokens=5, temperature=1.3, do_sample=True)  # Returns str
+            context = " ".join(seed.split()[:3])  # First 3 words
+        elif not context:
+            context = ""  # Pure generation mode
+
+        # Temperament shapes creativity
+        temp = self.curiosity_base_temperature + (self.temperament_score * self.curiosity_temperament_influence)
+        temp = max(0.7, min(1.7, temp))
+
+        # Generate a raw, curious-ish output
+        output = self.generate(context, max_new_tokens=self.curiosity_max_new_tokens, 
+                             temperature=temp, top_k=self.curiosity_top_k, do_sample=True)
+
+        # Minimal nudge toward curiosity
+        if not output.endswith("?"):
+            output += "?"
+
+        # Novelty is the only gatekeeper
+        score = self.curiosity.calculate_metric(output)
+        threshold = self.curiosity_novelty_threshold_spontaneous if spontaneous else self.curiosity_novelty_threshold_response
+        return output if score > threshold else None
+    
+    def update_metrics(self, question, score, spontaneous=False, answered=False):
+        self.metrics["curiosity_eruptions"] += 1
+        if spontaneous:
+            self.metrics["spontaneous_questions"] += 1
+        if answered:
+            self.metrics["answered_questions"] += 1
+        self.metrics["avg_novelty"] = (self.metrics["avg_novelty"] * self.metrics["eruption_count"] + score) / (self.metrics["eruption_count"] + 1)
+        self.metrics["eruption_count"] += 1
+
+    def check_silence(self, elapsed: float):
+        if not self.enable_curiosity or not self.pressure:
+            return
+        if (elapsed > self.curiosity_silence_threshold and 
+            self.pressure.value > self.curiosity_pressure_threshold and 
+            (time.time() - self.last_question_time) > self.curiosity_question_cooldown):
+            q = self.generate_curiosity_question(spontaneous=True)
+            if q:
+                print(f"{q}")
+                self.logger.write({
+                    "prompt": q,
+                    "response": "",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id,
+                    "confidence_score": 0.0,
+                    "is_system_question": True
+                })
+                self.update_metrics(q, self.curiosity.calculate_metric(q), spontaneous=True)
+                self.pressure.value -= self.curiosity_pressure_drop
+                self.last_question_time = time.time()
+            elif self.unanswered_q:
+                q, score = self.unanswered_q.popleft()
+                print(f"{q}")
+                self.logger.write({
+                    "prompt": q,
+                    "response": "",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id,
+                    "confidence_score": 0.0,
+                    "is_system_question": True
+                })
+                self.update_metrics(q, score, spontaneous=True)
+                self.pressure.value -= self.curiosity_pressure_drop * 0.7  # Slightly less drop for queued questions
+                self.last_question_time = time.time()
+
+    def tune_curiosity(self, enable=None, spontaneous_threshold=None, response_threshold=None, pressure_threshold=None, 
+                       pressure_drop=None, silence_threshold=None, question_cooldown=None, queue_maxlen=None, 
+                       weight_ignorance=None, weight_novelty=None, max_new_tokens=None, base_temperature=None, 
+                       temperament_influence=None, top_k=None):
+        if enable is not None:
+            self.enable_curiosity = bool(enable)
+            if self.enable_curiosity and not self.curiosity:
+                self.curiosity = self.TrueCuriosity(self)
+                self.pressure = self.CuriosityPressure()
+            elif not self.enable_curiosity:
+                self.curiosity = None
+                self.pressure = None
+        if spontaneous_threshold is not None and 0.5 <= spontaneous_threshold <= 1.0:
+            self.curiosity_novelty_threshold_spontaneous = spontaneous_threshold
+        if response_threshold is not None and 0.5 <= response_threshold <= 1.0:
+            self.curiosity_novelty_threshold_response = response_threshold
+        if pressure_threshold is not None and 0.5 <= pressure_threshold <= 0.9:
+            self.curiosity_pressure_threshold = pressure_threshold
+        if pressure_drop is not None and 0.1 <= pressure_drop <= 0.5:
+            self.curiosity_pressure_drop = pressure_drop
+        if silence_threshold is not None and 5.0 <= silence_threshold <= 60.0:
+            self.curiosity_silence_threshold = silence_threshold
+        if question_cooldown is not None and 30.0 <= question_cooldown <= 120.0:
+            self.curiosity_question_cooldown = question_cooldown
+        if queue_maxlen is not None and 5 <= queue_maxlen <= 20:
+            self.curiosity_queue_maxlen = queue_maxlen
+            self.unanswered_q = deque(self.unanswered_q, maxlen=queue_maxlen)
+        if weight_ignorance is not None and 0.0 <= weight_ignorance <= 1.0:
+            self.curiosity_weight_ignorance = weight_ignorance
+        if weight_novelty is not None and 0.0 <= weight_novelty <= 1.0:
+            self.curiosity_weight_novelty = weight_novelty
+        if max_new_tokens is not None and 5 <= max_new_tokens <= 12:
+            self.curiosity_max_new_tokens = max_new_tokens
+        if base_temperature is not None and 0.5 <= base_temperature <= 1.5:
+            self.curiosity_base_temperature = base_temperature
+        if temperament_influence is not None and 0.1 <= temperament_influence <= 0.6:
+            self.curiosity_temperament_influence = temperament_influence
+        if top_k is not None and 10 <= top_k <= 50:
+            self.curiosity_top_k = top_k
+        print(f"Curiosity params: enable={self.enable_curiosity}, spontaneous_threshold={self.curiosity_novelty_threshold_spontaneous}, "
+              f"response_threshold={self.curiosity_novelty_threshold_response}, pressure_threshold={self.curiosity_pressure_threshold}, "
+              f"pressure_drop={self.curiosity_pressure_drop}, silence_threshold={self.curiosity_silence_threshold}, "
+              f"question_cooldown={self.curiosity_question_cooldown}, queue_maxlen={self.curiosity_queue_maxlen}, "
+              f"weight_ignorance={self.curiosity_weight_ignorance}, weight_novelty={self.curiosity_weight_novelty}, "
+              f"max_new_tokens={self.curiosity_max_new_tokens}, base_temperature={self.curiosity_base_temperature}, "
+              f"temperament_influence={self.curiosity_temperament_influence}, top_k={self.curiosity_top_k}")
 
     def toggle_memory(self, mode):
         modes = {
@@ -428,7 +616,23 @@ class SOVLSystem:
         with torch.no_grad():
             response = self.generate(prompt, max_new_tokens=15, temperature=1.7, top_k=30, do_sample=True)
         self.is_sleeping = IS_SLEEPING
+        self.has_woken = True
         print(f"\n{response}")
+
+        # Wake-up question
+        q = self.generate_curiosity_question() if not self.unanswered_q else self.unanswered_q.popleft()[0]
+        if q:
+            print(f"{q}")
+            self.logger.write({
+                "prompt": q,
+                "response": "",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": 0.0,
+                "is_system_question": True
+            })
+            self.update_metrics(q, self.curiosity.calculate_metric(q))
+
         self.logger.write({"event": "wake_up", "response": response, "timestamp": time.time(), "conversation_id": self.history.conversation_id})
         return response
 
@@ -579,7 +783,24 @@ class SOVLSystem:
                 "dream_memory": [(m.tolist(), w) for m, w in self.dream_memory],
                 "seen_prompts": list(self.seen_prompts),
                 "confidence_history": list(self.confidence_history),
-                "last_weight": self.last_weight
+                "last_weight": self.last_weight,
+                "enable_curiosity": self.enable_curiosity,
+                "curiosity_novelty_threshold_spontaneous": self.curiosity_novelty_threshold_spontaneous,
+                "curiosity_novelty_threshold_response": self.curiosity_novelty_threshold_response,
+                "curiosity_pressure_threshold": self.curiosity_pressure_threshold,
+                "curiosity_pressure_drop": self.curiosity_pressure_drop,
+                "curiosity_silence_threshold": self.curiosity_silence_threshold,
+                "curiosity_question_cooldown": self.curiosity_question_cooldown,
+                "curiosity_queue_maxlen": self.curiosity_queue_maxlen,
+                "curiosity_weight_ignorance": self.curiosity_weight_ignorance,
+                "curiosity_weight_novelty": self.curiosity_weight_novelty,
+                "curiosity_max_new_tokens": self.curiosity_max_new_tokens,
+                "curiosity_base_temperature": self.curiosity_base_temperature,
+                "curiosity_temperament_influence": self.curiosity_temperament_influence,
+                "curiosity_top_k": self.curiosity_top_k,
+                "pressure_value": self.pressure.value if self.pressure else 0.0,
+                "metrics": self.metrics,
+                "unanswered_q": [(q, s) for q, s in self.unanswered_q]
             }
             with open(f"{path_prefix}_meta.json", "w") as f:
                 json.dump(metadata, f)
@@ -616,6 +837,25 @@ class SOVLSystem:
                     self.seen_prompts = set(meta.get("seen_prompts", []))
                     self.confidence_history = deque(meta.get("confidence_history", []), maxlen=CONFIDENCE_HISTORY_MAXLEN)
                     self.last_weight = meta.get("last_weight", 0.0)
+                    self.enable_curiosity = meta.get("enable_curiosity", ENABLE_CURIOSITY)
+                    self.curiosity_novelty_threshold_spontaneous = meta.get("curiosity_novelty_threshold_spontaneous", CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS)
+                    self.curiosity_novelty_threshold_response = meta.get("curiosity_novelty_threshold_response", CURIOSITY_NOVELTY_THRESHOLD_RESPONSE)
+                    self.curiosity_pressure_threshold = meta.get("curiosity_pressure_threshold", CURIOSITY_PRESSURE_THRESHOLD)
+                    self.curiosity_pressure_drop = meta.get("curiosity_pressure_drop", CURIOSITY_PRESSURE_DROP)
+                    self.curiosity_silence_threshold = meta.get("curiosity_silence_threshold", CURIOSITY_SILENCE_THRESHOLD)
+                    self.curiosity_question_cooldown = meta.get("curiosity_question_cooldown", CURIOSITY_QUESTION_COOLDOWN)
+                    self.curiosity_queue_maxlen = meta.get("curiosity_queue_maxlen", CURIOSITY_QUEUE_MAXLEN)
+                    self.curiosity_weight_ignorance = meta.get("curiosity_weight_ignorance", CURIOSITY_WEIGHT_IGNORANCE)
+                    self.curiosity_weight_novelty = meta.get("curiosity_weight_novelty", CURIOSITY_WEIGHT_NOVELTY)
+                    self.curiosity_max_new_tokens = meta.get("curiosity_max_new_tokens", CURIOSITY_MAX_NEW_TOKENS)
+                    self.curiosity_base_temperature = meta.get("curiosity_base_temperature", CURIOSITY_BASE_TEMPERATURE)
+                    self.curiosity_temperament_influence = meta.get("curiosity_temperament_influence", CURIOSITY_TEMPERAMENT_INFLUENCE)
+                    self.curiosity_top_k = meta.get("curiosity_top_k", CURIOSITY_TOP_K)
+                    if self.enable_curiosity:
+                        self.pressure = self.CuriosityPressure()
+                        self.pressure.value = meta.get("pressure_value", 0.0)
+                        self.metrics = meta.get("metrics", self.metrics)
+                        self.unanswered_q = deque(meta.get("unanswered_q", []), maxlen=self.curiosity_queue_maxlen)
                 print("Metadata loaded.")
         except Exception as e:
             print(f"Load failed: {e}. Starting fresh.")
@@ -817,7 +1057,9 @@ class SOVLSystem:
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
             with self._scaffold_context(scaffold_hidden_states):
                 outputs = self.base_model(**inputs)
-                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
+                # Boost weight for answered system questions
+                weight = 1.2 if any(e["prompt"] == inputs["input_ids"] and e["is_system_question"] and e["response"] for e in log_entries) else 1.0
+                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1)) * weight
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.scaffolds[0].parameters(), 1.0)
             self.sleep_optimizer.step()
@@ -836,6 +1078,21 @@ class SOVLSystem:
         self.last_weight = self.get_life_curve_weight()
         self.set_scaffold_influence(self.last_weight)
         print(f"Growth stage: {self.last_weight:.2f}, Exposure: {self.data_exposure}")
+
+        # Wake-up question
+        q = self.generate_curiosity_question() if not self.unanswered_q else self.unanswered_q.popleft()[0]
+        if q:
+            print(f"{q}")
+            self.logger.write({
+                "prompt": q,
+                "response": "",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": 0.0,
+                "is_system_question": True
+            })
+            self.update_metrics(q, self.curiosity.calculate_metric(q))
+
         self._reset_sleep_state()
         return False
 
@@ -894,7 +1151,13 @@ class SOVLSystem:
             self.dream_memory = deque([(t, w) for t, w in self.dream_memory if w >= self.dream_prune_threshold], maxlen=self.dream_memory_maxlen)
             self.dream_memory.append((dream_layer, 1.0))
 
-        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(self.dream_memory)}")
+        # Add curiosity questions to queue
+        for _ in range(3):
+            q = self.generate_curiosity_question()
+            if q:
+                self.unanswered_q.append((q, self.curiosity.calculate_metric(q)))
+
+        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(self.dream_memory)}, questions queued: {len(self.unanswered_q)}")
         print("--- Dream Concluded ---")
 
     def _sleep_train(self):
@@ -1010,11 +1273,14 @@ class SOVLSystem:
             scaffold_hidden_states = scaffold_outputs.hidden_states[-1]
             with self._scaffold_context(scaffold_hidden_states):
                 outputs = self.base_model(input_ids=base_input_ids, attention_mask=base_attention_mask)
-                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
+                # Boost weight for answered system questions
+                log_entries = self.logger.read()
+                weight = 1.2 if any(e["prompt"] in prompts and e.get("is_system_question", False) and e["response"] for e in log_entries) else 1.0
+                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1)) * weight
 
         if torch.isnan(loss) or torch.isinf(loss):
             print("Warning: Invalid loss. Skipping batch.")
-            self.optimizer.zero_grad()  # Clear gradients to avoid corruption
+            self.optimizer.zero_grad()
             return None
 
         accumulation_steps = ACCUMULATION_STEPS
@@ -1165,6 +1431,46 @@ class SOVLSystem:
                         break
                 self.logger.write({"warning": "Repetition detected", "original_text": original_text, "truncated_at": i + 3, "timestamp": time.time(), "conversation_id": self.history.conversation_id})
             response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+            # Add curiosity question if pressure builds
+            last_conf = self.confidence_history[-1] if self.confidence_history else 0.5
+            if self.enable_curiosity:
+                self.pressure.update(self.temperament_score, last_conf, 0.0)
+                if self.pressure.should_erupt(self.curiosity_pressure_threshold):
+                    q = self.generate_curiosity_question(prompt)
+                    if q:
+                        response += f" {q}"
+                        self.logger.write({
+                            "prompt": q,
+                            "response": "",
+                            "timestamp": time.time(),
+                            "conversation_id": self.history.conversation_id,
+                            "confidence_score": 0.0,
+                            "is_system_question": True
+                        })
+                        self.update_metrics(q, self.curiosity.calculate_metric(q))
+                        self.pressure.value -= self.curiosity_pressure_drop
+
+            # Log the full response
+            self.logger.write({
+                "prompt": prompt,
+                "response": response,
+                "timestamp": start_time,
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": confidence_score,
+                "is_system_question": False
+            })
+            self.history.add_message(prompt, response)
+            if self.use_token_map_memory:
+                self._update_token_map_memory(prompt, confidence_score)
+
+            if self.enable_gestation and self._should_gestate():
+                self._gestate()
+            print(f"Generation took {time.time() - start_time:.2f} seconds.")
+            if DEVICE.type == 'cuda':
+                torch.cuda.empty_cache()
+            return response
+
         except torch.cuda.OutOfMemoryError:
             print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
             return "Memory error—try again with less input."
@@ -1173,7 +1479,7 @@ class SOVLSystem:
             self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
             return "Something broke—check logs!"
         except Exception:
-            raise  # Re-raise unhandled exceptions
+            raise
 
         self.logger.write({"prompt": prompt, "response": response, "timestamp": start_time, "conversation_id": self.history.conversation_id, "confidence_score": confidence_score})
         self.history.add_message(prompt, response)
@@ -1269,16 +1575,21 @@ if __name__ == "__main__":
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', "
               "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost>', "
               "'temp <eager> <sluggish> <influence> <curiosity> <restless> <melancholy> <conf_strength> <smoothing_factor>', "
-              "'blend <weight> <temp>', 'lifecycle <capacity> <curve>', 'cross weight <float> | blend <float> | layers <float...> | confidence | temperament | off', "
+              "'blend <weight> <temp>', 'lifecycle <capacity> <curve>', "
+              "'curiosity <enable> <spontaneous> <response> <pressure> <drop> <silence> <cooldown> <queue_maxlen> <ignorance> <novelty> <max_tokens> <base_temp> <temp_influence> <top_k>', "
+              "'cross weight <float> | blend <float> | layers <float...> | confidence | temperament | off', "
               "'scaffold_mem', 'token_mem', 'both_mem', 'no_mem', or a prompt.")
 
         valid_commands = [
             'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', 
-            'sleep', 'dream', 'temp', 'blend', 'lifecycle', 'cross', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
+            'sleep', 'dream', 'temp', 'blend', 'lifecycle', 'cross', 'curiosity', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
         ]
 
+        last_input_time = time.time()
         while True:
             user_cmd = input("\nEnter command or prompt: ").strip().lower()
+            elapsed = time.time() - last_input_time
+            sovl_system.check_silence(elapsed)
             parts = user_cmd.split()
             cmd = parts[0] if parts else ""
 
@@ -1326,6 +1637,17 @@ if __name__ == "__main__":
                 sovl_system.set_global_blend(float(parts[1]), float(parts[2]))
             elif cmd == 'lifecycle' and len(parts) == 3:
                 sovl_system.tune_lifecycle(float(parts[1]), parts[2])
+            elif cmd == 'curiosity' and len(parts) == 15:
+                sovl_system.tune_curiosity(
+                    parts[1].lower() == 'true', float(parts[2]), float(parts[3]), float(parts[4]), 
+                    float(parts[5]), float(parts[6]), float(parts[7]), int(parts[8]), float(parts[9]), 
+                    float(parts[10]), int(parts[11]), float(parts[12]), float(parts[13]), int(parts[14])
+                )
+            elif cmd == 'curiosity' and len(parts) == 11:
+                sovl_system.tune_curiosity(
+                    parts[1].lower() == 'true', float(parts[2]), float(parts[3]), float(parts[4]), 
+                    float(parts[5]), float(parts[6]), float(parts[7]), int(parts[8]), float(parts[9]), float(parts[10])
+                )
             elif cmd == 'cross' and len(parts) >= 2:
                 args = parts[1:]
                 if args[0] == 'weight' and len(args) == 2:
@@ -1344,7 +1666,19 @@ if __name__ == "__main__":
             elif not user_cmd:
                 continue
             else:
-                if cmd not in valid_commands:
+                log_entries = sovl_system.logger.read()
+                last_entry = log_entries[-1] if log_entries else None
+                if last_entry and last_entry.get("is_system_question", False) and not last_entry["response"]:
+                    # User answered a system question
+                    last_entry["response"] = user_cmd
+                    last_entry["confidence_score"] = calculate_confidence_score(
+                        sovl_system.base_model(**sovl_system.base_tokenizer(user_cmd, return_tensors='pt').to(DEVICE)).logits,
+                        sovl_system.base_tokenizer(user_cmd).input_ids
+                    )
+                    sovl_system.logger.write(last_entry)  # Update log
+                    sovl_system.update_metrics(last_entry["prompt"], sovl_system.curiosity.calculate_metric(last_entry["prompt"]), answered=True)
+                    print("Thanks for the insight!")
+                elif cmd not in valid_commands:
                     print("Error: Invalid command. Please enter a valid command.")
                     print("Valid commands are:", ', '.join(valid_commands))
                 else:
@@ -1352,6 +1686,7 @@ if __name__ == "__main__":
                     response = sovl_system.generate(user_cmd, max_new_tokens=60, temperature=sovl_system.base_temperature, top_k=50, do_sample=True)
                     print("\nResponse:", response)
                     print("-" * 20)
+            last_input_time = time.time()
 
     except FileNotFoundError as e:
         print(f"\nFile error: {e}. Check 'config.json' and 'sample_log.jsonl'.")
