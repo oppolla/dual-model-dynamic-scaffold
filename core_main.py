@@ -352,12 +352,29 @@ class ThreadSafeLogger:
         self.lock = Lock()
 
     def write(self, data):
+        if "error" in data or "warning" in data:  # Identify errors or warnings
+            data["is_error_prompt"] = True  # Flag as system error prompt
+            data["conversation_id"] = data.get("conversation_id", str(uuid.uuid4()))  # Unique ID if not provided
         try:
             with self.lock:
                 with open(self.filename, "a", encoding="utf-8") as f:
                     f.write(json.dumps(data) + "\n")
         except (IOError, TypeError, ValueError) as e:
             print(f"Logging failed: {e}")
+            raise
+
+    def read(self):
+        data = []
+        try:
+            with self.lock:
+                with open(self.filename, "r", encoding="utf-8") as f:
+                    for line in f:
+                        data.append(json.loads(line.strip()))
+            return data
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            print(f"Log read failed: {e}")
             raise
 
     def read(self):
@@ -1457,11 +1474,33 @@ class SOVLSystem:
             if filtered[i:i+n] == filtered[i+n:i+2*n]:
                 return True
         return False
+    
+    def _handle_error_prompt(self, error_msg):
+        # Temporarily swap history to isolate error context
+        temp_history = self.history
+        self.history = ConversationHistory()  # New history for error
+        response = self.generate(
+            f"System error detected: {error_msg} What happened?",
+            max_new_tokens=60,
+            temperature=self.base_temperature + 0.2,  # Slightly more creative
+            top_k=50,
+            do_sample=True
+        )
+        self.logger.write({
+            "prompt": f"System error detected: {error_msg} What happened?",
+            "response": response,
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id,
+            "is_error_prompt": True,
+            "confidence_score": 0.5  # Default for error reflection
+        })
+        self.history = temp_history  # Restore user history
+        return response
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         try:
-            print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")  # Added log
+            print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")
             if self.is_sleeping:
                 print("\rGestation Interrupted", end="", flush=True)
                 time.sleep(0.5)
@@ -1563,11 +1602,28 @@ class SOVLSystem:
             return response
 
         except torch.cuda.OutOfMemoryError:
-            print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
-            return "Memory error—try again with less input."
+            error_msg = "Memory error—GPU ran out of space."
+            self.logger.write({
+                "error": "CUDA out of memory",
+                "prompt": prompt,
+                "timestamp": time.time(),
+                "conversation_id": str(uuid.uuid4()),  # New ID for error context
+                "is_error_prompt": True  # Flag as error prompt
+            })
+            error_response = self._handle_error_prompt(error_msg)
+            print(f"Self-reflection: {error_response}")
+            return error_msg
         except (ValueError, RuntimeError) as e:
-            print(f"Error: Generation failed ({e}). Check logs.")
-            self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
+            error_msg = f"Error: Generation failed ({str(e)})."
+            self.logger.write({
+                "error": str(e),
+                "prompt": prompt,
+                "timestamp": time.time(),
+                "conversation_id": str(uuid.uuid4()),
+                "is_error_prompt": True
+            })
+            error_response = self._handle_error_prompt(error_msg)
+            print(f"Self-reflection: {error_response}")
             return "Something broke—check logs!"
         except Exception:
             raise
@@ -1592,15 +1648,22 @@ class SOVLSystem:
         except Exception:
             raise
 
-        self.logger.write({"prompt": prompt, "response": response, "timestamp": start_time, "conversation_id": self.history.conversation_id, "confidence_score": confidence_score})
+        self.logger.write({
+                "prompt": prompt,
+                "response": response,
+                "timestamp": start_time,
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": confidence_score,
+                "is_system_question": False
+        })
         self.history.add_message(prompt, response)
         if self.use_token_map_memory:
-            self._update_token_map_memory(prompt, confidence_score) 
+            self._update_token_map_memory(prompt, confidence_score)
         if self.enable_gestation and self._should_gestate():
             self._gestate()
         print(f"Generation took {time.time() - start_time:.2f} seconds.")
         if DEVICE.type == 'cuda':
-            torch.cuda.empty_cache()  # Free GPU memory after generation
+            torch.cuda.empty_cache()
         return response
 
     @torch.no_grad()
@@ -1683,7 +1746,7 @@ if __name__ == "__main__":
         sovl_system.wake_up()
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', "
-              "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost>', "
+              "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost> <memory_decay> <prune_threshold>', "
               "'temp <eager> <sluggish> <influence> <curiosity> <restless> <melancholy> <conf_strength> <smoothing_factor>', "
               "'blend <weight> <temp>', 'lifecycle <capacity> <curve>', "
               "'curiosity <enable> <spontaneous> <response> <pressure> <drop> <silence> <cooldown> <queue_maxlen> <ignorance> <novelty> <max_tokens> <base_temp> <temp_influence> <top_k>', "
@@ -1691,7 +1754,7 @@ if __name__ == "__main__":
               "'scaffold_mem', 'token_mem', 'both_mem', 'no_mem', or a prompt.")
 
         valid_commands = [
-            'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', 
+            'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load',
             'sleep', 'dream', 'temp', 'blend', 'lifecycle', 'cross', 'curiosity', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
         ]
 
@@ -1700,6 +1763,16 @@ if __name__ == "__main__":
             user_cmd = input("\nEnter command or prompt: ").strip().lower()
             elapsed = time.time() - last_input_time
             sovl_system.check_silence(elapsed)
+
+            # Check for new error prompts
+            log_entries = sovl_system.logger.read()
+            for entry in log_entries[-5:]:  # Check last 5 entries to keep it lightweight
+                if entry.get("is_error_prompt", False) and not entry.get("response"):
+                    error_response = sovl_system._handle_error_prompt(entry.get("error", "Unknown error"))
+                    print(f"Self-reflection: {error_response}")
+                    entry["response"] = error_response  # Mark as handled to avoid reprocessing
+                    sovl_system.logger.write(entry)
+
             parts = user_cmd.split()
             cmd = parts[0] if parts else ""
 
@@ -1749,14 +1822,9 @@ if __name__ == "__main__":
                 sovl_system.tune_lifecycle(float(parts[1]), parts[2])
             elif cmd == 'curiosity' and len(parts) == 15:
                 sovl_system.tune_curiosity(
-                    parts[1].lower() == 'true', float(parts[2]), float(parts[3]), float(parts[4]), 
-                    float(parts[5]), float(parts[6]), float(parts[7]), int(parts[8]), float(parts[9]), 
+                    parts[1].lower() == 'true', float(parts[2]), float(parts[3]), float(parts[4]),
+                    float(parts[5]), float(parts[6]), float(parts[7]), int(parts[8]), float(parts[9]),
                     float(parts[10]), int(parts[11]), float(parts[12]), float(parts[13]), int(parts[14])
-                )
-            elif cmd == 'curiosity' and len(parts) == 11:
-                sovl_system.tune_curiosity(
-                    parts[1].lower() == 'true', float(parts[2]), float(parts[3]), float(parts[4]), 
-                    float(parts[5]), float(parts[6]), float(parts[7]), int(parts[8]), float(parts[9]), float(parts[10])
                 )
             elif cmd == 'cross' and len(parts) >= 2:
                 args = parts[1:]
@@ -1789,13 +1857,14 @@ if __name__ == "__main__":
                     sovl_system.update_metrics(last_entry["prompt"], sovl_system.curiosity.calculate_metric(last_entry["prompt"]), answered=True)
                     print("Thanks for the insight!")
                 elif cmd not in valid_commands:
-                    print("Error: Invalid command. Please enter a valid command.")
-                    print("Valid commands are:", ', '.join(valid_commands))
-                else:
                     print("\n--- Generating Response ---")
                     response = sovl_system.generate(user_cmd, max_new_tokens=60, temperature=sovl_system.base_temperature, top_k=50, do_sample=True)
                     print("\nResponse:", response)
                     print("-" * 20)
+                else:
+                    print("Error: Invalid command. Please enter a valid command.")
+                    print("Valid commands are:", ', '.join(valid_commands))
+
             last_input_time = time.time()
 
     except FileNotFoundError as e:
