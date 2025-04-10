@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOVL System Control Panel</title>
     <style>
-    /* Your existing CSS remains unchanged */
     body {
         font-family: 'Verdana', sans-serif;
         margin: 0;
@@ -174,69 +173,58 @@
         font-size: 0.8em;
         resize: vertical;
     }
+    .tooltip-container {
+        position: relative;
+        display: inline-block;
+    }
+    .tooltip-container .tooltip {
+        visibility: hidden;
+        background-color: #333;
+        color: #fff;
+        text-align: center;
+        border-radius: 4px;
+        padding: 5px;
+        position: absolute;
+        z-index: 1;
+        bottom: 125%;
+        left: 50%;
+        transform: translateX(-50%);
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+    .tooltip-container .tooltip::after {
+        content: '';
+        position: absolute;
+        top: 100%;
+        left: 50%;
+        margin-left: -5px;
+        border-width: 5px;
+        border-style: solid;
+        border-color: #333 transparent transparent transparent;
+    }
+    .tooltip-container:hover .tooltip {
+        visibility: visible;
+        opacity: 1;
+    }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>SOVL System Control Panel</h1>
 
-        <div class="control-item tooltip-container">
-    <label for="parameter">Parameter</label>
-    <input type="text" id="parameter" placeholder="Enter value">
-    <span class="tooltip">This is a tooltip description for the parameter.</span>
-</div>
-
-<style>
-.tooltip-container {
-    position: relative;
-    display: inline-block;
-}
-
-.tooltip-container .tooltip {
-    visibility: hidden;
-    background-color: #333;
-    color: #fff;
-    text-align: center;
-    border-radius: 4px;
-    padding: 5px;
-    position: absolute;
-    z-index: 1;
-    bottom: 125%; /* Adjust position */
-    left: 50%;
-    transform: translateX(-50%);
-    opacity: 0;
-    transition: opacity 0.3s;
-}
-
-.tooltip-container .tooltip::after {
-    content: '';
-    position: absolute;
-    top: 100%; /* Adjust position */
-    left: 50%;
-    margin-left: -5px;
-    border-width: 5px;
-    border-style: solid;
-    border-color: #333 transparent transparent transparent;
-}
-
-.tooltip-container:hover .tooltip {
-    visibility: visible;
-    opacity: 1;
-}
-</style>
-
-        <!-- Prompt Input (Moved to Top) -->
+        <!-- Prompt Input -->
         <div class="section">
             <div class="section-title">Prompt Input</div>
             <div class="control-group">
-                <div class="control-item" style="grid-column: 1 / -1;">
+                <div class="control-item tooltip-container" style="grid-column: 1 / -1;">
                     <label>Prompt</label>
                     <textarea id="user_input" rows="4" placeholder="Enter your prompt..."></textarea>
+                    <span class="tooltip">Input text to generate responses from the model</span>
                 </div>
             </div>
         </div>
 
-        <!-- Output Section (Moved to Top) -->
+        <!-- Output Section -->
         <div class="section">
             <div class="section-title">Output</div>
             <div class="status-bar" id="status">System Ready</div>
@@ -248,36 +236,40 @@
         <div class="section">
             <div class="section-title">Core Configuration</div>
             <div class="control-group">
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Base Model</label>
                     <select id="base_model_name">
                         <option value="gpt2">GPT-2</option>
                         <option value="bert">BERT</option>
                         <option value="roberta">RoBERTa</option>
                     </select>
+                    <span class="tooltip">Primary language model architecture</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Scaffold Model</label>
                     <select id="scaffold_model_name">
                         <option value="gpt2">GPT-2</option>
                         <option value="bert">BERT</option>
                         <option value="roberta">RoBERTa</option>
                     </select>
+                    <span class="tooltip">Supporting model for enhanced processing</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Cross Attn Layers</label>
                     <input type="range" id="cross_attn_layers" min="0" max="11" value="5">
                     <span class="value-display" id="cross_attn_layers_value">5</span>
+                    <span class="tooltip">Number of cross-attention layers</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Quantization</label>
                     <select id="quantization">
                         <option value="fp16">FP16</option>
                         <option value="int8">INT8</option>
                         <option value="int4">INT4</option>
                     </select>
+                    <span class="tooltip">Precision level for model computation</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Layer Mode</label>
                     <select id="layer_selection_mode">
                         <option value="early">Early</option>
@@ -285,20 +277,24 @@
                         <option value="balanced">Balanced</option>
                         <option value="custom">Custom</option>
                     </select>
+                    <span class="tooltip">Strategy for layer selection</span>
                 </div>
-                <div class="control-item" id="custom_layers_container" style="display: none;">
+                <div class="control-item tooltip-container" id="custom_layers_container" style="display: none;">
                     <label>Custom Layers</label>
                     <input type="text" id="custom_layers" placeholder="e.g., 4,5,6,7">
+                    <span class="tooltip">Specify custom layer indices</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Valid Split</label>
                     <input type="range" id="valid_split_ratio" min="0.1" max="0.5" step="0.1" value="0.2">
                     <span class="value-display" id="valid_split_ratio_value">0.2</span>
+                    <span class="tooltip">Ratio of data for validation</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Random Seed</label>
                     <input type="range" id="random_seed" min="0" max="100" value="42">
                     <span class="value-display" id="random_seed_value">42</span>
+                    <span class="tooltip">Seed for random number generation</span>
                 </div>
             </div>
         </div>
@@ -307,22 +303,25 @@
         <div class="section">
             <div class="section-title">LoRA Configuration</div>
             <div class="control-group">
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>LoRA Rank</label>
                     <input type="range" id="lora_rank" min="1" max="16" value="8">
                     <span class="value-display" id="lora_rank_value">8</span>
+                    <span class="tooltip">Rank of LoRA adaptation matrices</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>LoRA Alpha</label>
                     <input type="range" id="lora_alpha" min="8" max="32" value="16">
                     <span class="value-display" id="lora_alpha_value">16</span>
+                    <span class="tooltip">Scaling factor for LoRA updates</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>LoRA Dropout</label>
                     <input type="range" id="lora_dropout" min="0" max="0.5" step="0.05" value="0.1">
                     <span class="value-display" id="lora_dropout_value">0.1</span>
+                    <span class="tooltip">Dropout rate for LoRA layers</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Target Modules</label>
                     <select id="lora_target_modules" multiple>
                         <option value="c_attn" selected>c_attn</option>
@@ -331,10 +330,12 @@
                         <option value="q_proj">q_proj</option>
                         <option value="v_proj">v_proj</option>
                     </select>
+                    <span class="tooltip">Modules to apply LoRA to</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Enable LoRA</label>
                     <input type="checkbox" id="enable_lora_adapters" checked>
+                    <span class="tooltip">Toggle LoRA adaptation on/off</span>
                 </div>
             </div>
         </div>
@@ -343,57 +344,67 @@
         <div class="section">
             <div class="section-title">Training Parameters</div>
             <div class="control-group">
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Epochs</label>
                     <input type="range" id="train_epochs" min="1" max="10" value="3">
                     <span class="value-display" id="train_epochs_value">3</span>
+                    <span class="tooltip">Number of training iterations</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Batch Size</label>
                     <input type="range" id="batch_size" min="1" max="16" value="1">
                     <span class="value-display" id="batch_size_value">1</span>
+                    <span class="tooltip">Number of samples per batch</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Learning Rate</label>
                     <input type="range" id="learning_rate" min="0.00001" max="0.001" step="0.00001" value="0.0003">
                     <span class="value-display" id="learning_rate_value">0.0003</span>
+                    <span class="tooltip">Step size for optimization</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Max Seq Length</label>
                     <input type="range" id="max_seq_length" min="64" max="256" value="128">
                     <span class="value-display" id="max_seq_length_value">128</span>
+                    <span class="tooltip">Maximum sequence length for input</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Capacity Factor</label>
                     <input type="range" id="lifecycle_capacity_factor" min="0.001" max="0.1" step="0.001" value="0.01">
                     <span class="value-display" id="lifecycle_capacity_factor_value">0.01</span>
+                    <span class="tooltip">Capacity scaling for lifecycle</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Lifecycle Curve</label>
                     <select id="lifecycle_curve">
                         <option value="sigmoid_linear">Sigmoid Linear</option>
                         <option value="exponential">Exponential</option>
                     </select>
+                    <span class="tooltip">Curve type for lifecycle progression</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Accum Steps</label>
                     <input type="range" id="accumulation_steps" min="1" max="8" value="4">
                     <span class="value-display" id="accumulation_steps_value">4</span>
+                    <span class="tooltip">Gradient accumulation steps</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Max Patience</label>
                     <input type="range" id="max_patience" min="1" max="5" value="2">
                     <span class="value-display" id="max_patience_value">2</span>
+                    <span class="tooltip">Patience for early stopping</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Eager Gain</label>
                     <input type="range" id="exposure_gain_eager" min="1" max="5" value="3">
                     <span class="value-display" id="exposure_gain_eager_value">3</span>
+                    <span class="tooltip">Gain for eager temperament</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Default Gain</label>
                     <input type="range" id="exposure_gain_default" min="1" max="5" value="2">
                     <span class="value-display" id="exposure_gain_default_value">2</span>
+                    <span class="tooltip">Default exposure gain</span>
                 </div>
             </div>
         </div>
@@ -402,85 +413,102 @@
         <div class="section">
             <div class="section-title">Sleep & Dreaming</div>
             <div class="control-group">
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Conf Threshold</label>
                     <input type="range" id="sleep_conf_threshold" min="0.5" max="0.9" step="0.1" value="0.7">
                     <span class="value-display" id="sleep_conf_threshold_value">0.7</span>
+                    <span class="tooltip">Confidence threshold for sleep</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Time Factor</label>
                     <input type="range" id="sleep_time_factor" min="0.5" max="5" step="0.5" value="1">
                     <span class="value-display" id="sleep_time_factor_value">1</span>
+                    <span class="tooltip">Time scaling factor for sleep</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Log Min</label>
                     <input type="range" id="sleep_log_min" min="5" max="20" value="10">
                     <span class="value-display" id="sleep_log_min_value">10</span>
+                    <span class="tooltip">Minimum log value for sleep</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Swing Var</label>
                     <input type="range" id="dream_swing_var" min="0.05" max="0.2" step="0.05" value="0.1">
                     <span class="value-display" id="dream_swing_var_value">0.1</span>
+                    <span class="tooltip">Variance in dream swing</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Lifecycle Delta</label>
                     <input type="range" id="dream_lifecycle_delta" min="0.05" max="0.2" step="0.05" value="0.1">
                     <span class="value-display" id="dream_lifecycle_delta_value">0.1</span>
+                    <span class="tooltip">Lifecycle change in dreaming</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Noise Scale</label>
                     <input type="range" id="dream_noise_scale" min="0.01" max="0.1" step="0.01" value="0.05">
                     <span class="value-display" id="dream_noise_scale_value">0.05</span>
+                    <span class="tooltip">Scale of noise in dreams</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Memory Weight</label>
                     <input type="range" id="dream_memory_weight" min="0" max="0.5" step="0.1" value="0.1">
                     <span class="value-display" id="dream_memory_weight_value">0.1</span>
+                    <span class="tooltip">Weight of memory in dreams</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Memory Maxlen</label>
                     <input type="range" id="dream_memory_maxlen" min="5" max="20" value="10">
                     <span class="value-display" id="dream_memory_maxlen_value">10</span>
+                    <span class="tooltip">Maximum length of dream memory</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Prompt Weight</label>
                     <input type="range" id="dream_prompt_weight" min="0" max="1" step="0.1" value="0.5">
                     <span class="value-display" id="dream_prompt_weight_value">0.5</span>
+                    <span class="tooltip">Weight of prompt in dreams</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Novelty Boost</label>
                     <input type="range" id="dream_novelty_boost" min="0" max="0.05" step="0.01" value="0.03">
                     <span class="value-display" id="dream_novelty_boost_value">0.03</span>
+                    <span class="tooltip">Boost for novel dream content</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Memory Decay</label>
                     <input type="range" id="dream_memory_decay" min="0" max="1" step="0.1" value="0.95">
                     <span class="value-display" id="dream_memory_decay_value">0.95</span>
+                    <span class="tooltip">Rate of memory decay in dreams</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Prune Threshold</label>
                     <input type="range" id="dream_prune_threshold" min="0" max="1" step="0.1" value="0.1">
                     <span class="value-display" id="dream_prune_threshold_value">0.1</span>
+                    <span class="tooltip">Threshold for pruning dream content</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Enable Dreaming</label>
                     <input type="checkbox" id="enable_dreaming" checked>
+                    <span class="tooltip">Toggle dreaming functionality</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Dream Temperament</label>
                     <input type="checkbox" id="dream_temperament_on" checked>
+                    <span class="tooltip">Enable temperament in dreams</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Prompt-Driven</label>
                     <input type="checkbox" id="enable_prompt_driven_dreams" checked>
+                    <span class="tooltip">Enable prompt-driven dreaming</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Enable Gestation</label>
                     <input type="checkbox" id="enable_gestation" checked>
+                    <span class="tooltip">Toggle gestation process</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Sleep Training</label>
                     <input type="checkbox" id="enable_sleep_training" checked>
+                    <span class="tooltip">Enable training during sleep</span>
                 </div>
             </div>
         </div>
@@ -489,53 +517,63 @@
         <div class="section">
             <div class="section-title">Temperament Controls</div>
             <div class="control-group">
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Eager Threshold</label>
                     <input type="range" id="temp_eager_threshold" min="0.7" max="0.9" step="0.1" value="0.8">
                     <span class="value-display" id="temp_eager_threshold_value">0.8</span>
+                    <span class="tooltip">Threshold for eager behavior</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Sluggish Threshold</label>
                     <input type="range" id="temp_sluggish_threshold" min="0.4" max="0.6" step="0.1" value="0.6">
                     <span class="value-display" id="temp_sluggish_threshold_value">0.6</span>
+                    <span class="tooltip">Threshold for sluggish behavior</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Mood Influence</label>
                     <input type="range" id="temp_mood_influence" min="0" max="1" step="0.1" value="0">
                     <span class="value-display" id="temp_mood_influence_value">0</span>
+                    <span class="tooltip">Influence of mood on behavior</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Curiosity Boost</label>
                     <input type="range" id="temp_curiosity_boost" min="0" max="0.5" step="0.1" value="0.5">
                     <span class="value-display" id="temp_curiosity_boost_value">0.5</span>
+                    <span class="tooltip">Boost for curious behavior</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Restless Drop</label>
                     <input type="range" id="temp_restless_drop" min="0" max="0.5" step="0.1" value="0.1">
                     <span class="value-display" id="temp_restless_drop_value">0.1</span>
+                    <span class="tooltip">Drop rate for restlessness</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Melancholy Noise</label>
                     <input type="range" id="temp_melancholy_noise" min="0" max="0.05" step="0.01" value="0.02">
                     <span class="value-display" id="temp_melancholy_noise_value">0.02</span>
+                    <span class="tooltip">Noise level for melancholy</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Feedback Strength</label>
                     <input type="range" id="conf_feedback_strength" min="0" max="1" step="0.1" value="0.5">
                     <span class="value-display" id="conf_feedback_strength_value">0.5</span>
+                    <span class="tooltip">Strength of confidence feedback</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Smoothing Factor</label>
                     <input type="range" id="temp_smoothing_factor" min="0" max="1" step="0.1" value="0">
                     <span class="value-display" id="temp_smoothing_factor_value">0</span>
+                    <span class="tooltip">Factor for smoothing temperament</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Enable Temperament</label>
                     <input type="checkbox" id="enable_temperament" checked>
+                    <span class="tooltip">Toggle temperament system</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Confidence Tracking</label>
                     <input type="checkbox" id="enable_confidence_tracking" checked>
+                    <span class="tooltip">Enable confidence monitoring</span>
                 </div>
             </div>
         </div>
@@ -544,39 +582,47 @@
         <div class="section">
             <div class="section-title">Runtime Controls</div>
             <div class="control-group">
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Scaffold Weight Cap</label>
                     <input type="range" id="scaffold_weight_cap" min="0" max="1" step="0.1" value="0.9">
                     <span class="value-display" id="scaffold_weight_cap_value">0.9</span>
+                    <span class="tooltip">Maximum weight for scaffold</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Memory Decay</label>
                     <input type="range" id="memory_decay_rate" min="0" max="1" step="0.1" value="0.95">
                     <span class="value-display" id="memory_decay_rate_value">0.95</span>
+                    <span class="tooltip">Rate of memory decay</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Scaffold Memory</label>
                     <input type="checkbox" id="use_scaffold_memory" checked>
+                    <span class="tooltip">Use scaffold memory system</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Token Map Memory</label>
                     <input type="checkbox" id="use_token_map_memory" checked>
+                    <span class="tooltip">Use token map memory</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Dynamic Cross Attn</label>
                     <input type="checkbox" id="enable_dynamic_cross_attention" checked>
+                    <span class="tooltip">Enable dynamic cross-attention</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Cross Attention</label>
                     <input type="checkbox" id="enable_cross_attention" checked>
+                    <span class="tooltip">Enable cross-attention mechanism</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Repetition Check</label>
                     <input type="checkbox" id="enable_repetition_check" checked>
+                    <span class="tooltip">Check for response repetition</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Lifecycle Weighting</label>
                     <input type="checkbox" id="enable_lifecycle_weighting" checked>
+                    <span class="tooltip">Enable lifecycle-based weighting</span>
                 </div>
                 <button onclick="toggleScaffold(true)">Load Scaffold</button>
                 <button onclick="toggleScaffold(false)">Unload Scaffold</button>
@@ -584,28 +630,32 @@
             </div>
         </div>
 
-        <!-- Text Generation (Updated Without Prompt) -->
+        <!-- Text Generation -->
         <div class="section">
             <div class="section-title">Text Generation</div>
             <div class="control-group">
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Scaffold Weight</label>
                     <input type="range" id="scaffold_weight" min="0" max="1" step="0.1" value="0.5">
                     <span class="value-display" id="scaffold_weight_value">0.5</span>
+                    <span class="tooltip">Weight of scaffold in generation</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Max Tokens</label>
                     <input type="range" id="max_tokens" min="10" max="500" value="60">
                     <span class="value-display" id="max_tokens_value">60</span>
+                    <span class="tooltip">Maximum tokens in output</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Temperature</label>
                     <input type="range" id="base_temperature" min="0.1" max="2.0" step="0.1" value="0.7">
                     <span class="value-display" id="base_temperature_value">0.7</span>
+                    <span class="tooltip">Controls randomness of output</span>
                 </div>
-                <div class="control-item">
+                <div class="control-item tooltip-container">
                     <label>Save Path</label>
                     <input type="text" id="save_path_prefix" value="state">
+                    <span class="tooltip">Prefix for saved state files</span>
                 </div>
             </div>
             <div class="control-group">
@@ -617,7 +667,6 @@
     </div>
 
     <script>
-        // Updated JSON Configuration
         const config = {
             "core_config": {
                 "base_model_name": "gpt2",
@@ -694,13 +743,11 @@
             }
         };
 
-        // Dynamic UI Interactions
         document.getElementById('layer_selection_mode').addEventListener('change', (e) => {
             document.getElementById('custom_layers_container').style.display = 
                 e.target.value === 'custom' ? 'block' : 'none';
         });
 
-        // Update Slider Value Displays
         function updateSliderValue(sliderId) {
             const slider = document.getElementById(sliderId);
             const valueDisplay = document.getElementById(`${sliderId}_value`);
@@ -712,7 +759,6 @@
             updateSliderValue(slider.id);
         });
 
-        // Initialize UI from Config
         function initUIFromConfig() {
             document.getElementById('base_model_name').value = config.core_config.base_model_name;
             document.getElementById('scaffold_model_name').value = config.core_config.scaffold_model_name;
@@ -788,7 +834,6 @@
             document.querySelectorAll('input[type="range"]').forEach(slider => updateSliderValue(slider.id));
         }
 
-        // Update Config from UI
         function updateConfigFromUI() {
             config.core_config.base_model_name = document.getElementById('base_model_name').value;
             config.core_config.scaffold_model_name = document.getElementById('scaffold_model_name').value;
@@ -859,7 +904,6 @@
             config.controls_config.save_path_prefix = document.getElementById('save_path_prefix').value;
         }
 
-        // Control Handlers
         function updateStatus(message) {
             document.getElementById('status').textContent = message;
         }
@@ -923,7 +967,6 @@
             };
         }
 
-        // Visualizer Logic
         const canvas = document.getElementById('visualizer');
         const ctx = canvas.getContext('2d');
         canvas.width = canvas.offsetWidth;
@@ -944,7 +987,6 @@
             requestAnimationFrame(updateVisualizer);
         }
 
-        // Initialize
         initUIFromConfig();
         updateVisualizer();
     </script>
