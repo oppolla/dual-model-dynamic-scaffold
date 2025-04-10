@@ -1,7 +1,7 @@
 # SOVL System (Self-Organizing Virtual Lifeform)
 
 ## Overview
-The SOVL System (Self-Organizing Virtual Lifeform) is an prototype AI architecture that combines a large base model with a smaller "scaffold" model for efficient, adaptive inference. The system dynamically coordinates between models using cross-attention and continuously improves through background training.
+An AI agent with autonomous learning capabilities, combining a base LLM with a scaffolded second dynamic LLM for continuous learning via sleep mechanism
 
 ## Key Components of Prototype Implementation
 
