@@ -153,6 +153,9 @@ DREAM_TEMPERAMENT_ON = get_config_value(controls_config, "dream_temperament_on",
 DREAM_NOISE_SCALE = get_config_value(controls_config, "dream_noise_scale", 0.05)
 TEMP_EAGER_THRESHOLD = get_config_value(controls_config, "temp_eager_threshold", 0.8)
 TEMP_SLUGGISH_THRESHOLD = get_config_value(controls_config, "temp_sluggish_threshold", 0.6)
+MEMORY_THRESHOLD = get_config_value(controls_config, "memory_threshold", 0.85)  # GPU memory threshold
+if not isinstance(MEMORY_THRESHOLD, (int, float)) or MEMORY_THRESHOLD <= 0 or MEMORY_THRESHOLD > 1:
+    MEMORY_THRESHOLD = 0.85  # Reset to default if invalid
 TEMP_MOOD_INFLUENCE = get_config_value(controls_config, "temp_mood_influence", 0.0)
 SCAFFOLD_WEIGHT_CAP = get_config_value(controls_config, "scaffold_weight_cap", 1.0)
 BASE_TEMPERATURE = get_config_value(controls_config, "base_temperature", 0.7)
@@ -556,6 +559,38 @@ class SOVLSystem:
         self.curiosity_top_k = CURIOSITY_TOP_K
 
         self.load_state()
+
+    def check_memory_health(self):
+        """Autonomically reduce GPU memory usage if nearing capacity."""
+        if not torch.cuda.is_available():
+            return  # No GPU, no action needed
+        current_mem = torch.cuda.memory_allocated()
+        total_mem = torch.cuda.get_device_properties(0).total_memory
+        mem_ratio = current_mem / total_mem
+        if mem_ratio > MEMORY_THRESHOLD:  # Use configurable threshold
+            memory_pruned = False
+            quantization_changed = False
+            if hasattr(self, 'dream_memory') and len(self.dream_memory) > 0:
+                original_len = len(self.dream_memory)
+                self.dream_memory = self.dream_memory[:original_len // 2]  # Halve it
+                memory_pruned = True
+            if self.quantization_mode != "int8":
+                self.set_quantization_mode("int8")
+                quantization_changed = True
+            self.logger.write({
+                "error": "memory_threshold_exceeded",
+                "details": {
+                    "current_memory": current_mem,
+                    "total_memory": total_mem,
+                    "memory_pruned": memory_pruned,
+                    "quantization_changed": quantization_changed,
+                    "threshold": MEMORY_THRESHOLD
+                },
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "is_error_prompt": self.enable_error_listening
+            })
+            print(f"Attention: Memory adjusted (GPU: {mem_ratio:.0%})")
 
     def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
         if not self.enable_curiosity:
@@ -1501,6 +1536,7 @@ class SOVLSystem:
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         try:
             print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")
+            self.check_memory_health()  # Check GPU memory before generating
             if self.is_sleeping:
                 print("\rGestation Interrupted", end="", flush=True)
                 time.sleep(0.5)
@@ -1629,24 +1665,6 @@ class SOVLSystem:
             return "Something broke—check logs!"
         except Exception:
             raise
-
-        self.logger.write({
-                "prompt": prompt,
-                "response": response,
-                "timestamp": start_time,
-                "conversation_id": self.history.conversation_id,
-                "confidence_score": confidence_score,
-                "is_system_question": False
-        })
-        self.history.add_message(prompt, response)
-        if self.use_token_map_memory:
-            self._update_token_map_memory(prompt, confidence_score)
-        if self.enable_gestation and self._should_gestate():
-            self._gestate()
-        print(f"Generation took {time.time() - start_time:.2f} seconds.")
-        if DEVICE.type == 'cuda':
-            torch.cuda.empty_cache()
-        return response
 
     @torch.no_grad()
     def validate_epoch(self, valid_data):
