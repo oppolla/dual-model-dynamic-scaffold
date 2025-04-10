@@ -29,7 +29,8 @@ cross_attention: Functions for cross-attention injection (_insert_cross_attentio
 - gestation: Functions for gestation and sleep training (_gestate, _sleep_train, _should_gestate).
 
 5. Dream and Memory Management Modules:
-dream: Functions related to the dreaming mechanism (_dream, _should_dream, dream_memory handling).
+   
+- dream: Functions related to the dreaming mechanism (_dream, _should_dream, dream_memory handling).
 
 - memory_manager: Handling memory decay and pruning (token_map, dream_memory_decay, scaffold_memory).
 
