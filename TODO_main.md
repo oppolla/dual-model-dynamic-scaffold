@@ -9,5 +9,5 @@
 - Add Dry Run mode for ease of testing
 
 TESTING GOALS:
-- check_memory_health - Find the optimal value for memory limit intervention (default 0.85 / 85% )
+- def check_memory_health(self): - Find the optimal value for memory limit intervention (default 0.85 / 85% )
 - 
