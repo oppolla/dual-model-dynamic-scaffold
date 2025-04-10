@@ -3,7 +3,6 @@
 ## Overview
 An AI agent with autonomous learning capabilities, combining a base LLM with a scaffolded second dynamic LLM for continuous learning via sleep mechanism
 
-## SOVL System User Manual
 ## Console Commands
 ### `quit` or `exit`
 **What it does:**  
