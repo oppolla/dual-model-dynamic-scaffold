@@ -8,6 +8,6 @@
 - Quantized Inference Mode (big efficiency boost) - DONE
 - Add Dry Run mode for ease of testing
 
-TESTING:
+TESTING GOALS:
 - check_memory_health - Find the optimal value for memory limit intervention (default 0.85 / 85% )
 - 
