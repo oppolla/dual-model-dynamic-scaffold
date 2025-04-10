@@ -82,6 +82,7 @@
     "enable_prompt_driven_dreams": true,
     "enable_lifecycle_weighting": true,
     "enable_curiosity": true,
+    "memory_threshold": 0.85,
     "curiosity_novelty_threshold_spontaneous": 0.9,
     "curiosity_novelty_threshold_response": 0.8,
     "curiosity_pressure_threshold": 0.7,
