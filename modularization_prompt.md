@@ -18,7 +18,7 @@ This code needs to be modularized. Each module should have a single responsibili
 
 - quantization: Functions and logic for handling quantization modes (set_quantization_mode).
 
-cross_attention: Functions for cross-attention injection (_insert_cross_attention, get_cross_attention_layers).
+- cross_attention: Functions for cross-attention injection (_insert_cross_attention, get_cross_attention_layers).
 
 4. Training and Optimization Modules:
 
