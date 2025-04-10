@@ -1,4 +1,4 @@
-This code needs to be modularized. Each module should have a single responsibility. Shared utilities (e.g., logging, configuration parsing) should be placed in distinct utility modules. Keep the SOVLSystem class in its own module as the central orchestrator and delegate specific tasks to appropriate modules. Ensure no circular dependencies among the modules. Maintain consistent naming conventions for clarity and organization. To improve maintainability and modularity, it is suggested the code should be broken into the following modules:
+Refactor and modularize the codebase into distinct modules to improve readability, maintainability, and testability. Each module should have a **single responsibility**, and shared utilities (e.g., logging, configuration parsing) should be placed in common utility modules. Avoid circular dependencies by using dependency injection where necessary. Ensure minimal changes to the `SOVLSystem` class, delegating tasks to appropriate modules. To improve maintainability and modularity, it is suggested the code should be broken into the following modules:
 
 1. Core System Modules:
 
