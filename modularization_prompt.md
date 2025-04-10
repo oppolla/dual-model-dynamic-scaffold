@@ -57,6 +57,7 @@ Each module can be organized into separate files, and shared functionality can b
 
 Maintain the logic flow by ensuring all interdependent methods and variables are properly referenced across modules.
 Use dependency injection where necessary to avoid tight coupling between modules.
+
 Write documentation for each module to describe its purpose and responsibilities.
 Expected Output:
 
