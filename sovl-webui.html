@@ -190,7 +190,10 @@
         left: 50%;
         transform: translateX(-50%);
         opacity: 0;
-        transition: opacity 20s;
+        transition: opacity 10s;
+        visibility: hidden; /* Makes the tooltip visible */
+        opacity: 0.8; /* Fully displays the tooltip */
+        transition: opacity 2s; /* Adjust the transition duration for smoother appearance */
         font-size: 0.6em;
         font-family: Verdana, sans-serif;
     }
