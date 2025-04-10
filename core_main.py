@@ -18,44 +18,62 @@ from threading import Lock
 import gc
 
 class InsufficientDataError(Exception):
-    """Raised when the loaded JSONL data has fewer than the minimum required entries."""
+    """Raised when the loaded JSONL data has fewer than the required entries."""
     pass
 
 def load_jsonl(file_path, min_entries=10):
+    """
+    Loads a JSONL file and validates its contents. Aborts cleanly with a warning if errors occur.
+    
+    Args:
+        file_path (str): Path to the JSONL file.
+        min_entries (int): Minimum number of valid entries required.
+    
+    Returns:
+        list: A list of valid entries.
+    """
     data = []
     error_log = []
+
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line_number, line in enumerate(f, start=1):
+        # Attempt to open and read the file
+        with open(file_path, 'r') as file:
+            for line_number, line in enumerate(file, start=1):
                 try:
                     entry = json.loads(line.strip())
-                    # Validate required fields and their types
+                    # Validate the structure of each entry
                     if not isinstance(entry.get("prompt"), str) or not isinstance(entry.get("response"), str):
                         error_log.append(f"Line {line_number}: Missing or invalid 'prompt' or 'response'. Skipping.")
-                        print(f"Validation Error: {error_log[-1]}")  # Added log for debugging
                         continue
+                    # Append valid entry
                     data.append({"prompt": entry["prompt"], "completion": entry["response"]})
-                except json.JSONDecodeError:
-                    error_log.append(f"Line {line_number}: Failed to decode JSON. Skipping.")
-                    print(f"Decode Error: {error_log[-1]}")  # Added log for debugging
+                except json.JSONDecodeError as e:
+                    error_log.append(f"Line {line_number}: JSON decode error: {e}. Skipping.")
+        
+        # Print warnings if any
+        if error_log:
+            print("Warnings encountered during data loading:")
+            for error in error_log:
+                print(f"WARNING: {error}")
+            # Optionally, write errors to a file
+            with open("data_load_errors.log", "w") as log_file:
+                log_file.write("\n".join(error_log))
+        
+        # Check if the minimum threshold is met
+        if len(data) < min_entries:
+            print(f"ERROR: Loaded only {len(data)} valid entries from {file_path}. Minimum required: {min_entries}.")
+            raise InsufficientDataError(f"Aborting: Insufficient valid data entries. Check 'data_load_errors.log' for details.")
+    
     except FileNotFoundError:
-        raise FileNotFoundError(f"Error: {file_path} not found. Please provide a valid file path.")
-    except IOError as e:
-        raise IOError(f"Error: I/O error({e.errno}): {e.strerror}.")
+        print(f"CRITICAL: File not found: {file_path}. Aborting process.")
+        sys.exit(1)  # Exit the process cleanly with a failure status
+    
     except Exception as e:
-        raise RuntimeError(f"Unexpected error: {e}")
-    
-    # Log errors if any
-    if error_log:
-        with open("data_load_errors.log", "w") as log_file:
-            log_file.write("\n".join(error_log))
-        print(f"Warnings encountered during data loading. See 'data_load_errors.log' for details.")
-    
-    # Check minimum threshold
-    print(f"Data Validation: {len(data)} entries loaded out of {min_entries} required.")  # Added monitoring log
-    if len(data) < min_entries:
-        raise InsufficientDataError(f"Loaded only {len(data)} valid entries from {file_path}. Need at least {min_entries} for training.")
-    
+        print(f"CRITICAL: Unexpected error: {e}. Aborting process.")
+        sys.exit(1)  # Exit the process cleanly with a failure status
+
+    # Return validated data
+    print(f"INFO: Data Validation: {len(data)} entries loaded successfully.")
     return data
 
 def calculate_confidence_score(logits, generated_ids):
@@ -1020,12 +1038,12 @@ class SOVLSystem:
     def map_sequence(self, base_input_ids):
         batch_size = base_input_ids.size(0)
         seq_len = base_input_ids.size(1)
-    
+
         # Adjust max_expanded_len dynamically based on available memory or other constraints
         available_memory_limit = torch.cuda.max_memory_allocated(device=DEVICE) - torch.cuda.memory_allocated(device=DEVICE)
         token_size = 4  # Assuming 4 bytes per token in FP32, adjust for other precisions like FP16 or INT8
         max_expanded_len = min(seq_len * 3, MAX_SEQ_LENGTH, available_memory_limit // token_size)
-    
+
         mapped_ids = torch.full(
             (batch_size, max_expanded_len),
             self.scaffold_tokenizer.pad_token_id,
@@ -1033,27 +1051,27 @@ class SOVLSystem:
             device=DEVICE
         )
         truncated = False
-    
+
         for batch_idx in range(batch_size):
             position = 0
             for base_id in base_input_ids[batch_idx]:
                 mapped_entry = self.special_token_map.get(base_id.item(), self.token_map.get(base_id.item()))
                 mapped_tokens = mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
-    
+
                 if position + len(mapped_tokens) > max_expanded_len:
                     truncated = True
                     break
-                
+
                 for token in mapped_tokens:
                     if position >= max_expanded_len:
                         truncated = True
                         break
                     mapped_ids[batch_idx, position] = token
                     position += 1
-    
+
                 if truncated:
                     break
-                
+
         if truncated:
             print(f"Warning: Token mapping truncated to {max_expanded_len}. Consider adjusting limits or input size.")
             self.logger.write(
@@ -1065,7 +1083,7 @@ class SOVLSystem:
                     "conversation_id": self.history.conversation_id
                 }
             )
-    
+
         # Return only the portion that fits within MAX_SEQ_LENGTH
         return mapped_ids[:, :min(max_expanded_len, MAX_SEQ_LENGTH)]
 
