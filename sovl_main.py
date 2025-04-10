@@ -468,6 +468,9 @@ class SOVLSystem:
         self.seen_prompts = set()
         self.best_valid_loss = float('inf')
         self.patience = 0
+        self.memory_lock = Lock()  # Thread safety for memory adjustments
+        self.mem_usage_history = deque(maxlen=10)  # Track last 10 memory ratios
+        self.dynamic_threshold_base = MEMORY_THRESHOLD  # Base threshold from config
         self.max_patience = MAX_PATIENCE
         self.has_woken = HAS_WOKEN
         self.use_scaffold_memory = USE_SCAFFOLD_MEMORY
@@ -561,72 +564,92 @@ class SOVLSystem:
         self.load_state()
 
     def check_memory_health(self):
-        """Autonomically reduce GPU memory usage if nearing capacity."""
+        """Autonomically reduce GPU memory usage if nearing capacity with dynamic adjustments."""
         if not torch.cuda.is_available():
             return  # No GPU, no action needed
-        current_mem = torch.cuda.memory_allocated()
-        total_mem = torch.cuda.get_device_properties(0).total_memory
-        mem_ratio = current_mem / total_mem
-        if mem_ratio > MEMORY_THRESHOLD:  # Use configurable threshold
-            memory_pruned = False
-            quantization_changed = False
-            cache_cleared = False
-            batch_size_reduced = False
-        
-            # Strategy 1: Prune dream_memory
-            if hasattr(self, 'dream_memory') and len(self.dream_memory) > 0:
-                original_len = len(self.dream_memory)
-                self.dream_memory = deque(
-                    [(t.detach().cpu(), w) for t, w in self.dream_memory[:original_len // 2]],
-                    maxlen=self.dream_memory_maxlen
-                )  # Halve and move to CPU for extra savings
-                memory_pruned = True
     
-            # Strategy 2: Switch to lower quantization
-            if self.quantization_mode != "int8":
-                self.set_quantization_mode("int8")
-                quantization_changed = True
+        with self.memory_lock:  # Thread-safe adjustments
+            current_mem = torch.cuda.memory_allocated()
+            total_mem = torch.cuda.get_device_properties(0).total_memory
+            mem_ratio = current_mem / total_mem
+            self.mem_usage_history.append(mem_ratio)
     
-            # Strategy 3: Clear GPU cache
-            torch.cuda.empty_cache()
-            cache_cleared = True
-
-            # Strategy 4: Reduce batch size temporarily
-            if not hasattr(self, '_original_batch_size'):
-                self._original_batch_size = BATCH_SIZE
-            if BATCH_SIZE > 1:
-                global BATCH_SIZE  # Modify global variable
-                BATCH_SIZE = max(1, BATCH_SIZE // 2)
-                batch_size_reduced = True
+            # Dynamic threshold: adjust based on model size and historical usage
+            model_size = sum(p.numel() * p.element_size() for p in self.base_model.parameters()) / total_mem
+            avg_mem_usage = sum(self.mem_usage_history) / len(self.mem_usage_history) if self.mem_usage_history else mem_ratio
+            dynamic_threshold = min(
+                0.95,  # Upper bound to avoid total saturation
+                max(
+                    0.7,  # Lower bound for responsiveness
+                    self.dynamic_threshold_base * (1 + model_size * 0.1 - avg_mem_usage * 0.2)
+                )
+            )
     
-            # Log all actions
-            self.logger.write({
-                "error": "memory_threshold_exceeded",
-                "details": {
-                    "current_memory": current_mem,
-                    "total_memory": total_mem,
-                    "memory_pruned": memory_pruned,
-                    "quantization_changed": quantization_changed,
-                    "cache_cleared": cache_cleared,
-                    "batch_size_reduced": batch_size_reduced,
-                    "new_batch_size": BATCH_SIZE if batch_size_reduced else None,
-                    "threshold": MEMORY_THRESHOLD
-                },
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "is_error_prompt": self.enable_error_listening
-            })
-            print(f"Attention: Memory adjusted (GPU: {mem_ratio:.0%}) - "
-                  f"Pruned: {memory_pruned}, Quantized: {quantization_changed}, "
-                  f"Cache Cleared: {cache_cleared}, Batch Reduced: {batch_size_reduced}")
-
-        # Optional restoration (when memory pressure eases)
-        elif mem_ratio < MEMORY_THRESHOLD * 0.8:  # Hysteresis to avoid flip-flopping
-            if hasattr(self, '_original_batch_size') and BATCH_SIZE < self._original_batch_size:
-                global BATCH_SIZE
-                BATCH_SIZE = self._original_batch_size
-                print(f"Restored batch size to {BATCH_SIZE}")
-                delattr(self, '_original_batch_size')
+            if mem_ratio > dynamic_threshold:
+                memory_pruned = False
+                quantization_changed = False
+                cache_cleared = False
+                batch_size_reduced = False
+    
+                # Strategy 1: Clear GPU cache
+                torch.cuda.empty_cache()
+                cache_cleared = True
+    
+                # Strategy 2: Priority-based pruning of dream_memory
+                if hasattr(self, 'dream_memory') and len(self.dream_memory) > 0:
+                    original_len = len(self.dream_memory)
+                    # Sort by weight, keep high-confidence entries (weight > 0.5)
+                    sorted_mem = sorted(self.dream_memory, key=lambda x: x[1], reverse=True)
+                    keep_len = max(1, original_len // 2)  # At least 1 entry
+                    self.dream_memory = deque(
+                        [(t.detach().cpu(), w) for t, w in sorted_mem if w > 0.5][:keep_len],
+                        maxlen=self.dream_memory_maxlen
+                    )
+                    if len(self.dream_memory) < original_len:
+                        memory_pruned = True
+    
+                # Strategy 3: Reduce batch size temporarily
+                if not hasattr(self, '_original_batch_size'):
+                    self._original_batch_size = BATCH_SIZE
+                if BATCH_SIZE > 1:
+                    global BATCH_SIZE
+                    BATCH_SIZE = max(1, BATCH_SIZE // 2)
+                    batch_size_reduced = True
+    
+                # Strategy 4: Switch to lower quantization (flag for restart)
+                if self.quantization_mode != "int8":
+                    self.set_quantization_mode("int8")
+                    quantization_changed = True
+    
+                # Log all actions
+                self.logger.write({
+                    "error": "memory_threshold_exceeded",
+                    "details": {
+                        "current_memory": current_mem,
+                        "total_memory": total_mem,
+                        "memory_pruned": memory_pruned,
+                        "quantization_changed": quantization_changed,
+                        "cache_cleared": cache_cleared,
+                        "batch_size_reduced": batch_size_reduced,
+                        "new_batch_size": BATCH_SIZE if batch_size_reduced else None,
+                        "dynamic_threshold": dynamic_threshold,
+                        "threshold": MEMORY_THRESHOLD
+                    },
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id,
+                    "is_error_prompt": self.enable_error_listening
+                })
+                print(f"Attention: Memory adjusted (GPU: {mem_ratio:.0%}, Threshold: {dynamic_threshold:.2f}) - "
+                      f"Cache Cleared: {cache_cleared}, Pruned: {memory_pruned}, "
+                      f"Batch Reduced: {batch_size_reduced}, Quantized: {quantization_changed}")
+    
+            # Restore batch size if memory pressure eases
+            elif mem_ratio < dynamic_threshold * 0.8:  # Hysteresis
+                if hasattr(self, '_original_batch_size') and BATCH_SIZE < self._original_batch_size:
+                    global BATCH_SIZE
+                    BATCH_SIZE = self._original_batch_size
+                    print(f"Restored batch size to {BATCH_SIZE}")
+                    delattr(self, '_original_batch_size')
 
     def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
         if not self.enable_curiosity:
