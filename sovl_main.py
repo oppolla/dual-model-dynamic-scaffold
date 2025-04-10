@@ -571,7 +571,8 @@ class SOVLSystem:
             memory_pruned = False
             quantization_changed = False
             cache_cleared = False
-    
+            batch_size_reduced = False
+        
             # Strategy 1: Prune dream_memory
             if hasattr(self, 'dream_memory') and len(self.dream_memory) > 0:
                 original_len = len(self.dream_memory)
@@ -598,7 +599,7 @@ class SOVLSystem:
                 BATCH_SIZE = max(1, BATCH_SIZE // 2)
                 batch_size_reduced = True
     
-            # Log the actions taken
+            # Log all actions
             self.logger.write({
                 "error": "memory_threshold_exceeded",
                 "details": {
@@ -607,6 +608,8 @@ class SOVLSystem:
                     "memory_pruned": memory_pruned,
                     "quantization_changed": quantization_changed,
                     "cache_cleared": cache_cleared,
+                    "batch_size_reduced": batch_size_reduced,
+                    "new_batch_size": BATCH_SIZE if batch_size_reduced else None,
                     "threshold": MEMORY_THRESHOLD
                 },
                 "timestamp": time.time(),
@@ -614,7 +617,16 @@ class SOVLSystem:
                 "is_error_prompt": self.enable_error_listening
             })
             print(f"Attention: Memory adjusted (GPU: {mem_ratio:.0%}) - "
-                  f"Pruned: {memory_pruned}, Quantized: {quantization_changed}, Cache Cleared: {cache_cleared}")
+                  f"Pruned: {memory_pruned}, Quantized: {quantization_changed}, "
+                  f"Cache Cleared: {cache_cleared}, Batch Reduced: {batch_size_reduced}")
+
+        # Optional restoration (when memory pressure eases)
+        elif mem_ratio < MEMORY_THRESHOLD * 0.8:  # Hysteresis to avoid flip-flopping
+            if hasattr(self, '_original_batch_size') and BATCH_SIZE < self._original_batch_size:
+                global BATCH_SIZE
+                BATCH_SIZE = self._original_batch_size
+                print(f"Restored batch size to {BATCH_SIZE}")
+                delattr(self, '_original_batch_size')
 
     def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
         if not self.enable_curiosity:
