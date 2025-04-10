@@ -215,28 +215,28 @@ src/
 
 Guidelines:
 
-1. **Define Input and Output Expectations**:
+1. Define Input and Output Expectations:
    - Clearly define the inputs, outputs, and side effects of each function and module.
 
-2. **Dependency Management**:
+2. Dependency Management:
    - Use dependency injection for shared resources (e.g., logger, configuration manager).
 
-3. **Documentation**:
+3. Documentation:
    - Add a module-level docstring describing the purpose and responsibilities.
    - Provide inline comments for complex logic.
 
-4. **Testing**:
+4. Testing:
    - Write unit tests for each module. Mock dependencies during testing.
 
-5. **Code Style**:
+5. Code Style:
    - Use `snake_case` for file and function names.
    - Use `UPPER_SNAKE_CASE` for constants.
 
-6. **Transition Process**:
+6. Transition Process:
    - Start by moving utility functions (e.g., logging, configuration parsing) to separate modules.
    - Gradually refactor larger classes and functions into their respective modules.
 
-7. **Performance and Compatibility**:
+7. Performance and Compatibility:
    - Ensure no significant performance overhead is introduced.
    - Maintain compatibility with Python 3.8+.
 
