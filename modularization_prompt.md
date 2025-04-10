@@ -72,12 +72,12 @@ Target Module Breakdown:
 ---
 
 2. Data Handling Modules
-   - **`data_loader`**: Load and validate data (e.g., JSONL files).
-     - **Functions**:
+   - `data_loader`: Load and validate data (e.g., JSONL files).
+     - Functions:
        - `load_jsonl(file_path: str) -> list[dict]`: Load JSONL data.
 
-   - **`data_processing`**: Tokenize and map sequences for processing.
-     - **Functions**:
+   - `data_processing`: Tokenize and map sequences for processing.
+     - Functions:
        - `tokenize_and_map(sequence: str) -> list[int]`: Tokenize input and map it to model-specific tokens.
        - `map_sequence(sequence: str) -> list[int]`: General mapping for sequences.
        - `_update_token_map_memory(sequence: str) -> None`: Update token mappings in memory.
@@ -85,34 +85,34 @@ Target Module Breakdown:
 ---
 
 3. Model Management Modules
-   - **`model_loader`**: Load and configure base and scaffold models.
-     - **Functions**:
+   - `model_loader`: Load and configure base and scaffold models.
+     - Functions:
        - `load_models() -> tuple`: Load base and scaffold models.
 
-   - **`quantization`**: Manage quantization modes.
-     - **Functions**:
+   - `quantization`: Manage quantization modes.
+     - Functions:
        - `set_quantization_mode(mode: str) -> None`: Configure quantization.
 
-   - **`cross_attention`**: Handle cross-attention injection.
-     - **Functions**:
+   - `cross_attention`: Handle cross-attention injection.
+     - Functions:
        - `_insert_cross_attention(model, layers) -> None`: Add cross-attention layers.
        - `get_cross_attention_layers() -> list`: Retrieve cross-attention layers.
 
 ---
 
 4. Training and Optimization Modules
-   - **`training`**: Train models.
-     - **Functions**:
+   - `training`: Train models.
+     - Functions:
        - `train_step(data: Any) -> None`: Perform a single training step.
        - `run_training_cycle() -> None`: Execute a full training cycle.
        - `setup_optimizer() -> Any`: Set up the optimizer.
 
-   - **`validation`**: Validate training results.
-     - **Functions**:
+   - `validation`: Validate training results.
+     - Functions:
        - `validate_epoch(validation_data) -> float`: Validate model performance.
 
-   - **`gestation`**: Handle gestation and sleep training.
-     - **Functions**:
+   - `gestation`: Handle gestation and sleep training.
+     - Functions:
        - `_gestate() -> None`: Execute gestation logic.
        - `_sleep_train() -> None`: Perform sleep training.
        - `_should_gestate() -> bool`: Determine if gestation is needed.
@@ -120,14 +120,14 @@ Target Module Breakdown:
 ---
 
 5. Dream and Memory Management Modules
-   - **`dream`**: Implement the dreaming mechanism.
-     - **Functions**:
+   - `dream`: Implement the dreaming mechanism.
+     - Functions:
        - `_dream() -> None`: Execute dreaming logic.
        - `_should_dream() -> bool`: Check if dreaming is needed.
        - `dream_memory`: Manage dreaming memory.
 
-   - **`memory_manager`**: Manage memory decay and pruning.
-     - **Functions**:
+   - `memory_manager`: Manage memory decay and pruning.
+     - Functions:
        - `token_map`: Map tokens for memory.
        - `dream_memory_decay() -> None`: Handle memory decay for dreams.
        - `scaffold_memory`: Scaffold-specific memory management.
@@ -135,42 +135,42 @@ Target Module Breakdown:
 ---
 
 6. Curiosity and Feedback Modules
-   - **`curiosity`**: Implement the curiosity mechanism.
-     - **Classes**:
+   - `curiosity`: Implement the curiosity mechanism.
+     - Classes:
        - `TrueCuriosity`: Class for curiosity-based exploration.
        - `CuriosityPressure`: Class for managing curiosity pressure.
 
-   - **`feedback`**: Manage feedback and temperament.
-     - **Functions**:
+   - `feedback`: Manage feedback and temperament.
+     - Functions:
        - `adjust_temperament(feedback: Any) -> None`: Update model temperament based on feedback.
        - `_update_temperament() -> None`: Internal temperament updates.
 
 ---
 
 7. Error Handling Modules
-   - **`error_handling`**: Handle errors and log error-related events.
-     - **Functions**:
+   - `error_handling`: Handle errors and log error-related events.
+     - Functions:
        - `_handle_error_prompt(prompt: str) -> None`: Manage error prompts.
        - `log_error`: Log error-related events.
 
 ---
 
 8. Utilities
-   - **`utils`**: Include utility functions.
-     - **Functions**:
+   - `utils`: Include utility functions.
+     - Functions:
        - `calculate_confidence_score(data: Any) -> float`: Calculate confidence score for predictions.
        - `get_life_curve_weight() -> float`: Retrieve life curve weight.
 
-   - **`constants`**: Store constants.
-     - **Constants**:
+   - `constants`: Store constants.
+     - Constants:
        - `MAX_SEQ_LENGTH`
        - `BATCH_SIZE`
 
 ---
 
 9. Main Application Module
-   - **`main`**: Entry point for running the SOVL system.
-     - **Responsibilities**:
+   - `main`: Entry point for running the SOVL system.
+     - Responsibilities:
        - Initialize the `SOVLSystem`.
        - Load configurations and models.
        - Handle user commands and interactions.
