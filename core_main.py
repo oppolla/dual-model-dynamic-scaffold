@@ -1323,11 +1323,13 @@ class SOVLSystem:
 
         if (self.global_step + 1) % accumulation_steps == 0:
             if self.use_scaffold_memory:
-                confidence = calculate_confidence_score(outputs.logits, base_input_ids)
-                if confidence > 0.7:
-                    for param in self.scaffolds[0].parameters():
-                        if param.grad is not None:
-                            param.data += param.grad * 0.01
+               confidence = calculate_confidence_score(outputs.logits, base_input_ids)
+               if confidence > 0.7:
+                   for param in self.scaffolds[0].parameters():
+                       if param.grad is not None:
+                           # Apply gradient clipping before boosting
+                           torch.nn.utils.clip_grad_norm_(param, max_norm=1.0)  # Clip gradients to a maximum norm of 1.0
+                           param.data += param.grad * 0.01  # Boost parameter using scaled gradient
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
