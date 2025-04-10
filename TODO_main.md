@@ -7,3 +7,7 @@
 - Optional Just-In-Time Scaffold Loading (big efficiency boost) - DONE
 - Quantized Inference Mode (big efficiency boost) - DONE
 - Add Dry Run mode for ease of testing
+
+TESTING:
+- check_memory_health - Find the optimal value for memory limit intervention (default 0.85 / 85% )
+- 
