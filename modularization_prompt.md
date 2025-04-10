@@ -53,9 +53,9 @@ Main Application Module:
 
 - main: Entry point for running the SOVL system (__main__ block, user commands).
 
-## Target Module Breakdown:
+Target Module Breakdown:
 
-### 1. **Core System Modules**
+1. **Core System Modules**
    - **`system_config`**: Manage configuration loading and validation.
      - **Functions**:
        - `get_config_value(key: str) -> Any`: Retrieve configuration values.
@@ -71,7 +71,7 @@ Main Application Module:
 
 ---
 
-### 2. **Data Handling Modules**
+2. **Data Handling Modules**
    - **`data_loader`**: Load and validate data (e.g., JSONL files).
      - **Functions**:
        - `load_jsonl(file_path: str) -> list[dict]`: Load JSONL data.
@@ -84,7 +84,7 @@ Main Application Module:
 
 ---
 
-### 3. **Model Management Modules**
+3. **Model Management Modules**
    - **`model_loader`**: Load and configure base and scaffold models.
      - **Functions**:
        - `load_models() -> tuple`: Load base and scaffold models.
@@ -100,7 +100,7 @@ Main Application Module:
 
 ---
 
-### 4. **Training and Optimization Modules**
+4. **Training and Optimization Modules**
    - **`training`**: Train models.
      - **Functions**:
        - `train_step(data: Any) -> None`: Perform a single training step.
@@ -119,7 +119,7 @@ Main Application Module:
 
 ---
 
-### 5. **Dream and Memory Management Modules**
+5. **Dream and Memory Management Modules**
    - **`dream`**: Implement the dreaming mechanism.
      - **Functions**:
        - `_dream() -> None`: Execute dreaming logic.
@@ -147,7 +147,7 @@ Main Application Module:
 
 ---
 
-### 7. **Error Handling Modules**
+7. **Error Handling Modules**
    - **`error_handling`**: Handle errors and log error-related events.
      - **Functions**:
        - `_handle_error_prompt(prompt: str) -> None`: Manage error prompts.
@@ -155,7 +155,7 @@ Main Application Module:
 
 ---
 
-### 8. **Utilities**
+8. **Utilities**
    - **`utils`**: Include utility functions.
      - **Functions**:
        - `calculate_confidence_score(data: Any) -> float`: Calculate confidence score for predictions.
@@ -168,7 +168,7 @@ Main Application Module:
 
 ---
 
-### 9. **Main Application Module**
+9. **Main Application Module**
    - **`main`**: Entry point for running the SOVL system.
      - **Responsibilities**:
        - Initialize the `SOVLSystem`.
@@ -177,7 +177,7 @@ Main Application Module:
 
 ---
 
-## Directory Structure:
+Directory Structure:
 
 The following directory structure is recommended for better organization:
 
@@ -213,7 +213,7 @@ src/
 
 ---
 
-## Guidelines:
+Guidelines:
 
 1. **Define Input and Output Expectations**:
    - Clearly define the inputs, outputs, and side effects of each function and module.
@@ -242,16 +242,16 @@ src/
 
 ---
 
-## Example Refactoring:
+Example Refactoring:
 
-### Original Code:
+Original Code:
 ```python
 def load_jsonl(file_path):
     with open(file_path, 'r') as file:
         return [json.loads(line) for line in file]
 ```
 
-### Refactored Code (`data_loader.py`):
+Refactored Code (`data_loader.py`):
 ```python
 def load_jsonl(file_path: str) -> list[dict]:
     """Load data from a JSONL file."""
@@ -270,7 +270,7 @@ A set of clean, organized modules with no loss of functionality.
 Minimal changes to the SOVLSystem class other than delegating tasks to the newly created modules.
 Updated imports and initialization logic to reflect the new module structure.
 
-## Quality Assurance Checklist:
+Quality Assurance Checklist:
 
 - [ ] Each module has a single responsibility.
 - [ ] Shared utilities are in utility modules.
