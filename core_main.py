@@ -32,10 +32,12 @@ def load_jsonl(file_path, min_entries=10):
                     # Validate required fields and their types
                     if not isinstance(entry.get("prompt"), str) or not isinstance(entry.get("response"), str):
                         error_log.append(f"Line {line_number}: Missing or invalid 'prompt' or 'response'. Skipping.")
+                        print(f"Validation Error: {error_log[-1]}")  # Added log for debugging
                         continue
                     data.append({"prompt": entry["prompt"], "completion": entry["response"]})
                 except json.JSONDecodeError:
                     error_log.append(f"Line {line_number}: Failed to decode JSON. Skipping.")
+                    print(f"Decode Error: {error_log[-1]}")  # Added log for debugging
     except FileNotFoundError:
         raise FileNotFoundError(f"Error: {file_path} not found. Please provide a valid file path.")
     except IOError as e:
@@ -50,6 +52,7 @@ def load_jsonl(file_path, min_entries=10):
         print(f"Warnings encountered during data loading. See 'data_load_errors.log' for details.")
     
     # Check minimum threshold
+    print(f"Data Validation: {len(data)} entries loaded out of {min_entries} required.")  # Added monitoring log
     if len(data) < min_entries:
         raise InsufficientDataError(f"Loaded only {len(data)} valid entries from {file_path}. Need at least {min_entries} for training.")
     
@@ -213,23 +216,31 @@ print(f"Using device: {DEVICE}")
 
 def _validate_config():
     required_keys = ["core_config.base_model_name", "training_config.learning_rate"]
+    missing_keys = []
     for key in required_keys:
         keys = key.split('.')
         value = config
         for k in keys:
             value = value.get(k, {})
         if not value:
-            print(f"Error: Required config key '{key}' missing!")
-            sys.exit(1)
+            missing_keys.append(key)
+    
+    if missing_keys:
+        error_message = f"Missing required configuration keys: {', '.join(missing_keys)}"
+        print(f"Configuration Validation Error: {error_message}")
+        raise ValueError(error_message)
+
     assert isinstance(CROSS_ATTN_LAYERS, list), "CROSS_ATTN_LAYERS must be a list!"
     if not USE_DYNAMIC_LAYERS:
         base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-        assert not invalid_layers, f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers."
+        if invalid_layers:
+            raise ValueError(f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.")
     if LAYER_SELECTION_MODE == "custom":
         base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-        assert not invalid_custom, f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}"
+        if invalid_custom:
+            raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
 
 _validate_config()
 
@@ -1001,35 +1012,61 @@ class SOVLSystem:
 
     def setup_optimizer(self, num_training_steps):
         trainable_params = list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else [])
+        print(f"Optimizer Setup: {len(trainable_params)} trainable parameters with learning rate {LEARNING_RATE}.")  # Added log
         self.optimizer = AdamW(trainable_params, lr=LEARNING_RATE)
         self.scheduler = get_linear_schedule_with_warmup(self.optimizer, num_warmup_steps=0, num_training_steps=num_training_steps)
-        print("Optimizer and scheduler set up.")
+        print("Optimizer and scheduler successfully initialized.")  # Added confirmation log
 
     def map_sequence(self, base_input_ids):
         batch_size = base_input_ids.size(0)
         seq_len = base_input_ids.size(1)
-        max_expanded_len = max(seq_len * 3, MAX_SEQ_LENGTH)
-        mapped_ids = torch.full((batch_size, max_expanded_len), self.scaffold_tokenizer.pad_token_id, dtype=torch.long, device=DEVICE)
+    
+        # Adjust max_expanded_len dynamically based on available memory or other constraints
+        available_memory_limit = torch.cuda.max_memory_allocated(device=DEVICE) - torch.cuda.memory_allocated(device=DEVICE)
+        token_size = 4  # Assuming 4 bytes per token in FP32, adjust for other precisions like FP16 or INT8
+        max_expanded_len = min(seq_len * 3, MAX_SEQ_LENGTH, available_memory_limit // token_size)
+    
+        mapped_ids = torch.full(
+            (batch_size, max_expanded_len),
+            self.scaffold_tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=DEVICE
+        )
         truncated = False
+    
         for batch_idx in range(batch_size):
             position = 0
             for base_id in base_input_ids[batch_idx]:
                 mapped_entry = self.special_token_map.get(base_id.item(), self.token_map.get(base_id.item()))
                 mapped_tokens = mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
+    
                 if position + len(mapped_tokens) > max_expanded_len:
                     truncated = True
                     break
+                
                 for token in mapped_tokens:
                     if position >= max_expanded_len:
                         truncated = True
                         break
                     mapped_ids[batch_idx, position] = token
                     position += 1
+    
                 if truncated:
                     break
+                
         if truncated:
-            print(f"Warning: Token mapping truncated to {max_expanded_len}.")
-            self.logger.write({"warning": f"Token mapping truncated to {max_expanded_len}", "timestamp": time.time(), "conversation_id": self.history.conversation_id})
+            print(f"Warning: Token mapping truncated to {max_expanded_len}. Consider adjusting limits or input size.")
+            self.logger.write(
+                {
+                    "warning": f"Token mapping truncated to {max_expanded_len}",
+                    "original_length": seq_len,
+                    "allowed_length": max_expanded_len,
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id
+                }
+            )
+    
+        # Return only the portion that fits within MAX_SEQ_LENGTH
         return mapped_ids[:, :min(max_expanded_len, MAX_SEQ_LENGTH)]
 
     def _update_token_map_memory(self, prompt, confidence):
@@ -1406,6 +1443,7 @@ class SOVLSystem:
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         try:
+            print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")  # Added log
             if self.is_sleeping:
                 print("\rGestation Interrupted", end="", flush=True)
                 time.sleep(0.5)
@@ -1426,30 +1464,28 @@ class SOVLSystem:
                 temp += temp_adjustment
                 temp = max(0.5, min(1.5, temp))
 
-            if self.enable_dynamic_cross_attention and self.dynamic_cross_attn_mode:
-                if self.dynamic_cross_attn_mode == 'confidence' and self.confidence_history:
-                    avg_conf = sum(self.confidence_history) / len(self.confidence_history)
-                    dynamic_weight = max(0.5, min(2.0, avg_conf * 2))
-                    self.set_scaffold_influence(weight=dynamic_weight)
-                elif self.dynamic_cross_attn_mode == 'temperament':
-                    dynamic_weight = max(0.5, min(2.0, 1.0 + self.temperament_score))
-                    self.set_scaffold_influence(weight=dynamic_weight)
-
+            # Clear scaffold cache and handle chunked input to avoid memory overflow
             self._clear_scaffold_cache()
+            generated_ids = []
+            chunk_size = 512  # Adjust chunk size based on GPU memory
             with self._scaffold_context(scaffold_hidden_states):
                 self.set_scaffold_influence(weight=scaffold_weight)
-                outputs = self.base_model.generate(
-                    input_ids,
-                    max_new_tokens=max_new_tokens,
-                    pad_token_id=self.base_tokenizer.pad_token_id,
-                    eos_token_id=self.base_tokenizer.eos_token_id,
-                    temperature=temp,
-                    return_dict_in_generate=True,
-                    output_scores=True,
-                    **kwargs
-                )
+                for chunk_start in range(0, input_ids.size(1), chunk_size):
+                    chunk_end = chunk_start + chunk_size
+                    input_chunk = input_ids[:, chunk_start:chunk_end]
+                    outputs = self.base_model.generate(
+                        input_chunk,
+                        max_new_tokens=max_new_tokens,
+                        pad_token_id=self.base_tokenizer.pad_token_id,
+                        eos_token_id=self.base_tokenizer.eos_token_id,
+                        temperature=temp,
+                        return_dict_in_generate=True,
+                        output_scores=True,
+                        **kwargs
+                    )
+                    generated_ids.extend(outputs.sequences[0][input_length:].tolist())
 
-            generated_ids = outputs.sequences[0][input_length:]
+            print(f"Generation completed in {time.time() - start_time:.2f}s.")  # Added log for timing
             confidence_score = 0.5
             if self.enable_confidence_tracking:
                 confidence_score = calculate_confidence_score(outputs.scores, generated_ids)
@@ -1464,7 +1500,9 @@ class SOVLSystem:
                     if all(generated_ids[i + j] == generated_ids[i + j + 3] for j in range(3)):
                         generated_ids = generated_ids[:i + 3]
                         break
-                self.logger.write({"warning": "Repetition detected", "original_text": original_text, "truncated_at": i + 3, "timestamp": time.time(), "conversation_id": self.history.conversation_id})
+                self.logger.write({"warning": "Repetition detected", "original_text": original_text,
+                                   "truncated_at": i + 3, "timestamp": time.time(),
+                                   "conversation_id": self.history.conversation_id})
             response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
 
             # Add curiosity question if pressure builds
@@ -1516,6 +1554,16 @@ class SOVLSystem:
         except Exception:
             raise
 
+        except torch.cuda.OutOfMemoryError:
+            print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
+            return "Memory error—try again with less input."
+        except (ValueError, RuntimeError) as e:
+            print(f"Error: Generation failed ({e}). Check logs.")
+            self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
+            return "Something broke—check logs!"
+        except Exception:
+            raise
+        
         except torch.cuda.OutOfMemoryError:
             print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
             return "Memory error—try again with less input."
