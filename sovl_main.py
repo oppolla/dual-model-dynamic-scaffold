@@ -15,7 +15,6 @@ from collections import deque, defaultdict
 import uuid
 import os
 from threading import Lock
-import gc
 
 class InsufficientDataError(Exception):
     pass
