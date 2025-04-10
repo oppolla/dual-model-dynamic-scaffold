@@ -1,44 +1,53 @@
 graph TD
     %% Subgraph 1: User Interaction
     subgraph User Interaction
-        UI[User Input] -->|Text| GEN[Generate Response]
+        UI[User Input] -->|Command/Prompt| CMD[Command Handler]
+        CMD -->|Prompt| GEN[Generate Response]
+        CMD -->|Train| RT
+        CMD -->|Tune| TCU[Tune Curiosity/Temperament]
         GEN -->|Response| UO[User Output]
     end
 
     %% Subgraph 2: Core Components
     subgraph Core Components
         BT[Base Tokenizer<br><i>Tokens Processing</i>] --> BM[Base Model<br>Frozen]
-        ST[Scaffold Tokenizer<br><i>Adaptive Tokens</i>] --> SM[Scaffold Model<br>Trainable]
+        ST[Scaffold Tokenizer<br><i>Adaptive Tokens</i>] --> SM[Scaffold Model<br>Trainable w/ LoRA]
         BM -->|Hidden States| CAF[Simple Cross-Attention Fuser]
         SM -->|Hidden States| CAF
-        CAF -->|Processed States| BM
+        CAF -->|Fused States| BM
         CH[Conversation History] --> GEN
-        TL[Thread Logger<br>Log Interaction Data] --> GEN
+        TL[Thread Logger<br>Log Interactions/Errors] --> GEN
+        TC[True Curiosity<br>Question Generation] -->|Questions| TL
+        TEMP[Temperament<br>Mood Influence] --> GEN
     end
 
     %% Subgraph 3: Training Subsystem - Sleep Phase
     subgraph Training Subsystem - Sleep Phase
-        TS[Training Scheduler] --> RT[Training Runtime Trigger]
-        RT --> TE[Training Step]
-        TE --> SM[Update Weights]
-        DU[Deploy Updates] -->|Production Weights| PS[Production Scaffold]
+        RT[Training Runtime Trigger<br>_should_gestate] --> GT[Gestate<br>_gestate]
+        RT --> STN[Sleep Train<br>_sleep_train]
+        GT -->|Dream?| DR[Dream<br>_dream]
+        DR -->|Memory Update| SM
+        GT -->|Weight Update| SM
+        STN -->|Weight Update| SM
+        DR -->|Questions| TC
     end
 
     %% External Connections
     CH --> IB[Interaction Buffer]
     TL --> IB
-    IB --> EMS[External Memory Store]
+    IB --> EMS[External Memory Store<br>log.jsonl, state files]
     EMS --> PT[Prepare Training Data]
-    PT --> RT
-    PT --> KF[K-Fold Cross Validation]
-    KF -->|Split Data| TS
+    PT -->|Log Entries| RT
+    PT --> DS[Data Split<br>TRAIN_DATA, VALID_DATA]
+    DS --> GT
+    DS --> STN
 
     %% Styling Nodes
     classDef user fill:#f8c3,stroke:#333,stroke-width:1px;
     classDef core fill:#b6c8e5,stroke:#333,stroke-width:1px;
     classDef train fill:#ffd3b6,stroke:#333,stroke-width:1px;
     classDef external fill:#c4f1b1,stroke:#333,stroke-width:1px;
-    class UI,UO,GEN user;
-    class BT,BM,ST,SM,CAF,CH,TL,PS core;
-    class TS,RT,TE,DU train;
-    class IB,EMS,PT,KF external;
+    class UI,UO,CMD,GEN,TCU user;
+    class BT,BM,ST,SM,CAF,CH,TL,TC,TEMP core;
+    class RT,GT,STN,DR train;
+    class IB,EMS,PT,DS external;
