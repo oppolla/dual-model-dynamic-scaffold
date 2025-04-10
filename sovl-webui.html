@@ -248,7 +248,7 @@
                         <option value="bert">BERT</option>
                         <option value="roberta">RoBERTa</option>
                     </select>
-                    <span class="tooltip">Primary language model architecture</span>
+                    <span class="tooltip">Base model (e.g., "gpt2"). Defines the primary language model</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Scaffold Model</label>
@@ -257,13 +257,13 @@
                         <option value="bert">BERT</option>
                         <option value="roberta">RoBERTa</option>
                     </select>
-                    <span class="tooltip">Supporting model for enhanced processing</span>
+                    <span class="tooltip">Scaffold model (e.g., "gpt2"). Guides the base model via cross-attention</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Cross Attn Layers</label>
                     <input type="range" id="cross_attn_layers" min="0" max="11" value="5">
                     <span class="value-display" id="cross_attn_layers_value">5</span>
-                    <span class="tooltip">Number of cross-attention layers</span>
+                    <span class="tooltip">Fixed layers for cross-attention (e.g., [5, 7]). Ignored if use_dynamic_layers is true</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Quantization</label>
@@ -272,7 +272,7 @@
                         <option value="int8">INT8</option>
                         <option value="int4">INT4</option>
                     </select>
-                    <span class="tooltip">Precision level for model computation</span>
+                    <span class="tooltip">Precision mode ("fp16", "int8", "int4")</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Layer Mode</label>
@@ -282,18 +282,18 @@
                         <option value="balanced">Balanced</option>
                         <option value="custom">Custom</option>
                     </select>
-                    <span class="tooltip">Strategy for layer selection</span>
+                    <span class="tooltip">Dynamic layer strategy ("early", "late", "balanced", "custom")</span>
                 </div>
                 <div class="control-item tooltip-container" id="custom_layers_container" style="display: none;">
                     <label>Custom Layers</label>
                     <input type="text" id="custom_layers" placeholder="e.g., 4,5,6,7">
-                    <span class="tooltip">Specify custom layer indices</span>
+                    <span class="tooltip">Custom layer list for "custom" mode (e.g., [0, 2, 4])</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Valid Split</label>
                     <input type="range" id="valid_split_ratio" min="0.1" max="0.5" step="0.1" value="0.2">
                     <span class="value-display" id="valid_split_ratio_value">0.2</span>
-                    <span class="tooltip">Ratio of data for validation</span>
+                    <span class="tooltip">Validation data split (e.g., 0.2 = 20%)</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Random Seed</label>
@@ -312,19 +312,19 @@
                     <label>LoRA Rank</label>
                     <input type="range" id="lora_rank" min="1" max="16" value="8">
                     <span class="value-display" id="lora_rank_value">8</span>
-                    <span class="tooltip">Rank of LoRA adaptation matrices</span>
+                    <span class="tooltip">LoRA rank (e.g., 8). Controls adaptation capacity</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>LoRA Alpha</label>
                     <input type="range" id="lora_alpha" min="8" max="32" value="16">
                     <span class="value-display" id="lora_alpha_value">16</span>
-                    <span class="tooltip">Scaling factor for LoRA updates</span>
+                    <span class="tooltip">LoRA scaling factor (e.g., 16)</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>LoRA Dropout</label>
                     <input type="range" id="lora_dropout" min="0" max="0.5" step="0.05" value="0.1">
                     <span class="value-display" id="lora_dropout_value">0.1</span>
-                    <span class="tooltip">Dropout rate for LoRA layers</span>
+                    <span class="tooltip">Dropout rate for LoRA (e.g., 0.1)</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Target Modules</label>
@@ -335,7 +335,7 @@
                         <option value="q_proj">q_proj</option>
                         <option value="v_proj">v_proj</option>
                     </select>
-                    <span class="tooltip">Modules to apply LoRA to</span>
+                    <span class="tooltip">Modules to adapt (e.g., ["q_proj", "v_proj"])</span>
                 </div>
                 <div class="control-item tooltip-container">
                     <label>Enable LoRA</label>
