@@ -216,23 +216,31 @@ print(f"Using device: {DEVICE}")
 
 def _validate_config():
     required_keys = ["core_config.base_model_name", "training_config.learning_rate"]
+    missing_keys = []
     for key in required_keys:
         keys = key.split('.')
         value = config
         for k in keys:
             value = value.get(k, {})
         if not value:
-            print(f"Error: Required config key '{key}' missing!")
-            sys.exit(1)
+            missing_keys.append(key)
+    
+    if missing_keys:
+        error_message = f"Missing required configuration keys: {', '.join(missing_keys)}"
+        print(f"Configuration Validation Error: {error_message}")
+        raise ValueError(error_message)
+
     assert isinstance(CROSS_ATTN_LAYERS, list), "CROSS_ATTN_LAYERS must be a list!"
     if not USE_DYNAMIC_LAYERS:
         base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-        assert not invalid_layers, f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers."
+        if invalid_layers:
+            raise ValueError(f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.")
     if LAYER_SELECTION_MODE == "custom":
         base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-        assert not invalid_custom, f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}"
+        if invalid_custom:
+            raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
 
 _validate_config()
 
