@@ -180,10 +180,10 @@
     .tooltip-container .tooltip {
         visibility: hidden;
         background-color: #333;
-        color: #fff;
-        text-align: center;
+        color: #e0e0e0;
+        text-align: left;
         border-radius: 4px;
-        padding: 5px;
+        padding: 8px;
         position: absolute;
         z-index: 1;
         bottom: 125%;
@@ -191,6 +191,8 @@
         transform: translateX(-50%);
         opacity: 0;
         transition: opacity 0.3s;
+        font-size: 0.9em;
+        font-family: Consolas, sans-serif;
     }
     .tooltip-container .tooltip::after {
         content: '';
