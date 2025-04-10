@@ -15,29 +15,47 @@ from collections import deque, defaultdict
 import uuid
 import os
 from threading import Lock
+import gc
 
 class InsufficientDataError(Exception):
     """Raised when the loaded JSONL data has fewer than the minimum required entries."""
     pass
 
-def load_jsonl(file_path):
+def load_jsonl(file_path, min_entries=10):
     data = []
+    error_log = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
+            for line_number, line in enumerate(f, start=1):
                 try:
                     entry = json.loads(line.strip())
+                    # Validate required fields and their types
+                    if not isinstance(entry.get("prompt"), str) or not isinstance(entry.get("response"), str):
+                        error_log.append(f"Line {line_number}: Missing or invalid 'prompt' or 'response'. Skipping.")
+                        print(f"Validation Error: {error_log[-1]}")  # Added log for debugging
+                        continue
                     data.append({"prompt": entry["prompt"], "completion": entry["response"]})
                 except json.JSONDecodeError:
-                    print(f"Error: Failed to decode JSON from line: {line.strip()}. Skipping this line.")
+                    error_log.append(f"Line {line_number}: Failed to decode JSON. Skipping.")
+                    print(f"Decode Error: {error_log[-1]}")  # Added log for debugging
     except FileNotFoundError:
-        print(f"Warning: {file_path} not found. Starting with empty data!")
+        raise FileNotFoundError(f"Error: {file_path} not found. Please provide a valid file path.")
     except IOError as e:
-        print(f"Error: I/O error({e.errno}): {e.strerror}.")
+        raise IOError(f"Error: I/O error({e.errno}): {e.strerror}.")
     except Exception as e:
-        print(f"Unexpected error: {e}")
-    if len(data) < 10:  # Minimum threshold for meaningful training
-        raise InsufficientDataError(f"Loaded only {len(data)} entries from {file_path}. Need at least 10 for training.")
+        raise RuntimeError(f"Unexpected error: {e}")
+    
+    # Log errors if any
+    if error_log:
+        with open("data_load_errors.log", "w") as log_file:
+            log_file.write("\n".join(error_log))
+        print(f"Warnings encountered during data loading. See 'data_load_errors.log' for details.")
+    
+    # Check minimum threshold
+    print(f"Data Validation: {len(data)} entries loaded out of {min_entries} required.")  # Added monitoring log
+    if len(data) < min_entries:
+        raise InsufficientDataError(f"Loaded only {len(data)} valid entries from {file_path}. Need at least {min_entries} for training.")
+    
     return data
 
 def calculate_confidence_score(logits, generated_ids):
@@ -986,9 +1004,10 @@ class SOVLSystem:
 
     def setup_optimizer(self, num_training_steps):
         trainable_params = list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else [])
+        print(f"Optimizer Setup: {len(trainable_params)} trainable parameters with learning rate {LEARNING_RATE}.")  # Added log
         self.optimizer = AdamW(trainable_params, lr=LEARNING_RATE)
         self.scheduler = get_linear_schedule_with_warmup(self.optimizer, num_warmup_steps=0, num_training_steps=num_training_steps)
-        print("Optimizer and scheduler set up.")
+        print("Optimizer and scheduler successfully initialized.")  # Added confirmation log
 
     def map_sequence(self, base_input_ids):
         batch_size = base_input_ids.size(0)
@@ -1308,11 +1327,13 @@ class SOVLSystem:
 
         if (self.global_step + 1) % accumulation_steps == 0:
             if self.use_scaffold_memory:
-                confidence = calculate_confidence_score(outputs.logits, base_input_ids)
-                if confidence > 0.7:
-                    for param in self.scaffolds[0].parameters():
-                        if param.grad is not None:
-                            param.data += param.grad * 0.01
+               confidence = calculate_confidence_score(outputs.logits, base_input_ids)
+               if confidence > 0.7:
+                   for param in self.scaffolds[0].parameters():
+                       if param.grad is not None:
+                           # Apply gradient clipping before boosting
+                           torch.nn.utils.clip_grad_norm_(param, max_norm=1.0)  # Clip gradients to a maximum norm of 1.0
+                           param.data += param.grad * 0.01  # Boost parameter using scaled gradient
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
@@ -1389,6 +1410,7 @@ class SOVLSystem:
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         try:
+            print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")  # Added log
             if self.is_sleeping:
                 print("\rGestation Interrupted", end="", flush=True)
                 time.sleep(0.5)
@@ -1431,7 +1453,7 @@ class SOVLSystem:
                     output_scores=True,
                     **kwargs
                 )
-
+            print(f"Generation completed in {time.time() - start_time:.2f}s.")  # Added log for timing
             generated_ids = outputs.sequences[0][input_length:]
             confidence_score = 0.5
             if self.enable_confidence_tracking:
@@ -1488,6 +1510,16 @@ class SOVLSystem:
             if DEVICE.type == 'cuda':
                 torch.cuda.empty_cache()
             return response
+
+        except torch.cuda.OutOfMemoryError:
+            print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
+            return "Memory error—try again with less input."
+        except (ValueError, RuntimeError) as e:
+            print(f"Error: Generation failed ({e}). Check logs.")
+            self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
+            return "Something broke—check logs!"
+        except Exception:
+            raise
 
         except torch.cuda.OutOfMemoryError:
             print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
