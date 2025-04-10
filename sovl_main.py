@@ -570,13 +570,35 @@ class SOVLSystem:
         if mem_ratio > MEMORY_THRESHOLD:  # Use configurable threshold
             memory_pruned = False
             quantization_changed = False
+            cache_cleared = False
+    
+            # Strategy 1: Prune dream_memory
             if hasattr(self, 'dream_memory') and len(self.dream_memory) > 0:
                 original_len = len(self.dream_memory)
-                self.dream_memory = self.dream_memory[:original_len // 2]  # Halve it
+                self.dream_memory = deque(
+                    [(t.detach().cpu(), w) for t, w in self.dream_memory[:original_len // 2]],
+                    maxlen=self.dream_memory_maxlen
+                )  # Halve and move to CPU for extra savings
                 memory_pruned = True
+    
+            # Strategy 2: Switch to lower quantization
             if self.quantization_mode != "int8":
                 self.set_quantization_mode("int8")
                 quantization_changed = True
+    
+            # Strategy 3: Clear GPU cache
+            torch.cuda.empty_cache()
+            cache_cleared = True
+
+            # Strategy 4: Reduce batch size temporarily
+            if not hasattr(self, '_original_batch_size'):
+                self._original_batch_size = BATCH_SIZE
+            if BATCH_SIZE > 1:
+                global BATCH_SIZE  # Modify global variable
+                BATCH_SIZE = max(1, BATCH_SIZE // 2)
+                batch_size_reduced = True
+    
+            # Log the actions taken
             self.logger.write({
                 "error": "memory_threshold_exceeded",
                 "details": {
@@ -584,13 +606,15 @@ class SOVLSystem:
                     "total_memory": total_mem,
                     "memory_pruned": memory_pruned,
                     "quantization_changed": quantization_changed,
+                    "cache_cleared": cache_cleared,
                     "threshold": MEMORY_THRESHOLD
                 },
                 "timestamp": time.time(),
                 "conversation_id": self.history.conversation_id,
                 "is_error_prompt": self.enable_error_listening
             })
-            print(f"Attention: Memory adjusted (GPU: {mem_ratio:.0%})")
+            print(f"Attention: Memory adjusted (GPU: {mem_ratio:.0%}) - "
+                  f"Pruned: {memory_pruned}, Quantized: {quantization_changed}, Cache Cleared: {cache_cleared}")
 
     def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
         if not self.enable_curiosity:
