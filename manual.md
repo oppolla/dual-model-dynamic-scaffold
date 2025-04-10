@@ -1,4 +1,4 @@
-# SOVLSystem User Manual
+# SOVL System User Manual
 ## Console Commands
 ### `quit` or `exit`
 **What it does:**  
