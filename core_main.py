@@ -1431,30 +1431,28 @@ class SOVLSystem:
                 temp += temp_adjustment
                 temp = max(0.5, min(1.5, temp))
 
-            if self.enable_dynamic_cross_attention and self.dynamic_cross_attn_mode:
-                if self.dynamic_cross_attn_mode == 'confidence' and self.confidence_history:
-                    avg_conf = sum(self.confidence_history) / len(self.confidence_history)
-                    dynamic_weight = max(0.5, min(2.0, avg_conf * 2))
-                    self.set_scaffold_influence(weight=dynamic_weight)
-                elif self.dynamic_cross_attn_mode == 'temperament':
-                    dynamic_weight = max(0.5, min(2.0, 1.0 + self.temperament_score))
-                    self.set_scaffold_influence(weight=dynamic_weight)
-
+            # Clear scaffold cache and handle chunked input to avoid memory overflow
             self._clear_scaffold_cache()
+            generated_ids = []
+            chunk_size = 512  # Adjust chunk size based on GPU memory
             with self._scaffold_context(scaffold_hidden_states):
                 self.set_scaffold_influence(weight=scaffold_weight)
-                outputs = self.base_model.generate(
-                    input_ids,
-                    max_new_tokens=max_new_tokens,
-                    pad_token_id=self.base_tokenizer.pad_token_id,
-                    eos_token_id=self.base_tokenizer.eos_token_id,
-                    temperature=temp,
-                    return_dict_in_generate=True,
-                    output_scores=True,
-                    **kwargs
-                )
+                for chunk_start in range(0, input_ids.size(1), chunk_size):
+                    chunk_end = chunk_start + chunk_size
+                    input_chunk = input_ids[:, chunk_start:chunk_end]
+                    outputs = self.base_model.generate(
+                        input_chunk,
+                        max_new_tokens=max_new_tokens,
+                        pad_token_id=self.base_tokenizer.pad_token_id,
+                        eos_token_id=self.base_tokenizer.eos_token_id,
+                        temperature=temp,
+                        return_dict_in_generate=True,
+                        output_scores=True,
+                        **kwargs
+                    )
+                    generated_ids.extend(outputs.sequences[0][input_length:].tolist())
+
             print(f"Generation completed in {time.time() - start_time:.2f}s.")  # Added log for timing
-            generated_ids = outputs.sequences[0][input_length:]
             confidence_score = 0.5
             if self.enable_confidence_tracking:
                 confidence_score = calculate_confidence_score(outputs.scores, generated_ids)
@@ -1469,7 +1467,9 @@ class SOVLSystem:
                     if all(generated_ids[i + j] == generated_ids[i + j + 3] for j in range(3)):
                         generated_ids = generated_ids[:i + 3]
                         break
-                self.logger.write({"warning": "Repetition detected", "original_text": original_text, "truncated_at": i + 3, "timestamp": time.time(), "conversation_id": self.history.conversation_id})
+                self.logger.write({"warning": "Repetition detected", "original_text": original_text,
+                                   "truncated_at": i + 3, "timestamp": time.time(),
+                                   "conversation_id": self.history.conversation_id})
             response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
 
             # Add curiosity question if pressure builds
@@ -1521,6 +1521,16 @@ class SOVLSystem:
         except Exception:
             raise
 
+        except torch.cuda.OutOfMemoryError:
+            print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
+            return "Memory error—try again with less input."
+        except (ValueError, RuntimeError) as e:
+            print(f"Error: Generation failed ({e}). Check logs.")
+            self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
+            return "Something broke—check logs!"
+        except Exception:
+            raise
+        
         except torch.cuda.OutOfMemoryError:
             print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
             return "Memory error—try again with less input."
