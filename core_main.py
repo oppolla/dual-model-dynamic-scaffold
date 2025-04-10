@@ -1020,11 +1020,12 @@ class SOVLSystem:
     def map_sequence(self, base_input_ids):
         batch_size = base_input_ids.size(0)
         seq_len = base_input_ids.size(1)
-
+    
         # Adjust max_expanded_len dynamically based on available memory or other constraints
-        available_memory_limit = 8192  # Example memory limit; adjust based on your system
-        max_expanded_len = min(seq_len * 3, MAX_SEQ_LENGTH, available_memory_limit)
-
+        available_memory_limit = torch.cuda.max_memory_allocated(device=DEVICE) - torch.cuda.memory_allocated(device=DEVICE)
+        token_size = 4  # Assuming 4 bytes per token in FP32, adjust for other precisions like FP16 or INT8
+        max_expanded_len = min(seq_len * 3, MAX_SEQ_LENGTH, available_memory_limit // token_size)
+    
         mapped_ids = torch.full(
             (batch_size, max_expanded_len),
             self.scaffold_tokenizer.pad_token_id,
@@ -1032,37 +1033,39 @@ class SOVLSystem:
             device=DEVICE
         )
         truncated = False
-
+    
         for batch_idx in range(batch_size):
             position = 0
             for base_id in base_input_ids[batch_idx]:
                 mapped_entry = self.special_token_map.get(base_id.item(), self.token_map.get(base_id.item()))
                 mapped_tokens = mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
-
+    
                 if position + len(mapped_tokens) > max_expanded_len:
                     truncated = True
                     break
-
+                
                 for token in mapped_tokens:
                     if position >= max_expanded_len:
                         truncated = True
                         break
                     mapped_ids[batch_idx, position] = token
                     position += 1
-
+    
                 if truncated:
                     break
-
+                
         if truncated:
             print(f"Warning: Token mapping truncated to {max_expanded_len}. Consider adjusting limits or input size.")
             self.logger.write(
                 {
                     "warning": f"Token mapping truncated to {max_expanded_len}",
+                    "original_length": seq_len,
+                    "allowed_length": max_expanded_len,
                     "timestamp": time.time(),
                     "conversation_id": self.history.conversation_id
                 }
             )
-
+    
         # Return only the portion that fits within MAX_SEQ_LENGTH
         return mapped_ids[:, :min(max_expanded_len, MAX_SEQ_LENGTH)]
 
