@@ -18,20 +18,9 @@ from threading import Lock
 import gc
 
 class InsufficientDataError(Exception):
-    """Raised when the loaded JSONL data has fewer than the required entries."""
     pass
 
 def load_jsonl(file_path, min_entries=10):
-    """
-    Loads a JSONL file and validates its contents. Aborts cleanly with a warning if errors occur.
-    
-    Args:
-        file_path (str): Path to the JSONL file.
-        min_entries (int): Minimum number of valid entries required.
-    
-    Returns:
-        list: A list of valid entries.
-    """
     data = []
     error_log = []
 
@@ -169,11 +158,10 @@ TEMP_MOOD_INFLUENCE = get_config_value(controls_config, "temp_mood_influence", 0
 SCAFFOLD_WEIGHT_CAP = get_config_value(controls_config, "scaffold_weight_cap", 1.0)
 BASE_TEMPERATURE = get_config_value(controls_config, "base_temperature", 0.7)
 SAVE_PATH_PREFIX = get_config_value(controls_config, "save_path_prefix", "state")
-
 DREAM_MEMORY_WEIGHT = get_config_value(controls_config, "dream_memory_weight", 0.1)
 DREAM_MEMORY_MAXLEN = get_config_value(controls_config, "dream_memory_maxlen", 10)
 DREAM_PROMPT_WEIGHT = get_config_value(controls_config, "dream_prompt_weight", 0.5)
-DREAM_NOVELTY_BOOST = get_config_value(controls_config, "dream_novelty_boost", 0.03)
+DREAM_NOVELTY_BOOST = get_config_value(controls_configs_config, "dream_novelty_boost", 0.03)
 TEMP_CURIOSITY_BOOST = get_config_value(controls_config, "temp_curiosity_boost", 0.5)
 TEMP_RESTLESS_DROP = get_config_value(controls_config, "temp_restless_drop", 0.1)
 TEMP_MELANCHOLY_NOISE = get_config_value(controls_config, "temp_melancholy_noise", 0.02)
@@ -212,6 +200,7 @@ ENABLE_LORA_ADAPTERS = get_config_value(controls_config, "enable_lora_adapters",
 ENABLE_REPETITION_CHECK = get_config_value(controls_config, "enable_repetition_check", True)
 ENABLE_PROMPT_DRIVEN_DREAMS = get_config_value(controls_config, "enable_prompt_driven_dreams", True)
 ENABLE_LIFECYCLE_WEIGHTING = get_config_value(controls_config, "enable_lifecycle_weighting", True)
+ENABLE_ERROR_LISTENING = get_config_value(controls_config, "enable_error_listening", True)  # Added here
 # TCQS Controls
 ENABLE_CURIOSITY = get_config_value(controls_config, "enable_curiosity", True)
 CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = get_config_value(controls_config, "curiosity_novelty_threshold_spontaneous", 0.9)
@@ -401,7 +390,15 @@ class ThreadSafeLogger:
 
 class SOVLSystem:
     def __init__(self):
-        self.quantization_mode = QUANTIZATION_MODE
+        self.logger = ThreadSafeLogger("log.jsonl")  # Moved up for config loading
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+                self.quantization_mode = config.get("quantization_mode", QUANTIZATION_MODE)
+                self.enable_error_listening = get_config_value(config, "controls_config.enable_error_listening", ENABLE_ERROR_LISTENING)
+        except FileNotFoundError:
+            self.quantization_mode = QUANTIZATION_MODE
+            self.enable_error_listening = ENABLE_ERROR_LISTENING  # Default if no config file
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
         self.dry_run = DRY_RUN
@@ -857,6 +854,8 @@ class SOVLSystem:
             with open(f"{path_prefix}_token_map.json", "w") as f:
                 json.dump({str(k): v for k, v in self.token_map.items()}, f)
             metadata = {
+                "quantization_mode": self.quantization_mode,  # Added for consistency
+                "enable_error_listening": self.enable_error_listening,  # Save the toggle
                 "data_exposure": self.data_exposure,
                 "last_trained": self.last_trained,
                 "temperament_score": self.temperament_score,
@@ -910,6 +909,8 @@ class SOVLSystem:
             if os.path.exists(f"{path_prefix}_meta.json"):
                 with open(f"{path_prefix}_meta.json", "r") as f:
                     meta = json.load(f)
+                    self.quantization_mode = meta.get("quantization_mode", QUANTIZATION_MODE)  # Load quantization
+                    self.enable_error_listening = meta.get("enable_error_listening", True)  # Load toggle
                     self.data_exposure = meta.get("data_exposure", 0)
                     self.last_trained = meta.get("last_trained", 0)
                     self.temperament_score = meta.get("temperament_score", 0.0)
@@ -1542,7 +1543,7 @@ class SOVLSystem:
                     )
                     generated_ids.extend(outputs.sequences[0][input_length:].tolist())
 
-            print(f"Generation completed in {time.time() - start_time:.2f}s.")  # Added log for timing
+            print(f"Generation completed in {time.time() - start_time:.2f}s.")
             confidence_score = 0.5
             if self.enable_confidence_tracking:
                 confidence_score = calculate_confidence_score(outputs.scores, generated_ids)
@@ -1607,11 +1608,12 @@ class SOVLSystem:
                 "error": "CUDA out of memory",
                 "prompt": prompt,
                 "timestamp": time.time(),
-                "conversation_id": str(uuid.uuid4()),  # New ID for error context
-                "is_error_prompt": True  # Flag as error prompt
+                "conversation_id": str(uuid.uuid4()),
+                "is_error_prompt": True
             })
-            error_response = self._handle_error_prompt(error_msg)
-            print(f"Self-reflection: {error_response}")
+            if self.enable_error_listening:  # Only reflect if toggle is on
+                error_response = self._handle_error_prompt(error_msg)
+                print(f"Self-reflection: {error_response}")
             return error_msg
         except (ValueError, RuntimeError) as e:
             error_msg = f"Error: Generation failed ({str(e)})."
@@ -1622,28 +1624,9 @@ class SOVLSystem:
                 "conversation_id": str(uuid.uuid4()),
                 "is_error_prompt": True
             })
-            error_response = self._handle_error_prompt(error_msg)
-            print(f"Self-reflection: {error_response}")
-            return "Something broke—check logs!"
-        except Exception:
-            raise
-
-        except torch.cuda.OutOfMemoryError:
-            print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
-            return "Memory error—try again with less input."
-        except (ValueError, RuntimeError) as e:
-            print(f"Error: Generation failed ({e}). Check logs.")
-            self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
-            return "Something broke—check logs!"
-        except Exception:
-            raise
-        
-        except torch.cuda.OutOfMemoryError:
-            print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
-            return "Memory error—try again with less input."
-        except (ValueError, RuntimeError) as e:
-            print(f"Error: Generation failed ({e}). Check logs.")
-            self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
+            if self.enable_error_listening:  # Only reflect if toggle is on
+                error_response = self._handle_error_prompt(error_msg)
+                print(f"Self-reflection: {error_response}")
             return "Something broke—check logs!"
         except Exception:
             raise
@@ -1746,7 +1729,8 @@ if __name__ == "__main__":
         sovl_system.wake_up()
         print("\nSystem Ready.")
         print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', "
-              "'sleep <conf> <time> <log>', 'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost> <memory_decay> <prune_threshold>', "
+              "'error_listening <true/false>', 'sleep <conf> <time> <log>', "
+              "'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost> <memory_decay> <prune_threshold>', "
               "'temp <eager> <sluggish> <influence> <curiosity> <restless> <melancholy> <conf_strength> <smoothing_factor>', "
               "'blend <weight> <temp>', 'lifecycle <capacity> <curve>', "
               "'curiosity <enable> <spontaneous> <response> <pressure> <drop> <silence> <cooldown> <queue_maxlen> <ignorance> <novelty> <max_tokens> <base_temp> <temp_influence> <top_k>', "
@@ -1755,7 +1739,8 @@ if __name__ == "__main__":
 
         valid_commands = [
             'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load',
-            'sleep', 'dream', 'temp', 'blend', 'lifecycle', 'cross', 'curiosity', 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
+            'error_listening', 'sleep', 'dream', 'temp', 'blend', 'lifecycle', 'cross', 'curiosity',
+            'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
         ]
 
         last_input_time = time.time()
@@ -1805,6 +1790,10 @@ if __name__ == "__main__":
             elif cmd == 'load':
                 path = parts[1] if len(parts) > 1 else None
                 sovl_system.load_state(path)
+            elif cmd == 'error_listening' and len(parts) == 2:
+                enable = parts[1].lower() == 'true'
+                sovl_system.enable_error_listening = enable
+                print(f"Error listening {'enabled' if enable else 'disabled'}")
             elif cmd == 'sleep':
                 try:
                     if len(parts) != 4:
