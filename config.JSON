@@ -94,6 +94,7 @@
     "curiosity_max_new_tokens": 8,
     "curiosity_base_temperature": 1.1,
     "curiosity_temperament_influence": 0.4,
-    "curiosity_top_k": 30
+    "curiosity_top_k": 30,
+    "enable_error_listening": true
   }
 }
