@@ -90,6 +90,10 @@
     "curiosity_question_cooldown": 60.0,
     "curiosity_queue_maxlen": 10,
     "curiosity_weight_ignorance": 0.7,
-    "curiosity_weight_novelty": 0.3
+    "curiosity_weight_novelty": 0.3,
+    "curiosity_max_new_tokens": 8,
+    "curiosity_base_temperature": 1.1,
+    "curiosity_temperament_influence": 0.4,
+    "curiosity_top_k": 30
   }
 }
