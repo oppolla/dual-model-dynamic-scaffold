@@ -55,7 +55,7 @@ Main Application Module:
 
 Target Module Breakdown:
 
-1. **Core System Modules**
+1. Core System Modules
    - **`system_config`**: Manage configuration loading and validation.
      - **Functions**:
        - `get_config_value(key: str) -> Any`: Retrieve configuration values.
@@ -71,7 +71,7 @@ Target Module Breakdown:
 
 ---
 
-2. **Data Handling Modules**
+2. Data Handling Modules
    - **`data_loader`**: Load and validate data (e.g., JSONL files).
      - **Functions**:
        - `load_jsonl(file_path: str) -> list[dict]`: Load JSONL data.
@@ -84,7 +84,7 @@ Target Module Breakdown:
 
 ---
 
-3. **Model Management Modules**
+3. Model Management Modules
    - **`model_loader`**: Load and configure base and scaffold models.
      - **Functions**:
        - `load_models() -> tuple`: Load base and scaffold models.
@@ -100,7 +100,7 @@ Target Module Breakdown:
 
 ---
 
-4. **Training and Optimization Modules**
+4. Training and Optimization Modules
    - **`training`**: Train models.
      - **Functions**:
        - `train_step(data: Any) -> None`: Perform a single training step.
@@ -119,7 +119,7 @@ Target Module Breakdown:
 
 ---
 
-5. **Dream and Memory Management Modules**
+5. Dream and Memory Management Modules
    - **`dream`**: Implement the dreaming mechanism.
      - **Functions**:
        - `_dream() -> None`: Execute dreaming logic.
@@ -134,7 +134,7 @@ Target Module Breakdown:
 
 ---
 
-### 6. **Curiosity and Feedback Modules**
+6. Curiosity and Feedback Modules
    - **`curiosity`**: Implement the curiosity mechanism.
      - **Classes**:
        - `TrueCuriosity`: Class for curiosity-based exploration.
@@ -147,7 +147,7 @@ Target Module Breakdown:
 
 ---
 
-7. **Error Handling Modules**
+7. Error Handling Modules
    - **`error_handling`**: Handle errors and log error-related events.
      - **Functions**:
        - `_handle_error_prompt(prompt: str) -> None`: Manage error prompts.
@@ -155,7 +155,7 @@ Target Module Breakdown:
 
 ---
 
-8. **Utilities**
+8. Utilities
    - **`utils`**: Include utility functions.
      - **Functions**:
        - `calculate_confidence_score(data: Any) -> float`: Calculate confidence score for predictions.
@@ -168,7 +168,7 @@ Target Module Breakdown:
 
 ---
 
-9. **Main Application Module**
+9. Main Application Module
    - **`main`**: Entry point for running the SOVL system.
      - **Responsibilities**:
        - Initialize the `SOVLSystem`.
