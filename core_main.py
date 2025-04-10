@@ -15,29 +15,44 @@ from collections import deque, defaultdict
 import uuid
 import os
 from threading import Lock
+import gc
 
 class InsufficientDataError(Exception):
     """Raised when the loaded JSONL data has fewer than the minimum required entries."""
     pass
 
-def load_jsonl(file_path):
+def load_jsonl(file_path, min_entries=10):
     data = []
+    error_log = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
+            for line_number, line in enumerate(f, start=1):
                 try:
                     entry = json.loads(line.strip())
+                    # Validate required fields and their types
+                    if not isinstance(entry.get("prompt"), str) or not isinstance(entry.get("response"), str):
+                        error_log.append(f"Line {line_number}: Missing or invalid 'prompt' or 'response'. Skipping.")
+                        continue
                     data.append({"prompt": entry["prompt"], "completion": entry["response"]})
                 except json.JSONDecodeError:
-                    print(f"Error: Failed to decode JSON from line: {line.strip()}. Skipping this line.")
+                    error_log.append(f"Line {line_number}: Failed to decode JSON. Skipping.")
     except FileNotFoundError:
-        print(f"Warning: {file_path} not found. Starting with empty data!")
+        raise FileNotFoundError(f"Error: {file_path} not found. Please provide a valid file path.")
     except IOError as e:
-        print(f"Error: I/O error({e.errno}): {e.strerror}.")
+        raise IOError(f"Error: I/O error({e.errno}): {e.strerror}.")
     except Exception as e:
-        print(f"Unexpected error: {e}")
-    if len(data) < 10:  # Minimum threshold for meaningful training
-        raise InsufficientDataError(f"Loaded only {len(data)} entries from {file_path}. Need at least 10 for training.")
+        raise RuntimeError(f"Unexpected error: {e}")
+    
+    # Log errors if any
+    if error_log:
+        with open("data_load_errors.log", "w") as log_file:
+            log_file.write("\n".join(error_log))
+        print(f"Warnings encountered during data loading. See 'data_load_errors.log' for details.")
+    
+    # Check minimum threshold
+    if len(data) < min_entries:
+        raise InsufficientDataError(f"Loaded only {len(data)} valid entries from {file_path}. Need at least {min_entries} for training.")
+    
     return data
 
 def calculate_confidence_score(logits, generated_ids):
@@ -1488,6 +1503,16 @@ class SOVLSystem:
             if DEVICE.type == 'cuda':
                 torch.cuda.empty_cache()
             return response
+
+        except torch.cuda.OutOfMemoryError:
+            print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
+            return "Memory error—try again with less input."
+        except (ValueError, RuntimeError) as e:
+            print(f"Error: Generation failed ({e}). Check logs.")
+            self.logger.write({"error": str(e), "prompt": prompt, "timestamp": time.time()})
+            return "Something broke—check logs!"
+        except Exception:
+            raise
 
         except torch.cuda.OutOfMemoryError:
             print("Error: GPU memory full! Try smaller prompt or 'int8' mode.")
