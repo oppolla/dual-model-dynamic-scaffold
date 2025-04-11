@@ -82,6 +82,7 @@ To enhance relevance and efficiency, the SOVL System will implement a dynamic co
 ## CLI Command Additions:
 
 `echo [text]`
+
 What it does:
 Repeats the input with a reflective or analytical twist.
 
