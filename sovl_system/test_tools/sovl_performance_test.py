@@ -1,14 +1,28 @@
 import time
 import torch
 
+"""
+This module contains performance tests for the SOVL system, focusing on its sleep/dream functionality 
+and its ability to handle large input datasets effectively. The tests are designed to measure performance 
+metrics such as execution time and GPU memory usage under stress conditions.
+
+Functions:
+1. performance_test_sleep_dream:
+   - Tests the sleep/dream performance of the SOVL system.
+   - Measures GPU memory usage and time taken during the sleep/dream process.
+   - Loads a large dataset into the system's logger for stress testing.
+
+2. stress_test_large_inputs:
+   - Generates a large number of inputs with maximum length to stress-test the system.
+   - Calls the performance_test_sleep_dream function to evaluate the system's performance under load.
+
+Usage:
+- Run the script to initialize the SOVL system and execute the stress test with large input datasets.
+- Performance metrics will be displayed, including execution time and memory usage.
+"""
+
 def performance_test_sleep_dream(sovl_system, large_dataset):
-    """
-    Test the SOVL system's sleep/dream performance.
     
-    Args:
-        sovl_system: An instance of the SOVLSystem class.
-        large_dataset: A large dataset to stress-test the system.
-    """
     print("\n--- Starting Sleep/Dream Performance Test ---")
 
     # Load large dataset to logger for sleep training
