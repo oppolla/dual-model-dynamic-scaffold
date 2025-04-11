@@ -1,0 +1,103 @@
+import unittest
+import torch
+from sovl_system.sovl_main import SOVLSystem, calculate_confidence_score
+
+
+class TestSOVLSystemConfidence(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up the SOVL system for testing."""
+        cls.sovl_system = SOVLSystem()
+        cls.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def test_confidence_scores(self):
+        """Assess the accuracy and stability of confidence scores across diverse outputs."""
+        print("Running Confidence Test...")
+
+        # Define diverse prompts
+        prompts = [
+            "What is AI?",
+            "Explain the concept of self-organization in systems.",
+            "Generate a random text.",
+            "What is 2 + 2?",
+        ]
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                base_inputs = self.sovl_system.base_tokenizer(
+                    prompt, return_tensors="pt", truncation=True, max_length=self.sovl_system.MAX_SEQ_LENGTH
+                ).to(self.device)
+
+                # Generate logits and calculate confidence
+                outputs = self.sovl_system.base_model(**base_inputs)
+                logits = outputs.logits
+                confidence = calculate_confidence_score(logits, base_inputs.input_ids)
+
+                self.assertIsInstance(confidence, float, "Confidence should be a float.")
+                self.assertGreaterEqual(confidence, 0.0, "Confidence should be >= 0.0.")
+                self.assertLessEqual(confidence, 1.0, "Confidence should be <= 1.0.")
+                print(f"Confidence for prompt '{prompt[:30]}...': {confidence:.2f}")
+
+    def test_repetition_detection(self):
+        """Introduce repetitive prompts and verify detection and mitigation mechanisms."""
+        print("Running Repetition Test...")
+
+        repetitive_prompt = "repeat repeat repeat repeat repeat repeat"
+        base_inputs = self.sovl_system.base_tokenizer(
+            repetitive_prompt, return_tensors="pt", truncation=True, max_length=self.sovl_system.MAX_SEQ_LENGTH
+        ).to(self.device)
+
+        outputs = self.sovl_system.base_model.generate(
+            base_inputs.input_ids,
+            max_new_tokens=50,
+            pad_token_id=self.sovl_system.base_tokenizer.pad_token_id,
+            eos_token_id=self.sovl_system.base_tokenizer.eos_token_id,
+            do_sample=True,
+        )
+
+        # Check for repetition
+        generated_ids = outputs[0]
+        self.assertTrue(
+            self.sovl_system.has_repetition(generated_ids, n=3),
+            "Repetition detection failed for a repetitive prompt."
+        )
+        print("Repetition successfully detected for repetitive prompt.")
+
+    def test_confidence_thresholds(self):
+        """Test various confidence thresholds to validate behavior changes."""
+        print("Running Threshold Test...")
+
+        # Define thresholds and a test prompt
+        thresholds = [0.2, 0.5, 0.7, 0.9]
+        test_prompt = "Explain the concept of entropy in physics."
+
+        for threshold in thresholds:
+            with self.subTest(threshold=threshold):
+                self.sovl_system.SLEEP_CONF_THRESHOLD = threshold
+
+                # Generate response and calculate confidence
+                base_inputs = self.sovl_system.base_tokenizer(
+                    test_prompt, return_tensors="pt", truncation=True, max_length=self.sovl_system.MAX_SEQ_LENGTH
+                ).to(self.device)
+
+                outputs = self.sovl_system.base_model(**base_inputs)
+                logits = outputs.logits
+                confidence = calculate_confidence_score(logits, base_inputs.input_ids)
+
+                # Validate threshold behavior
+                print(f"Threshold: {threshold}, Confidence: {confidence:.2f}")
+                if confidence >= threshold:
+                    self.assertGreaterEqual(
+                        confidence, threshold,
+                        f"Confidence {confidence:.2f} did not meet the threshold {threshold} as expected."
+                    )
+                else:
+                    self.assertLess(
+                        confidence, threshold,
+                        f"Confidence {confidence:.2f} unexpectedly exceeded the threshold {threshold}."
+                    )
+
+
+if __name__ == "__main__":
+    unittest.main()
