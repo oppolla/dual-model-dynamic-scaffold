@@ -3,7 +3,7 @@
 ## Lightweight Decision-Making Framework 
 Implement Lightweight Decision-Making Framework for System Optimization: Design and integrate a flexible decision-making mechanism into the SOVL System, enabling lightweight, adaptable reasoning for various system optimization tasks. The framework will initially focus on evaluating memory health metrics and making adjustments for stability using LLM-based reasoning, with the potential to expand to other domains in the future.
 
-Define Input Metrics:
+**Define Input Metrics**:
 Identify key metrics relevant to specific optimization tasks (e.g., Memory Usage, Error Rate, Stability Score for memory health).
 Ensure metrics are well-defined, measurable, and consistently available in the system.
 
@@ -17,7 +17,7 @@ Metric 2: [value]
 Metric 3: [value]  
 Decide if adjustments are needed. Respond only with true or false.  
 
-Implement Integration:
+**Implement Integration**:
 Build a mechanism to feed relevant metrics into the LLM as input for decision-making.
 Ensure outputs are captured and processed appropriately to drive system actions.
 Develop Validation and Safety Checks:
@@ -25,11 +25,11 @@ Develop Validation and Safety Checks:
 Validate input metrics to ensure they are within acceptable ranges before passing them to the LLM.
 Implement safeguards to handle invalid, unclear, or ambiguous LLM outputs.
 
-Build a Feedback Loop:
+**Build a Feedback Loop**:
 Use the LLM's decisions (e.g., true/false or recommendations) to trigger appropriate actions within the system.
 Define reversible or fail-safe actions for unstable states and ensure they are task-agnostic.
 
-Testing and Evaluation:
+**Testing and Evaluation**:
 Simulate various scenarios to test the accuracy and reliability of the decision-making framework.
 Validate the system's performance and stability under different decision outputs.
 Optional Enhancements:
