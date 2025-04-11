@@ -2,6 +2,25 @@ import unittest
 import torch
 from sovl_system.sovl_main import SOVLSystem
 
+"""
+This script contains unit tests for the SOVL System's token mapping functionality.
+The tests ensure that the token mapping process is accurate, robust, and adheres to expected behaviors.
+
+Test Cases Included:
+1. Mapping Accuracy Test:
+   - Verifies that token mapping aligns with expected vocabulary structures and retains semantic meaning.
+   - Ensures mapped tokens are not empty and match the base tokenizer's structure.
+
+2. Truncation Test:
+   - Tests the handling of excessively long sequences by verifying proper truncation and warning logs.
+   - Ensures that the mapped token length adheres to the maximum sequence length allowed by the system.
+
+3. Edge Case Inputs Test:
+   - Checks the robustness of the token mapping with edge-case inputs such as empty prompts and special tokens.
+   - Ensures proper handling of special cases and validates the inclusion of pad tokens where necessary.
+
+The tests utilize the `unittest` framework and rely on the SOVL System's tokenizer and logger for verification.
+"""
 
 class TestSOVLSystemTokenMapping(unittest.TestCase):
 
