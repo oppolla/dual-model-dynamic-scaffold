@@ -1,7 +1,7 @@
 # TODO:
 
 ## Lightweight Decision-Making Framework 
-Implement Lightweight Decision-Making Framework for System Optimization: Design and integrate a flexible decision-making mechanism into the SOVL System, enabling lightweight, adaptable reasoning for various system optimization tasks. The framework will initially focus on evaluating memory health metrics and making adjustments for stability using LLM-based reasoning, with the potential to expand to other domains in the future.
+Implement Lightweight Decision-Making Framework for System Optimization: Design and integrate a flexible decision-making mechanism into the SOVL System, enabling lightweight, adaptable reasoning for various system optimization tasks. The framework will initially focus on evaluating memory health metrics and making adjustments for stability using LLM-based reasoning, with the potential to expand to other domains in the future like the ability to control it's own parametrs, 
 
 **Define Input Metrics**:
 Identify key metrics relevant to specific optimization tasks (e.g., Memory Usage, Error Rate, Stability Score for memory health).
@@ -41,3 +41,6 @@ Documentation:
 Document the framework, including prompt structures, input metrics, and integration guidelines.
 Provide examples of initial use cases (e.g., memory health system) and potential future applications.
 By implementing this broader framework, the SOVL System can leverage LLM-based reasoning to address diverse optimization scenarios beyond memory health, fostering a lightweight and extensible decision-making architecture.
+
+**Propose Enhancement**: 
+In addition to its memory health evaluation, the Lightweight Decision-Making Framework can be expanded to dynamically adjust system parameters such as computation priority, model quantization modes (e.g., FP16, INT8), and task scheduling thresholds based on real-time resource usage metrics. For instance, the system could monitor GPU utilization, optimize batch sizes during training, or switch to lower precision modes to mitigate memory bottlenecks. This enhancement would foster a more adaptive, resource-aware architecture, allowing the SOVL System to maintain performance stability under varying workloads while minimizing manual intervention.
