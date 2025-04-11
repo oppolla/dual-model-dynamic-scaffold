@@ -5,7 +5,7 @@ An AI agent with autonomous learning capabilities, combining a base LLM with a s
 
 ## Console Commands
 
-### `quit` or `exit`
+#### `quit` or `exit`
 **What it does:**  
 Stops the script and exits cleanly.
 **How it works:**  
