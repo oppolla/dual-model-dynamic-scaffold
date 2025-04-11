@@ -30,16 +30,19 @@ def generate_response(sovl_system, prompt, max_tokens=60, temp_adjust=0.0):
     )
     return response
 
-def log_action(sovl_system, prompt, response, confidence, is_system=False):
-    """Helper for consistent logging."""
-    sovl_system.logger.write({
+def log_action(sovl_system, prompt, response, confidence, is_system=False, extra_attrs=None):
+    """Helper for consistent logging with optional extra attributes."""
+    log_entry = {
         "prompt": prompt,
         "response": response,
         "timestamp": time.time(),
         "conversation_id": sovl_system.history.conversation_id,
         "confidence_score": confidence,
         "is_system_question": is_system
-    })
+    }
+    if extra_attrs:
+        log_entry.update(extra_attrs)
+    sovl_system.logger.write(log_entry)
 
 # Command handlers
 def cmd_quit(sovl_system, args):
@@ -119,7 +122,6 @@ def cmd_log(sovl_system, args):
 def cmd_config(sovl_system, args):
     key = args[0]
     if len(args) == 1:
-        # Assume config is an attribute of sovl_system (adjust if different)
         value = getattr(sovl_system, 'config', {}).get(key, "Not found")
         print(f"Config {key}: {value}")
     else:
@@ -187,13 +189,81 @@ def cmd_flare(sovl_system, args):
     log_action(sovl_system, f"Flare: {prompt}", outburst, 0.9, True)
     return False
 
+# New commands
+def cmd_echo(sovl_system, args):
+    text = ' '.join(args)
+    print(f"You said '{text}'")
+    response = generate_response(sovl_system, f"Reflecting on '{text}': Why say this now?")
+    print(f"Response: {response}")
+    log_action(sovl_system, f"Echo: {text}", response, 0.6, False, {"is_echo": True})
+    return False
+
+def cmd_debate(sovl_system, args):
+    topic = ' '.join(args)
+    print(f"Debating: {topic}")
+    stance = "for"
+    for turn in range(2):  # 2 turns: argument + rebuttal
+        prompt = f"{'Argue for' if stance == 'for' else 'Argue against'} '{topic}':"
+        response = generate_response(sovl_system, prompt, max_tokens=80)
+        print(f"[{'Argument' if turn == 0 else 'Rebuttal'}] {response}")
+        log_action(sovl_system, prompt, response, 0.7, True)
+        stance = "against" if stance == "for" else "for"
+        sovl_system.temperament_score = min(1.0, sovl_system.temperament_score + 0.2)  # Swing temperament
+    return False
+
+def cmd_glitch(sovl_system, args):
+    prompt = ' '.join(args)
+    print(f"Processing glitch: {prompt}")
+    # Simulate noise (assumes enable_error_listening exists)
+    sovl_system.enable_error_listening()  # Placeholder if not implemented
+    response = generate_response(sovl_system, f"Fix this mess: {prompt}", temp_adjust=0.2)
+    print(f"Response: I sense chaos. Did you mean something like '{response}'?")
+    log_action(sovl_system, f"Glitch: {prompt}", response, 0.5, False)
+    return False
+
+def cmd_rewind(sovl_system, args):
+    steps = int(args[0]) if args else 1
+    print(f"Rewinding {steps} step(s)...")
+    logs = sovl_system.logger.read()[-steps-1:-1]  # Get past interactions
+    if not logs:
+        print("No history to rewind.")
+        return False
+    past_prompt = logs[-1].get('prompt', 'unknown')
+    past_response = logs[-1].get('response', 'lost')
+    print(f"{steps} command(s) ago, you said: '{past_prompt}'. I replied: '{past_response}'")
+    new_response = generate_response(sovl_system, f"Reinterpreting '{past_prompt}' now:")
+    print(f"Now I think: {new_response}")
+    log_action(sovl_system, f"Rewind {steps}: {past_prompt}", new_response, 0.6, True)
+    return False
+
+def cmd_mimic(sovl_system, args):
+    style = args[0]
+    prompt = ' '.join(args[1:])
+    print(f"Mimicking {style} for: {prompt}")
+    sovl_system.scaffold_weight = 0.8  # Boost style bias (assumes this attribute exists)
+    response = generate_response(sovl_system, f"In the style of {style}: {prompt}")
+    print(f"Response: {response}")
+    sovl_system.scaffold_weight = 0.5  # Reset (assumed default)
+    log_action(sovl_system, f"Mimic {style}: {prompt}", response, 0.7, False)
+    return False
+
+def cmd_panic(sovl_system, args):
+    print("ERROR STATE: Rebooting synapses...")
+    sovl_system.save_state("panic_save.json")  # Auto-save logs
+    sovl_system.cleanup()
+    sovl_system._reset_sleep_state()  # Assumes this exists
+    sovl_system.__init__()  # Reinitialize
+    print("[System reloaded]")
+    return False
+
 # Command dispatch table
 COMMANDS = {
     'quit': cmd_quit, 'exit': cmd_quit, 'train': cmd_train, 'generate': cmd_generate,
     'save': cmd_save, 'load': cmd_load, 'dream': cmd_dream, 'tune': cmd_tune,
     'memory': cmd_memory, 'status': cmd_status, 'log': cmd_log, 'config': cmd_config,
     'reset': cmd_reset, 'spark': cmd_spark, 'reflect': cmd_reflect, 'muse': cmd_muse,
-    'flare': cmd_flare
+    'flare': cmd_flare, 'echo': cmd_echo, 'debate': cmd_debate, 'glitch': cmd_glitch,
+    'rewind': cmd_rewind, 'mimic': cmd_mimic, 'panic': cmd_panic
 }
 
 def run_cli():
@@ -205,7 +275,8 @@ def run_cli():
         valid_commands = list(COMMANDS.keys())
         print("Commands: quit, exit, train [epochs] [--dry-run], generate <prompt> [max_tokens], "
               "save [path], load [path], dream, tune cross [weight], memory <on|off>, "
-              "status, log view, config <key> [value], reset, spark, reflect, muse, flare")
+              "status, log view, config <key> [value], reset, spark, reflect, muse, flare, "
+              "echo [text], debate [topic], glitch [prompt], rewind [steps], mimic [style] [prompt], panic")
 
         while True:
             user_input = input("\nEnter command: ").strip()
