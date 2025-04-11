@@ -1801,15 +1801,13 @@ if __name__ == "__main__":
     try:
         sovl_system = SOVLSystem()
         print("\nSystem Ready.")
-        # Updated valid_commands to include reflect
         valid_commands = [
             'quit', 'exit', 'train', 'generate', 'save', 'load', 'dream',
-            'tune', 'memory', 'status', 'log', 'config', 'reset', 'spark', 'reflect'
+            'tune', 'memory', 'status', 'log', 'config', 'reset', 'spark', 'reflect', 'muse'
         ]
-        # Updated help message to include reflect
         print("Commands: quit, exit, train [epochs] [--dry-run], generate <prompt> [max_tokens], "
               "save [path], load [path], dream, tune cross [weight], memory <on|off>, "
-              "status, log view, config <key> [value], reset, spark, reflect")
+              "status, log view, config <key> [value], reset, spark, reflect, muse")
 
         while True:
             user_input = input("\nEnter command: ").strip()
@@ -1903,6 +1901,7 @@ if __name__ == "__main__":
                     continue
                 key = parts[1]
                 if len(parts) == 2:
+                    # Fixed typo: removed "ارتباط"
                     value = get_config_value(config, key, "Not found")
                     print(f"Config {key}: {value}")
                 else:
@@ -1937,7 +1936,6 @@ if __name__ == "__main__":
                     "is_system_question": True
                 })
 
-            # New reflect command
             elif cmd == 'reflect':
                 print("Reflecting on recent interactions...")
                 logs = sovl_system.logger.read()[-3:]  # Look at last 3 interactions
@@ -1967,8 +1965,34 @@ if __name__ == "__main__":
                     "is_system_question": True
                 })
 
+            elif cmd == 'muse':
+                print("Musing...")
+                logs = sovl_system.logger.read()[-3:]  # Look at last 3 interactions
+                if not logs:
+                    inspiration = "silence"
+                    print("Inspiration: silence (nothing recent to draw from)")
+                else:
+                    recent_prompts = [log.get('prompt', '') for log in logs if 'prompt' in log]
+                    inspiration = recent_prompts[-1].split()[0] if recent_prompts and recent_prompts[-1] else "mystery"
+                    print(f"Inspiration: \"{inspiration}\" (from recent interactions)")
+                thought = sovl_system.generate(
+                    f"A whimsical thought about {inspiration}:",
+                    max_new_tokens=60,
+                    temperature=sovl_system.base_temperature + 0.1,  # Slightly higher for creativity
+                    top_k=50,
+                    do_sample=True
+                )
+                print(f"Thought: {thought}")
+                sovl_system.logger.write({
+                    "prompt": f"Musing on {inspiration}",
+                    "response": thought,
+                    "timestamp": time.time(),
+                    "conversation_id": sovl_system.history.conversation_id,
+                    "confidence_score": 0.7,  # Higher for creative flair
+                    "is_system_question": True
+                })
+
             else:
-                # Updated error message to use valid_commands including reflect
                 print(f"Error: Unknown command. Valid commands: {', '.join(valid_commands)}")
 
     except FileNotFoundError as e:
