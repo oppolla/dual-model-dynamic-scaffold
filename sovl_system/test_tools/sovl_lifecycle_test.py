@@ -7,6 +7,39 @@ from collections import defaultdict
 import sys
 from pathlib import Path
 
+"""
+This script implements a test suite for the SOVLSystem (Self-Organizing Virtual Lifeform) to evaluate its lifecycle progression,
+behavioral evolution, and end-of-life dynamics. The primary goal is to simulate various scenarios and measure how the system
+adapts, evolves, and performs under different conditions.
+
+Key Components:
+1. **LifecycleEvolutionTest Class**:
+   - Manages test initialization, logging, and result aggregation.
+   - Defines several test cases to evaluate the system's lifecycle and behavioral adaptability.
+
+2. **Tests Implemented**:
+   - **Exposure Ramp-Up Test**:
+     Simulates intensive usage to observe the system's lifecycle progression and behavioral changes.
+   - **Curve Variation Test**:
+     Tests the impact of different lifecycle curves (e.g., sigmoid, exponential) on system behavior and temperament.
+   - **End-of-Life Test**:
+     Pushes the system towards the end of its lifecycle to evaluate its resilience, novelty, and behavioral stability.
+
+3. **Logging and Reporting**:
+   - Logs critical events (e.g., system initialization, test results) to JSONL and text files for analysis.
+   - Generates a summarized report highlighting key observations and performance metrics.
+
+4. **Resilience and Behavior Metrics**:
+   - Tracks lifecycle weight, data exposure, temperament, and novelty to assess the system's adaptability and evolution.
+
+5. **System Cleanup**:
+   - Ensures cleanup of system resources and GPU memory after tests.
+
+Usage:
+- Run the script directly to start the test suite.
+- Results and logs are stored in the `lifecycle_test_results` directory for further analysis.
+"""
+
 # Assuming SOVLSystem is in the same directory or importable
 from sovl_system import SOVLSystem  # Adjust import based on your file structure
 
