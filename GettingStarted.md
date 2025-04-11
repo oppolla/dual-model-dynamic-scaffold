@@ -9,6 +9,7 @@ Install CUDA 11.8 for RTX 30-series: NVIDIA CUDA Toolkit
 Install PyTorch with CUDA support:
 
 bash: `pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118`
+
 Install required libraries:
 
 bash: `pip install transformers datasets peft bitsandbytes accelerate jsonlines`
