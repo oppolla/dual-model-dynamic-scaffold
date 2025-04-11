@@ -7,9 +7,24 @@ flowchart TD
     BaseLLM --> CrossAttention([Cross-Attention Layer])
     ScaffoldLLM --> CrossAttention
     CrossAttention --> TokenMap
+
+    %% Added Systems
+    TokenMap -->|Memory Decay & Updates| MemoryUpdates([Memory Updates])
+    MemoryUpdates --> LifecycleManagement([Lifecycle Management])
+    MemoryUpdates --> TemperamentSystem([Temperament System])
+    TemperamentSystem -->|Affects Curiosity| CuriositySystem([Curiosity System])
+    TemperamentSystem -->|Triggers Dreaming| Dreaming([Dream Mechanism])
+    LifecycleManagement -->|Exposure Weights| ScaffoldLLM
+
+    %% Dreaming Effects
+    Dreaming -->|Updates| MemoryUpdates
+    Dreaming -->|Generates| CuriositySystem
+    Dreaming -->|Optimizes| ScaffoldLLM
+
+    %% Auxiliary Systems
     TokenMap --> SleepScheduler([Sleep Scheduler])
-    SleepScheduler -->|Check Logs| Gestation([Gestation Phase])
-    Gestation -->|Trigger Conditions| SleepTraining([Sleep Training])
-    Gestation --> Dreaming([Dream Mechanism])
-    SleepTraining -->|Optimize| ScaffoldLLM
-    Dreaming -->|Memory Updates| TokenMap
+    SleepScheduler -->|Conditionally Triggered| AuxSystem([Gestation & Sleep Training])
+    AuxSystem -->|Optimize| ScaffoldLLM
+    AuxSystem -->|Memory Updates| TokenMap
+    AuxSystem --> Dreaming
+    CuriositySystem --> AuxSystem
