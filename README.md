@@ -5,11 +5,14 @@ An AI agent with autonomous learning capabilities, combining a base LLM with a s
 
 ## Console Commands
 
-#### `quit` or `exit`
+### `quit` or `exit`
+
 **What it does:**  
 Stops the script and exits cleanly.
+
 **How it works:**  
 Breaks the input loop, calls `cleanup()` to save state and free GPU memory, then shuts down.
+
 **Use case:**  
 Exit after testing or training.
 
@@ -21,10 +24,13 @@ Exiting.
 ```
 
 ### `train [epochs] [--dry-run]`
+
 **What it does:**  
 Runs a training cycle on `TRAIN_DATA` and `VALID_DATA`.
+
 **How it works:**  
 Executes `run_training_cycle()` with settings from `config.json` (e.g., `train_epochs`, `batch_size`). Trains the scaffold model with LoRA, applies lifecycle weighting, and logs progress. In dry-run mode, it limits to one epoch.
+
 **Use case:**  
 Train the model with `sample_log.jsonl` to refine scaffold influence.
 
@@ -39,10 +45,13 @@ Dry run complete.
 ```
 
 ### `generate <prompt> [max_tokens]`
+
 **What it does:**  
 Generates a response using the current model state.
+
 **How it works:**  
 Calls generate() with the provided prompt, scaffold influence, and generation parameters.
+
 **Use case:**  
 Test the system's output for a given input interactively.
 
@@ -55,10 +64,13 @@ Output: --- Generating Response ---
 ```
 
 ### `save [path]`
+
 **What it does:**  
 Saves the current system state to files.
+
 **How it works:**  
 Calls save_state() to save scaffold weights, cross-attention weights, token map, and metadata to files with a specified or default prefix.
+
 **Use case:**  
 Preserve trained model state for later use.
 
@@ -69,10 +81,13 @@ Output: State saved to my_model_*.pth/json
 ```
 
 ### `load [path]`
+
 **What it does:**  
 Loads a saved system state from files.
+
 **How it works:**  
 Calls `load_state()`, restores scaffold weights, cross-attention weights, token map, and metadata from files with a prefix.
+
 **Use case:**  
 Resume a previous session or experiment.
 
@@ -86,10 +101,13 @@ Output: Scaffold state loaded.
 ```
 
 ### `dream`
+
 **What it does:**  
 Triggers a dream cycle.
+
 **How it works:**  
 Calls _dream() to simulate memory replay and novelty-based adaptations.
+
 **Use case:**  
 Enhance scaffold memory and adapt based on past prompts and responses.
 
@@ -100,10 +118,13 @@ Output: Scaffold influence: weight=0.80, blend_strength=unchanged
 ```
 
 ### `tune cross [weight]`
+
 **What it does:**  
 Adjusts cross-attention weight.
+
 **How it works:**  
 Calls tune_cross_attention() to set influence weights for scaffold cross-attention layers.
+
 **Use case:**  
 Fine-tune scaffold influence on the base model.
 
@@ -116,10 +137,13 @@ Output: --- Dreaming ---
 ```
 
 ### `memory <on|off>`
+
 **What it does:**  
 Toggles memory usage modes.
+
 **How it works:**  
 Calls toggle_memory() to enable or disable scaffold and token map memories.
+
 **Use case:**  
 Control memory-driven adaptation.
 
@@ -130,10 +154,13 @@ Output: Memory toggled: Scaffold=True, Token Map=True
 ```
 
 ### `status`
+
 **What it does:**  
 Displays the current system status.
+
 **How it works:**  
 Prints key metrics like conversation ID, temperament score, memory status, confidence, and training state.
+
 **Use case:**  
 Monitor system health and training progress.
 
@@ -150,10 +177,13 @@ Last Trained: 2025-04-11 14:32:45
 Gestating: No
 ```
 ### `log view`
+
 **What it does:**  
 Views the last 5 log entries.
+
 **How it works:**  
 Reads entries from the logger and displays them.
+
 **Use case:**  
 Debug or analyze recent interactions.
 
@@ -166,10 +196,13 @@ Time: 2025-04-11 14:31:10, Prompt: How are you..., Response: I am fine...
 ```
 
 ### `config <key> [value]`
+
 **What it does:**  
 Gets or sets configuration values.
+
 **How it works:**  
 Calls get_config_value() to retrieve or set configuration settings.
+
 **Use case:**  
 Customize configurations without editing the config file.
 
@@ -180,10 +213,13 @@ Output: Config base_model_name: gpt2
 ```
 
 ### `reset`
+
 **What it does:**  
 Resets the system state.
+
 **How it works:**  
 Calls cleanup() to clear the current state and initializes a new SOVLSystem().
+
 **Use case:**  
 Start fresh without relaunching the script.
 
