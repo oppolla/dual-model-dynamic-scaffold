@@ -2,107 +2,64 @@
 
 ### 1. Prerequisites
 
-Install Python 3.8+ from python.org
+- Install Python 3.8+ from python.org
 
-Install CUDA 11.8 for RTX 30-series: NVIDIA CUDA Toolkit
+- Install CUDA 11.8 for RTX 30-series NVIDIA CUDA Toolkit 
 
-Install PyTorch with CUDA support:
+- Install PyTorch with CUDA support `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cux.x`
 
-bash: `pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118`
+- FastAPI (for server backend) `pip install fastapi`
 
-Install required libraries:
-
-bash: `pip install transformers datasets peft bitsandbytes accelerate jsonlines`
+- Transformers, Peft, BitsandBytes `pip install transformers peft bitsandbytes`
 
 ### 2. File Setup
 
-Save code as sovl_system.py
+All files must be in the same directory.
 
-Create sample files:
+Initial File Personality Seed = sample_log.jsonl
 
-sample_log.jsonl (test data):
+### 3. Verification
 
-json
-Copy
-{"prompt": "Hello", "response": "Hi! How can I help?"}
-{"prompt": "What's AI?", "response": "Artificial intelligence is..."}
-config.json (basic config):
+Pre Run
+- For environment test run test.bat
+  
+First Run
+- Execute with dry-run mode `python sovl_system.py --dry-run`
 
-json
-Copy
-{
-  "core_config": {
-    "base_model_name": "gpt2-medium",
-    "scaffold_model_name": "gpt2",
-    "use_dynamic_layers": true
-  },
-  "training_config": {
-    "batch_size": 1,
-    "dry_run": true
-  }
-}
-3. Environment Test
-Create test.bat:
-
-batch
-Copy
-@echo off
-set VENV_DIR=venv_sovl
-python -m venv %VENV_DIR%
-call %VENV_DIR%\Scripts\activate.bat
-
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install transformers datasets peft bitsandbytes accelerate jsonlines
-
-python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}'); print(f'Device: {torch.cuda.get_device_name(0)}')"
-pause
-4. First Run
-Execute with dry-run mode:
-
-bash
-Copy
-python sovl_system.py --dry-run
 Expected output:
-
-Copy
+```
 Initializing SOVL System...
 Using device: cuda
 Base model 'gpt2-medium' loaded...
 Dry run activated (max_samples=2, max_length=128)
 System Ready.
-5. Basic Test Commands
+```
+
+### 5. Basic Test Commands
 Try these in order:
-
 Wake up sequence:
-
-bash
-Copy
 > wake
-(Should generate initial response)
-Simple generation:
-
-bash
-Copy
+> (Should generate initial response)
+> Simple generation
 > Hello, how are you?
-(Should generate response)
-Training test:
+> (Should generate response)
 
-bash
-Copy
+
+Training test:
 > train
 (Should show dry-run training stats)
-6. GPU Memory Management
+
+## 6. GPU Memory Management
 For RTX 3070 (8GB VRAM):
 
 Start with these config settings:
-
-json
-Copy
+```
 "training_config": {
   "batch_size": 1,
   "max_seq_length": 256,
   "quantization": "int8"
 }
+```
 Monitor VRAM usage:
 
 bash
