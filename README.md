@@ -4,6 +4,7 @@
 An AI agent with autonomous learning capabilities, combining a base LLM with a scaffolded second dynamic LLM for continuous learning via sleep mechanism
 
 ## Console Commands
+
 ### `quit` or `exit`
 **What it does:**  
 Stops the script and exits cleanly.
@@ -18,8 +19,8 @@ quit
 Output: Cleanup completed.
 Exiting.
 ```
----
-### `train`
+
+### `train [epochs] [--dry-run]`
 **What it does:**  
 Runs a training cycle on `TRAIN_DATA` and `VALID_DATA`.
 **How it works:**  
@@ -29,32 +30,35 @@ Train the model with `sample_log.jsonl` to refine scaffold influence.
 
 **Example:**
 ```
-train
-Output: Data exposure: 10 | Scaffold influence: 0.632
-        --- Training (3 epochs) ---
-        Epoch 1/3
+train 5 --dry-run
+Output: Starting training for 5 epochs (dry run)...
+        --- Training (5 epochs) ---
+        Epoch 1/5
         Step 1/9 | Loss: 2.3456
+Dry run complete.
 ```
----
-### `reset`
+
+### `generate <prompt> [max_tokens]`
 **What it does:**  
-Starts a new conversation, resetting history.
+Generates a response using the current model state.
 **How it works:**  
-Calls `new_conversation()`, clears `ConversationHistory` (max 10 messages), assigns a new `conversation_id`, and clears scaffold cache.
+Calls generate() with the provided prompt, scaffold influence, and generation parameters.
 **Use case:**  
-Reset context for a fresh interaction.
+Test the system's output for a given input interactively.
 
 **Example:**
 ```
-new
-Output: New conversation: [new_uuid] (Previous: [old_uuid])
+generate Hello, how are you?
+Output: --- Generating Response ---
+        Response: I am fine, thank you! How can I assist you today?
+        --------------------
 ```
----
-### `save`
+
+### `save [path]`
 **What it does:**  
 Saves the current system state to files.
 **How it works:**  
-Calls `save_state()`, saves scaffold weights, cross-attention weights, token map, and metadata to files with a prefix (default: `"state"` or custom via argument).
+Calls save_state() to save scaffold weights, cross-attention weights, token map, and metadata to files with a specified or default prefix.
 **Use case:**  
 Preserve trained model state for later use.
 
@@ -63,8 +67,8 @@ Preserve trained model state for later use.
 save my_model
 Output: State saved to my_model_*.pth/json
 ```
----
-### `load`
+
+### `load [path]`
 **What it does:**  
 Loads a saved system state from files.
 **How it works:**  
@@ -80,140 +84,132 @@ Output: Scaffold state loaded.
         Token map loaded.
         Metadata loaded.
 ```
----
-### `sleep <conf> <time> <log>`
+
+### `dream`
 **What it does:**  
-Adjusts sleep/gestation parameters.
+Triggers a dream cycle.
 **How it works:**  
-Updates `sleep_conf_threshold` (0.5–0.9), `sleep_time_factor` (0.5–5.0), and `sleep_log_min` (5–20) for triggering gestation.
+Calls _dream() to simulate memory replay and novelty-based adaptations.
 **Use case:**  
-Tune when the system enters gestation mode based on confidence and log size.
+Enhance scaffold memory and adapt based on past prompts and responses.
 
 **Example:**
 ```
-sleep 0.75 2.0 15
-Output: Sleep params: conf=0.75, time_factor=2.0, log_min=15
+tune cross 0.8
+Output: Scaffold influence: weight=0.80, blend_strength=unchanged
 ```
----
-### `dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost> <memory_decay> <prune_threshold>`
+
+### `tune cross [weight]`
 **What it does:**  
-Tunes dreaming behavior parameters.
+Adjusts cross-attention weight.
 **How it works:**  
-Adjusts 10 parameters to control dream generation and memory.
+Calls tune_cross_attention() to set influence weights for scaffold cross-attention layers.
 **Use case:**  
-Customize how the system "dreams" to adapt its scaffold model.
+Fine-tune scaffold influence on the base model.
 
 **Example:**
 ```
-dream 0.15 0.12 true 0.07 0.2 12 0.6 0.04 0.9 0.15
-Output: Dream params: swing_var=0.15, lifecycle_delta=0.12, temperament_on=True, noise_scale=0.07, memory_weight=0.2, memory_maxlen=12, prompt_weight=0.6, novelty_boost=0.04, memory_decay=0.9, prune_threshold=0.15
+dream
+Output: --- Dreaming ---
+        Dreaming from prompt similarity: 0.85, novelty boost: 0.03, dream count: 10, questions generated: 3
+        --- Dream Concluded ---
 ```
----
-### `temp <eager> <sluggish> <influence> <curiosity> <restless> <melancholy> <conf_strength> <smoothing_factor>`
-**What it does:**  
-Adjusts temperament parameters.
-**How it works:**  
-Updates 8 parameters to influence generation temperature and behavior.
-**Use case:**  
-Fine-tune the system’s "mood" and responsiveness.
-**Example:**
-```
-temp 0.85 0.55 0.2 0.4 0.15 0.03 0.6 0.1
-Output: Temperament params: eager=0.85, sluggish=0.55, mood_influence=0.2, curiosity_boost=0.4, restless_drop=0.15, melancholy_noise=0.03, conf_feedback_strength=0.6, smoothing_factor=0.1
-```
----
-### `blend <weight> <temp>`
-**What it does:**  
-Sets global scaffold weight cap and base temperature.
-**How it works:**  
-Updates `scaffold_weight_cap` (0.5–1.0) and `base_temperature` (0.5–1.5).
-**Use case:**  
-Control overall scaffold influence and generation randomness.
 
-**Example:**
-```
-blend 0.95 0.8
-Output: Global blend: weight_cap=0.95, base_temp=0.8
-```
----
-### `lifecycle <capacity> <curve>`
-**What it does:**  
-Tunes lifecycle parameters.
-**How it works:**  
-Updates `lifecycle_capacity_factor` (0.001–0.1) and `lifecycle_curve` ("sigmoid_linear" or "exponential").
-**Use case:**  
-Adjust how scaffold influence grows with data exposure.
-
-**Example:**
-```
-lifecycle 0.02 exponential
-Output: Lifecycle params: capacity_factor=0.02, curve=exponential
-```
----
-### `cross weight <float> | blend <float> | layers <float...> | confidence | temperament | off`
-**What it does:**  
-Tunes cross-attention settings.
-**How it works:**
-- `weight <float>`: Sets uniform influence weight (e.g., 0.8).  
-- `blend <float>`: Sets blend strength (0.0–1.0).  
-- `layers <float...>`: Sets per-layer weights.  
-- `confidence`: Enables dynamic weighting based on confidence.  
-- `temperament`: Enables dynamic weighting based on temperament.  
-- `off`: Disables dynamic weighting.
-**Use case:**  
-Customize how scaffold affects base model.
-
-**Examples:**
-```
-cross weight 0.7
-Output: Scaffold influence: weight=0.70, blend_strength=unchanged
-cross layers 0.5 0.6 0.7
-Output: Scaffold influence: weight=per-layer, blend_strength=unchanged
-```
----
-### `scaffold_mem`, `token_mem`, `both_mem`, `no_mem`
+### `memory <on|off>`
 **What it does:**  
 Toggles memory usage modes.
-**How it works:**
-- `scaffold_mem`: Enables scaffold memory only.  
-- `token_mem`: Enables token map memory only.  
-- `both_mem`: Enables both.  
-- `no_mem`: Disables both.
+**How it works:**  
+Calls toggle_memory() to enable or disable scaffold and token map memories.
 **Use case:**  
 Control memory-driven adaptation.
+
 **Example:**
 ```
-both_mem
+memory on
 Output: Memory toggled: Scaffold=True, Token Map=True
 ```
----
-### Any Other Input (Prompt)
+
+### `status`
 **What it does:**  
-Generates a response using the current model state.
+Displays the current system status.
 **How it works:**  
-Calls `generate()` with defaults, logs to `log.jsonl`, and applies scaffold influence, temperament, and dreaming if enabled.
+Prints key metrics like conversation ID, temperament score, memory status, confidence, and training state.
 **Use case:**  
-Test model output interactively.
+Monitor system health and training progress.
 
 **Example:**
 ```
-Hello!
-Output: --- Generating Response ---
-        Response: Hi there! How can I assist you today?
-        --------------------
+Output: 
+--- System Status ---
+Conversation ID: 1234-5678-abcd-efgh
+Temperament: 0.35
+Confidence: 0.72
+Memory: On
+Data Exposure: 120.0
+Last Trained: 2025-04-11 14:32:45
+Gestating: No
 ```
----
-### [Empty Input] (Pressing Enter)
+### `log view`
 **What it does:**  
-Skips and waits for next input.
+Views the last 5 log entries.
 **How it works:**  
-Loop ignores empty strings.
+Reads entries from the logger and displays them.
+**Use case:**  
+Debug or analyze recent interactions.
 
 **Example:**
 ```
-[Enter]
-Output: (new prompt line)
+Output: 
+--- Last 5 Log Entries ---
+Time: 2025-04-11 14:30:01, Prompt: Hello..., Response: Hi there!...
+Time: 2025-04-11 14:31:10, Prompt: How are you..., Response: I am fine...
 ```
+
+### `config <key> [value]`
+**What it does:**  
+Gets or sets configuration values.
+**How it works:**  
+Calls get_config_value() to retrieve or set configuration settings.
+**Use case:**  
+Customize configurations without editing the config file.
+
+**Example:**
+```
+config base_model_name
+Output: Config base_model_name: gpt2
+```
+
+### `reset`
+**What it does:**  
+Resets the system state.
+**How it works:**  
+Calls cleanup() to clear the current state and initializes a new SOVLSystem().
+**Use case:**  
+Start fresh without relaunching the script.
+
+**Example:**
+```
+reset
+Output: Resetting system state...
+        New conversation: 5678-1234-efgh-abcd (Previous: 1234-5678-abcd-efgh)
+```
+
+### `spark`
+**What it does:**  
+Generates a curiosity-driven question.
+**How it works:**  
+Calls generate_curiosity_question() and logs the question and response.
+**Use case:**  
+Explore the system’s curiosity mechanism.
+
+**Example:**
+```
+reset
+spark
+Output: Curiosity: What is the purpose of this system?
+        Response: This system is designed for autonomous learning and virtual lifeform simulation.
+```
+
 ## Configuration (config.json)
 ### core_config
 - `base_model_name`: Base model (e.g., "gpt2"). Defines the primary language model.
