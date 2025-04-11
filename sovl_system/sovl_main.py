@@ -1801,14 +1801,15 @@ if __name__ == "__main__":
     try:
         sovl_system = SOVLSystem()
         print("\nSystem Ready.")
-        # Define valid commands explicitly, including spark
+        # Updated valid_commands to include reflect
         valid_commands = [
             'quit', 'exit', 'train', 'generate', 'save', 'load', 'dream',
-            'tune', 'memory', 'status', 'log', 'config', 'reset', 'spark'
+            'tune', 'memory', 'status', 'log', 'config', 'reset', 'spark', 'reflect'
         ]
+        # Updated help message to include reflect
         print("Commands: quit, exit, train [epochs] [--dry-run], generate <prompt> [max_tokens], "
               "save [path], load [path], dream, tune cross [weight], memory <on|off>, "
-              "status, log view, config <key> [value], reset, spark")
+              "status, log view, config <key> [value], reset, spark, reflect")
 
         while True:
             user_input = input("\nEnter command: ").strip()
@@ -1936,8 +1937,38 @@ if __name__ == "__main__":
                     "is_system_question": True
                 })
 
+            # New reflect command
+            elif cmd == 'reflect':
+                print("Reflecting on recent interactions...")
+                logs = sovl_system.logger.read()[-3:]  # Look at last 3 interactions
+                if not logs:
+                    print("Nothing to reflect on yet. Try generating some responses first.")
+                    continue
+                recent_prompts = [log.get('prompt', '') for log in logs if 'prompt' in log]
+                if not recent_prompts:
+                    reflection = "I haven't been prompted much lately."
+                else:
+                    reflection = f"I've noticed a lot of talk about {recent_prompts[-1].split()[0] if recent_prompts[-1] else 'things'} lately."
+                print(f"Reflection: {reflection}")
+                elaboration = sovl_system.generate(
+                    f"Based on recent thoughts: {reflection}", 
+                    max_new_tokens=60, 
+                    temperature=sovl_system.base_temperature, 
+                    top_k=50, 
+                    do_sample=True
+                )
+                print(f"Elaboration: {elaboration}")
+                sovl_system.logger.write({
+                    "prompt": reflection,
+                    "response": elaboration,
+                    "timestamp": time.time(),
+                    "conversation_id": sovl_system.history.conversation_id,
+                    "confidence_score": 0.6,  # Slightly higher for reflection
+                    "is_system_question": True
+                })
+
             else:
-                # Use valid_commands list for error message
+                # Updated error message to use valid_commands including reflect
                 print(f"Error: Unknown command. Valid commands: {', '.join(valid_commands)}")
 
     except FileNotFoundError as e:
