@@ -264,6 +264,24 @@ Output: Reflection: I've noticed a lot of talk about memory lately.
         Elaboration: Memory is a fascinating topic, as it allows systems to retain context and adapt 
 ```
 
+### `muse`
+
+**What it does:**  
+Generates a whimsical thought inspired by recent interactions.
+
+**How it works:**  
+Searches recent interaction logs for inspiration, selects a relevant topic, and calls the `generate()` method to create a creative response. Logs the thought and inspiration.
+
+**Use case:**  
+Explore the system’s ability to generate creative and inspiring ideas.
+
+**Example:**
+```
+muse
+Output: Inspiration: "mystery" (from recent interactions)
+        Thought: A whimsical thought about mystery: The allure of the unknown often leads to the most profound discoveries.
+```
+
 ## Configuration (config.json)
 ### core_config
 - `base_model_name`: Base model (e.g., "gpt2"). Defines the primary language model.
