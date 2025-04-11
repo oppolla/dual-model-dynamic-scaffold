@@ -11,39 +11,39 @@ leveraging "sleep" and "dream" mechanisms for continuous improvement.
 
 The tests in this file are structured as follows:
 
-1. **TestSOVLSystem Class**:
+1. TestSOVLSystem Class:
    This class inherits from `unittest.TestCase` and organizes the test cases for the SOVL System.
 
-2. **setUpClass Method**:
+2. setUpClass Method:
    - Initializes a shared instance of the SOVL System for all tests.
    - This method is run once before all tests in the class.
 
-3. **Test Cases**:
-   - **`test_configuration`**:
+3. Test Cases:
+   - `test_configuration`:
      - Validates the configuration of cross-attention layers (`CROSS_ATTN_LAYERS`) and custom 
        layers (`CUSTOM_LAYERS`) in the model.
      - Ensures that the specified layer indices are valid and within bounds of the base model's 
        hidden layers.
    
-   - **`test_cross_attention_integration`**:
+   - `test_cross_attention_integration`:
      - Tests whether cross-attention layers are correctly integrated into the base model.
      - Ensures that each specified layer contains the expected `cross_attn` attribute.
      - Uses helper methods to inject and retrieve cross-attention layers.
    
-   - **`test_dynamic_mode`**:
+   - `test_dynamic_mode`:
      - Evaluates the dynamic behavior of the cross-attention mechanism when operating under 
        different modes (e.g., "confidence", "temperament").
      - Checks that dynamic modes are correctly activated and deactivated.
      - Validates the presence of cross-attention attributes in the relevant layers for each 
        dynamic mode.
 
-4. **Dynamic Modes**:
+4. Dynamic Modes:
    - The SOVL System supports dynamic cross-attention modes that adapt based on external 
      parameters such as confidence or temperament.
    - This file includes tests to verify the correct behavior of these modes and their 
      interactions with the cross-attention layers.
 
-5. **Execution**:
+5. Execution:
    - The `unittest.main()` function at the end of the file allows the tests to be run 
      independently as a script.
 
