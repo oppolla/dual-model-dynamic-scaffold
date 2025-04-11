@@ -1800,137 +1800,145 @@ if __name__ == "__main__":
     sovl_system = None
     try:
         sovl_system = SOVLSystem()
-        if "--dry-run" in sys.argv:
-            sovl_system.enable_dry_run(max_samples=2, max_length=64)
-        sovl_system.wake_up()
         print("\nSystem Ready.")
-        print("Commands: 'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load', "
-              "'error_listening <true/false>', 'sleep <conf> <time> <log>', "
-              "'dream <swing> <delta> <temp_on> <noise> <mem_weight> <mem_maxlen> <prompt_weight> <novelty_boost> <memory_decay> <prune_threshold>', "
-              "'temp <eager> <sluggish> <influence> <curiosity> <restless> <melancholy> <conf_strength> <smoothing_factor>', "
-              "'blend <weight> <temp>', 'lifecycle <capacity> <curve>', "
-              "'curiosity <enable> <spontaneous> <response> <pressure> <drop> <silence> <cooldown> <queue_maxlen> <ignorance> <novelty> <max_tokens> <base_temp> <temp_influence> <top_k>', "
-              "'cross weight <float> | blend <float> | layers <float...> | confidence | temperament | off', "
-              "'scaffold_mem', 'token_mem', 'both_mem', 'no_mem', or a prompt.")
-
+        # Define valid commands explicitly, including spark
         valid_commands = [
-            'quit', 'exit', 'train', 'int8', 'int4', 'fp16', 'dynamic', 'fixed', 'new', 'save', 'load',
-            'error_listening', 'sleep', 'dream', 'temp', 'blend', 'lifecycle', 'cross', 'curiosity',
-            'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'
+            'quit', 'exit', 'train', 'generate', 'save', 'load', 'dream',
+            'tune', 'memory', 'status', 'log', 'config', 'reset', 'spark'
         ]
+        print("Commands: quit, exit, train [epochs] [--dry-run], generate <prompt> [max_tokens], "
+              "save [path], load [path], dream, tune cross [weight], memory <on|off>, "
+              "status, log view, config <key> [value], reset, spark")
 
-        last_input_time = time.time()
         while True:
-            user_cmd = input("\nEnter command or prompt: ").strip().lower()
-            elapsed = time.time() - last_input_time
-            sovl_system.check_silence(elapsed)
-
-            # Check for new error prompts
-            log_entries = sovl_system.logger.read()
-            for entry in log_entries[-5:]:  # Check last 5 entries to keep it lightweight
-                if entry.get("is_error_prompt", False) and not entry.get("response"):
-                    error_response = sovl_system._handle_error_prompt(entry.get("error", "Unknown error"))
-                    print(f"Self-reflection: {error_response}")
-                    entry["response"] = error_response  # Mark as handled to avoid reprocessing
-                    sovl_system.logger.write(entry)
-
-            parts = user_cmd.split()
-            cmd = parts[0] if parts else ""
+            user_input = input("\nEnter command: ").strip()
+            parts = user_input.split()
+            cmd = parts[0].lower() if parts else ""
 
             if cmd in ['quit', 'exit']:
+                print("Exiting...")
                 break
+
             elif cmd == 'train':
-                sovl_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE)
-                if sovl_system.dry_run:
+                epochs = TRAIN_EPOCHS
+                dry_run = False
+                if len(parts) > 1:
+                    try:
+                        epochs = int(parts[1])
+                    except ValueError:
+                        print("Error: Epochs must be a number.")
+                        continue
+                if '--dry-run' in parts:
+                    dry_run = True
+                    sovl_system.enable_dry_run()
+                print(f"Starting training for {epochs} epochs{' (dry run)' if dry_run else ''}...")
+                sovl_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=epochs, batch_size=BATCH_SIZE)
+                if dry_run:
+                    print("Dry run complete.")
                     break
-            elif cmd in ['int8', 'int4', 'fp16']:
-                sovl_system.set_quantization_mode(cmd)
-                print(f"Re-initializing with {cmd.upper()} quantization...")
-                sovl_system = SOVLSystem()
-                sovl_system.wake_up()
-            elif cmd == 'dynamic':
-                sovl_system.toggle_dynamic_layers(True)
-                print("Re-initializing with dynamic layers...")
-                sovl_system = SOVLSystem()
-                sovl_system.wake_up()
-            elif cmd == 'fixed':
-                sovl_system.toggle_dynamic_layers(False)
-                print("Re-initializing with fixed layers...")
-                sovl_system = SOVLSystem()
-                sovl_system.wake_up()
-            elif cmd == 'new':
-                sovl_system.new_conversation()
+
+            elif cmd == 'generate':
+                if len(parts) < 2:
+                    print("Error: Please provide a prompt.")
+                    continue
+                prompt = ' '.join(parts[1:] if len(parts) == 2 else parts[1:-1])
+                max_tokens = int(parts[-1]) if len(parts) > 2 and parts[-1].isdigit() else 60
+                print(f"Generating response for: {prompt}...")
+                response = sovl_system.generate(prompt, max_new_tokens=max_tokens, temperature=sovl_system.base_temperature, top_k=50, do_sample=True)
+                print(f"Response: {response}")
+
             elif cmd == 'save':
                 path = parts[1] if len(parts) > 1 else None
+                print(f"Saving state{' to ' + path if path else ''}...")
                 sovl_system.save_state(path)
+
             elif cmd == 'load':
                 path = parts[1] if len(parts) > 1 else None
+                print(f"Loading state{' from ' + path if path else ''}...")
                 sovl_system.load_state(path)
-            elif cmd == 'error_listening' and len(parts) == 2:
-                enable = parts[1].lower() == 'true'
-                sovl_system.enable_error_listening = enable
-                print(f"Error listening {'enabled' if enable else 'disabled'}")
-            elif cmd == 'sleep':
-                try:
-                    if len(parts) != 4:
-                        raise ValueError("Usage: sleep <conf> <time> <log>")
-                    sovl_system.set_sleep_params(float(parts[1]), float(parts[2]), int(parts[3]))
-                except ValueError as e:
-                    print(f"Error: {e}")
-            elif cmd == 'dream' and len(parts) == 11:
-                sovl_system.tune_dream(float(parts[1]), float(parts[2]), parts[3].lower() == 'true', float(parts[4]), float(parts[5]), int(parts[6]), float(parts[7]), float(parts[8]), float(parts[9]), float(parts[10]))
-            elif cmd == 'temp' and len(parts) == 9:
-                sovl_system.adjust_temperament(float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7]), float(parts[8]))
-            elif cmd == 'blend' and len(parts) == 3:
-                sovl_system.set_global_blend(float(parts[1]), float(parts[2]))
-            elif cmd == 'lifecycle' and len(parts) == 3:
-                sovl_system.tune_lifecycle(float(parts[1]), parts[2])
-            elif cmd == 'curiosity' and len(parts) == 15:
-                sovl_system.tune_curiosity(
-                    parts[1].lower() == 'true', float(parts[2]), float(parts[3]), float(parts[4]),
-                    float(parts[5]), float(parts[6]), float(parts[7]), int(parts[8]), float(parts[9]),
-                    float(parts[10]), int(parts[11]), float(parts[12]), float(parts[13]), int(parts[14])
-                )
-            elif cmd == 'cross' and len(parts) >= 2:
-                args = parts[1:]
-                if args[0] == 'weight' and len(args) == 2:
-                    sovl_system.tune_cross_attention(weight=float(args[1]))
-                elif args[0] == 'blend' and len(args) == 2:
-                    sovl_system.tune_cross_attention(blend_strength=float(args[1]))
-                elif args[0] == 'layers' and len(args) > 1:
-                    layer_weights = [float(w) for w in args[1:]]
-                    sovl_system.tune_cross_attention(layer_weights=layer_weights)
-                elif args[0] in ['confidence', 'temperament', 'off']:
-                    sovl_system.tune_cross_attention(dynamic_mode=args[0])
-                else:
-                    print("Usage: cross weight <float> | blend <float> | layers <float...> | confidence | temperament | off")
-            elif cmd in ['scaffold_mem', 'token_mem', 'both_mem', 'no_mem']:
-                sovl_system.toggle_memory(cmd)
-            elif not user_cmd:
-                continue
-            else:
-                log_entries = sovl_system.logger.read()
-                last_entry = log_entries[-1] if log_entries else None
-                if last_entry and last_entry.get("is_system_question", False) and not last_entry["response"]:
-                    # User answered a system question
-                    last_entry["response"] = user_cmd
-                    last_entry["confidence_score"] = calculate_confidence_score(
-                        sovl_system.base_model(**sovl_system.base_tokenizer(user_cmd, return_tensors='pt').to(DEVICE)).logits,
-                        sovl_system.base_tokenizer(user_cmd).input_ids
-                    )
-                    sovl_system.logger.write(last_entry)  # Update log
-                    sovl_system.update_metrics(last_entry["prompt"], sovl_system.curiosity.calculate_metric(last_entry["prompt"]), answered=True)
-                    print("Thanks for the insight!")
-                elif cmd not in valid_commands:
-                    print("\n--- Generating Response ---")
-                    response = sovl_system.generate(user_cmd, max_new_tokens=60, temperature=sovl_system.base_temperature, top_k=50, do_sample=True)
-                    print("\nResponse:", response)
-                    print("-" * 20)
-                else:
-                    print("Error: Invalid command. Please enter a valid command.")
-                    print("Valid commands are:", ', '.join(valid_commands))
 
-            last_input_time = time.time()
+            elif cmd == 'dream':
+                print("Triggering dream cycle...")
+                sovl_system._dream()
+
+            elif cmd == 'tune' and len(parts) >= 2 and parts[1] == 'cross':
+                try:
+                    weight = float(parts[2]) if len(parts) > 2 else None
+                    print(f"Setting cross-attention weight to {weight if weight is not None else 'default'}...")
+                    sovl_system.tune_cross_attention(weight=weight)
+                except ValueError:
+                    print("Error: Weight must be a number.")
+                    continue
+
+            elif cmd == 'memory':
+                if len(parts) != 2 or parts[1] not in ['on', 'off']:
+                    print("Error: Use 'memory on' or 'memory off'.")
+                    continue
+                mode = 'both_mem' if parts[1] == 'on' else 'no_mem'
+                print(f"Setting memory to {parts[1]}...")
+                sovl_system.toggle_memory(mode)
+
+            elif cmd == 'status':
+                print("\n--- System Status ---")
+                print(f"Conversation ID: {sovl_system.history.conversation_id}")
+                print(f"Temperament: {sovl_system.temperament_score:.2f}")
+                print(f"Confidence: {sovl_system.confidence_history[-1] if sovl_system.confidence_history else 'N/A'}")
+                print(f"Memory: {'On' if sovl_system.use_scaffold_memory or sovl_system.use_token_map_memory else 'Off'}")
+                print(f"Data Exposure: {sovl_system.data_exposure}")
+                print(f"Last Trained: {sovl_system.last_trained}")
+                print(f"Gestating: {'Yes' if sovl_system.is_sleeping else 'No'}")
+
+            elif cmd == 'log' and len(parts) == 2 and parts[1] == 'view':
+                print("\n--- Last 5 Log Entries ---")
+                logs = sovl_system.logger.read()[-5:]
+                for log in logs:
+                    print(f"Time: {log.get('timestamp', 'N/A')}, "
+                          f"Prompt: {log.get('prompt', 'N/A')[:30]}..., "
+                          f"Response: {log.get('response', 'N/A')[:30]}...")
+
+            elif cmd == 'config':
+                if len(parts) < 2:
+                    print("Error: Please specify a config key.")
+                    continue
+                key = parts[1]
+                if len(parts) == 2:
+                    value = get_config_value(config, key, "Not found")
+                    print(f"Config {key}: {value}")
+                else:
+                    try:
+                        value = float(parts[2]) if '.' in parts[2] else int(parts[2])
+                        print(f"Setting {key} to {value} (Note: Changes apply on restart)")
+                    except ValueError:
+                        print("Error: Value must be a number.")
+                        continue
+
+            elif cmd == 'reset':
+                print("Resetting system state...")
+                sovl_system.cleanup()
+                sovl_system = SOVLSystem()
+                sovl_system.wake_up()
+
+            elif cmd == 'spark':
+                print("Sparking curiosity...")
+                question = sovl_system.generate_curiosity_question()
+                if not question:
+                    print("No curious question generated. Try again later.")
+                    continue
+                print(f"Curiosity: {question}")
+                response = sovl_system.generate(question, max_new_tokens=60, temperature=sovl_system.base_temperature, top_k=50, do_sample=True)
+                print(f"Response: {response}")
+                sovl_system.logger.write({
+                    "prompt": question,
+                    "response": response,
+                    "timestamp": time.time(),
+                    "conversation_id": sovl_system.history.conversation_id,
+                    "confidence_score": 0.5,  # Default for spark
+                    "is_system_question": True
+                })
+
+            else:
+                # Use valid_commands list for error message
+                print(f"Error: Unknown command. Valid commands: {', '.join(valid_commands)}")
 
     except FileNotFoundError as e:
         print(f"\nFile error: {e}. Check 'sovl_config.json' and 'sovl_seed.jsonl'.")
