@@ -91,18 +91,18 @@ IF ERRORLEVEL 1 (
     pip install bitsandbytes
 )
 
-:: Check for config.json
-echo Checking for config.json...
-IF NOT EXIST config.json (
-    echo config.json not found. Please ensure it is in the directory.
+:: Check for sovl_config.json
+echo Checking for sovl_config.json...
+IF NOT EXIST sovl_config.json (
+    echo sovl_config.json not found. Please ensure it is in the directory.
     pause
     exit /b 1
 )
 
-:: Check for sample_log.jsonl
-echo Checking for sample_log.jsonl...
-IF NOT EXIST sample_log.jsonl (
-    echo sample_log.jsonl not found. Please ensure it is in the directory.
+:: Check for sovl_seed.jsonl
+echo Checking for sovl_seed.jsonl...
+IF NOT EXIST sovl_seed.jsonl (
+    echo sovl_seed.jsonl not found. Please ensure it is in the directory.
     pause
     exit /b 1
 )
