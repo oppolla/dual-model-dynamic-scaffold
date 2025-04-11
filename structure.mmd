@@ -8,11 +8,3 @@ flowchart TD
     TokenMap --> SleepScheduler([Sleep Scheduler])
     SleepScheduler --> Gestation([Gestation Phase])
     Gestation --> Dreaming([Dream Mechanism])
-
-    %% Feedback Paths
-    Log --> UserPrompt
-    Dreaming --> BaseLLM
-    Dreaming --> ScaffoldLLM
-    Gestation --> SleepScheduler
-    TokenMap --> CrossAttention
-    CrossAttention --> UserPrompt
