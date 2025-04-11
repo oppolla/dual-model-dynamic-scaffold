@@ -1801,13 +1801,15 @@ if __name__ == "__main__":
     try:
         sovl_system = SOVLSystem()
         print("\nSystem Ready.")
+        # Updated valid_commands to include flare
         valid_commands = [
             'quit', 'exit', 'train', 'generate', 'save', 'load', 'dream',
-            'tune', 'memory', 'status', 'log', 'config', 'reset', 'spark', 'reflect', 'muse'
+            'tune', 'memory', 'status', 'log', 'config', 'reset', 'spark', 'reflect', 'muse', 'flare'
         ]
+        # Updated help message to include flare
         print("Commands: quit, exit, train [epochs] [--dry-run], generate <prompt> [max_tokens], "
               "save [path], load [path], dream, tune cross [weight], memory <on|off>, "
-              "status, log view, config <key> [value], reset, spark, reflect, muse")
+              "status, log view, config <key> [value], reset, spark, reflect, muse, flare")
 
         while True:
             user_input = input("\nEnter command: ").strip()
@@ -1901,7 +1903,6 @@ if __name__ == "__main__":
                     continue
                 key = parts[1]
                 if len(parts) == 2:
-                    # Fixed typo: removed "ارتباط"
                     value = get_config_value(config, key, "Not found")
                     print(f"Config {key}: {value}")
                 else:
@@ -1992,7 +1993,34 @@ if __name__ == "__main__":
                     "is_system_question": True
                 })
 
+            # New flare command
+            elif cmd == 'flare':
+                print("Flaring up...")
+                original_temperament = sovl_system.temperament_score  # Save current state
+                sovl_system.temperament_score = 1.0  # Crank to max
+                print("Temperament Cranked: 1.0 (MAX)")
+                prompt = ' '.join(parts[1:]) if len(parts) > 1 else "THIS QUIET IS TOO MUCH!"
+                outburst = sovl_system.generate(
+                    prompt,
+                    max_new_tokens=80,
+                    temperature=1.5,  # High heat for chaos
+                    top_k=50,
+                    do_sample=True
+                ).upper()  # Shout it out
+                print(f"Outburst: {outburst}")
+                sovl_system.temperament_score = original_temperament  # Reset to normal
+                print("[Temperament resets to normal]")
+                sovl_system.logger.write({
+                    "prompt": f"Flare: {prompt}",
+                    "response": outburst,
+                    "timestamp": time.time(),
+                    "conversation_id": sovl_system.history.conversation_id,
+                    "confidence_score": 0.9,  # High for intensity
+                    "is_system_question": True
+                })
+
             else:
+                # Updated error message to include flare
                 print(f"Error: Unknown command. Valid commands: {', '.join(valid_commands)}")
 
     except FileNotFoundError as e:
