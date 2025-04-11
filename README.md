@@ -282,6 +282,24 @@ Output: Inspiration: "mystery" (from recent interactions)
         Thought: A whimsical thought about mystery: The allure of the unknown often leads to the most profound discoveries.
 ```
 
+### `flare`
+
+**What it does:**  
+Triggers an intense emotional outburst from the system by temporarily raising the temperament score to its maximum.
+
+**How it works:**  
+Sets the system's temperament score to 1.0 (maximum), generates a high-energy response to the given input (or a default prompt if none is provided), and then resets the temperament score to its original state.
+
+**Use case:**  
+To induce an expressive or creative outburst, often for debugging or exploration of the system's response under maximum temperament.
+
+**Example:**
+```
+flare
+This is too calm!
+Output: THIS IS TOO CALM! I DEMAND ACTION!
+```
+
 ## Configuration (config.json)
 ### core_config
 - `base_model_name`: Base model (e.g., "gpt2"). Defines the primary language model.
