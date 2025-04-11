@@ -1,0 +1,93 @@
+import json
+import os
+
+def load_jsonl(file_path):
+    """
+    Load a JSONL file into a list of dictionaries.
+    
+    Args:
+        file_path (str): Path to the JSONL file.
+    
+    Returns:
+        list: List of dictionaries parsed from each line.
+    """
+    data = []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    data.append(json.loads(line.strip()))
+                except json.JSONDecodeError as e:
+                    print(f"Warning: Skipping invalid JSON line in {file_path}: {e}")
+    except FileNotFoundError:
+        print(f"Warning: {file_path} not found, returning empty list.")
+    except Exception as e:
+        print(f"Warning: Failed to load {file_path}: {e}")
+    return data
+
+def load_config(config_file="sovl_config.json", defaults=None):
+    """
+    Load a JSON config file, falling back to defaults if not found.
+    
+    Args:
+        config_file (str): Path to the config file (default: "sovl_config.json").
+        defaults (dict, optional): Default config values if file is missing.
+    
+    Returns:
+        dict: Loaded or default configuration.
+    """
+    if defaults is None:
+        defaults = {}
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            config = json.load(f)
+            # Merge defaults with loaded config (loaded takes precedence)
+            return {**defaults, **config}
+    except FileNotFoundError:
+        print(f"Warning: Config file {config_file} not found, using defaults.")
+        return defaults
+    except json.JSONDecodeError as e:
+        print(f"Warning: Invalid JSON in {config_file}: {e}, using defaults.")
+        return defaults
+    except Exception as e:
+        print(f"Warning: Failed to load {config_file}: {e}, using defaults.")
+        return defaults
+
+def get_config_value(config, key, default=None):
+    """
+    Safely retrieve a nested value from a config dict using dot notation.
+    
+    Args:
+        config (dict): Configuration dictionary.
+        key (str): Dot-separated key (e.g., "controls_config.enable_error_listening").
+        default: Value to return if key is not found.
+    
+    Returns:
+        Value from config or default if not found.
+    """
+    keys = key.split(".")
+    value = config
+    try:
+        for k in keys:
+            value = value[k]
+        return value
+    except (KeyError, TypeError):
+        return default
+
+if __name__ == "__main__":
+    # Quick test
+    # Test load_jsonl
+    with open("test.jsonl", "w", encoding="utf-8") as f:
+        f.write('{"a": 1}\n')
+        f.write('{"b": 2}\n')
+    print("JSONL:", load_jsonl("test.jsonl"))
+    os.remove("test.jsonl")
+
+    # Test load_config
+    config_defaults = {"quantization_mode": "int8", "enable_error_listening": True}
+    with open("test_config.json", "w", encoding="utf-8") as f:
+        json.dump({"quantization_mode": "int4"}, f)
+    config = load_config("test_config.json", config_defaults)
+    print("Config:", config)
+    print("Nested value:", get_config_value({"a": {"b": 3}}, "a.b", 0))
+    os.remove("test_config.json")
