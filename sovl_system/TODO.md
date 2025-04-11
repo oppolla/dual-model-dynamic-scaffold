@@ -9,6 +9,7 @@ Ensure metrics are well-defined, measurable, and consistently available in the s
 
 **Design Prompt Structure**:
 Create clear, adaptable prompts to feed metrics into the LLM for decision-making.
+
 Example Prompt:
 ```
 Given the following [task-specific] metrics:  
