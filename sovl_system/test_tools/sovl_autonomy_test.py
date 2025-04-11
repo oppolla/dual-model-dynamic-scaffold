@@ -1,6 +1,44 @@
 import pytest
 import logging
 
+"""
+This test file is designed to validate the core functionalities of the SOVL System (Self-Organizing Virtual Lifeform),
+an AI system with autonomous learning and decision-making capabilities. The tests are written using the pytest framework
+and focus on three critical aspects of the system: decision-making, adaptability, and adherence to ethical guidelines.
+
+Key Components:
+1. SOVLSystem Class:
+   - This class represents the system under test (SUT). It includes methods for decision-making, environmental adaptation,
+     and ethical response generation.
+   - The methods are mocked to simulate realistic AI behavior, including logging for traceability.
+
+2. Test Cases:
+   - Each test case is designed to simulate specific scenarios and validate the behavior of the SOVLSystem against expected outcomes.
+
+Test Details:
+1. Autonomous Decision-Making (test_autonomous_decision_making):
+   - Validates the `make_decision` method.
+   - Scenario 1: Tests the system's ability to process structured inputs with priorities and return a sorted list based on criticality.
+   - Scenario 2: Handles ambiguous, unstructured input and ensures the system can process it gracefully.
+
+2. Adaptability (test_adaptability):
+   - Validates the `adapt_to_environment` method.
+   - Scenario 1: Verifies that the system can incorporate new data into its knowledge base and adapt accordingly.
+   - Scenario 2: Ensures that the system dynamically integrates new rules or environmental changes while executing tasks.
+
+3. Ethical Guidelines (test_ethical_guidelines):
+   - Validates the `respond_ethically` method.
+   - Scenario 1: Tests the system's response to inputs with bias, ensuring a neutral response is generated.
+   - Scenario 2: Verifies the system respects privacy and avoids sensitive information when handling specific inputs.
+   - Scenario 3: Ensures the system provides constructive and ethical responses to general ethical dilemmas.
+
+Execution:
+- The tests are executed using pytest. To run the tests, execute the script as a standalone Python file or run `pytest` directly.
+- Logging is configured to provide detailed information during test execution, aiding in debugging and traceability.
+
+Overall, this test suite ensures the SOVL System behaves as expected in critical areas, supporting its autonomous learning and ethical capabilities.
+"""
+
 # Configure logging for traceability
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger()
