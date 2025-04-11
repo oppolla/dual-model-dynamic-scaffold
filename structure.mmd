@@ -1,65 +1,10 @@
-classDiagram
-    class SOVLSystem {
-        -base_model : AutoModelForCausalLM
-        -scaffolds : List[AutoModelForCausalLM]
-        -base_tokenizer : AutoTokenizer
-        -scaffold_tokenizer : AutoTokenizer
-        -dream_memory : DreamMemory
-        -temperament : Temperament
-        -lifecycle : Lifecycle
-        -curiosity : TrueCuriosity
-        -logger : ThreadSafeLogger
-        -unanswered_q : deque
-        -cross_attention_layers : List[SimpleCrossAttentionFuser]
-        +generate(prompt, max_new_tokens)
-        +_dream()
-        +check_memory_health()
-        +_insert_cross_attention()
-        +tokenize_and_map(input_ids)
-        +cleanup()
-    }
-
-    class SimpleCrossAttentionFuser {
-        -cross_attention : MultiheadAttention
-        -gate : Sequential
-        -layer_norm : LayerNorm
-        +forward(base_hidden_state, scaffold_context)
-    }
-
-    class TrueCuriosity {
-        -sovl : SOVLSystem
-        +calculate_metric(question) float
-    }
-
-    class DreamMemory {
-        -memory : deque
-        -decay : float
-        +add(tensor, weight)
-        +prune(threshold)
-    }
-
-    class Temperament {
-        -score : float
-        -history : deque
-        +update(confidence)
-    }
-
-    class Lifecycle {
-        -data_exposure : int
-        -capacity : int
-        +get_life_curve_weight() float
-    }
-
-    class ThreadSafeLogger {
-        -filename : str
-        -lock : Lock
-        +write(data)
-    }
-
-    SOVLSystem o--> SimpleCrossAttentionFuser : embeds
-    SOVLSystem o--> TrueCuriosity : uses
-    SOVLSystem o--> DreamMemory : manages
-    SOVLSystem o--> Temperament : tracks
-    SOVLSystem o--> Lifecycle : evolves
-    SOVLSystem o--> ThreadSafeLogger : logs
-    TrueCuriosity --> SOVLSystem : references
+flowchart TD
+    UserPrompt([User Prompt]) --> BaseLLM([Base LLM])
+    UserPrompt --> ScaffoldLLM([Scaffold LLM])
+    BaseLLM --> CrossAttention([Cross-Attention Layer])
+    ScaffoldLLM --> CrossAttention
+    CrossAttention --> TokenMap([Token Map Layer])
+    TokenMap --> Log([Log])
+    TokenMap --> SleepScheduler([Sleep Scheduler])
+    SleepScheduler --> Gestation([Gestation Phase])
+    Gestation --> Dreaming([Dream Mechanism])
