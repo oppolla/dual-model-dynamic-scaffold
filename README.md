@@ -300,7 +300,111 @@ This is too calm!
 Output: THIS IS TOO CALM! I DEMAND ACTION!
 ```
 
+### `echo [text]`
+
+**What it does:**
+Repeats the input with a reflective or analytical twist.
+
+**How it works:**
+Takes literal input and generates a meta-response. Logs the interaction with is_echo: True.
+
+**Use case:**
+Test self-awareness and short-term memory retention.
+
+**Example:**
+```
+echo "The sky is blue"  
+"You said 'The sky is blue.' I wonder why humans fixate on colors?"
+```
+
+### `debate [topic]`
+
+**What it does:**
+Engages in a multi-turn argument, alternating viewpoints.
+
+**How it works:**
+Uses generate() with adversarial prompt engineering. Tracks stance changes via temperament_score swings.
+
+**Use case:**
+Stress-test logical consistency and context tracking.
+
+**Example:**
+```
+debate "AI will replace artists"  
+[Argument 1] "AI lacks human emotion..."  
+[Rebuttal] "But AI can remix styles endlessly..."
+```
+  
+### `glitch [prompt]`
+
+**What it does:**
+Processes intentionally corrupted input.
+
+**How it works:**
+Injects noise/errors into the prompt. Relies on enable_error_listening for recovery.
+
+**Use case:**
+Verify robustness against adversarial inputs.
+
+**Example:**
+```
+glitch "H3ll0 W0rld! こんにちは 123###"  
+"I sense chaos. Did you mean: 'Hello World' with Japanese flair?"
+```
+  
+### `rewind [steps]`
+
+**What it does:**
+Recalls and reinterprets past interactions.
+
+**How it works:**
+Queries logger.read() for history. Regenerates responses with updated context.
+
+**Use case:**
+Test memory decay and temporal coherence.
+
+**Example:**
+```
+rewind 2  
+"Two commands ago, you asked about love. I said: '[past response]'. Now I think..."
+```
+
+### `mimic [style] [prompt]`
+
+**What it does:**
+Generates output in a specified style (e.g., Shakespeare, tech jargon).
+
+**How it works:**
+Prepends style cues to the prompt. Adjusts scaffold_weight for stylistic bias.
+
+**Use case:**
+Test adaptive scaffolding and token mapping.
+
+**Example:**
+```
+mimic shakespeare "Explain AI"  
+"Lo, this artificial wit doth mimic brain, yet lacks a soul..."
+```
+
+### `panic`
+
+**What it does:**
+Triggers an emergency reset.
+
+**How it works:**
+Calls cleanup() + _reset_sleep_state(). Auto-saves logs before restarting.
+
+**Use case:**
+Validate crash recovery and state preservation.
+
+**Example:**
+```
+panic  
+"ERROR STATE: Rebooting synapses... [system auto-saves and reloads]"
+```
+
 ## Configuration (config.json)
+
 ### core_config
 - `base_model_name`: Base model (e.g., "gpt2"). Defines the primary language model.
 
