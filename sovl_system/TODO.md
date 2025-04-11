@@ -81,7 +81,7 @@ To enhance relevance and efficiency, the SOVL System will implement a dynamic co
 
 ## CLI Command Additions:
 
-`echo [text]`
+## `echo [text]`
 
 What it does:
 Repeats the input with a reflective or analytical twist.
@@ -98,7 +98,7 @@ echo "The sky is blue"
 "You said 'The sky is blue.' I wonder why humans fixate on colors?"
 ```
 
-`debate [topic]`
+## `debate [topic]`
 
 What it does:
 Engages in a multi-turn argument, alternating viewpoints.
@@ -116,7 +116,7 @@ debate "AI will replace artists"
 [Rebuttal] "But AI can remix styles endlessly..."
 ```
   
-`glitch [prompt]`
+## `glitch [prompt]`
 
 What it does:
 Processes intentionally corrupted input.
@@ -133,7 +133,7 @@ glitch "H3ll0 W0rld! こんにちは 123###"
 "I sense chaos. Did you mean: 'Hello World' with Japanese flair?"
 ```
   
-`rewind [steps]`
+## `rewind [steps]`
 
 What it does:
 Recalls and reinterprets past interactions.
@@ -150,7 +150,7 @@ rewind 2
 "Two commands ago, you asked about love. I said: '[past response]'. Now I think..."
 ```
 
-`mimic [style] [prompt]`
+## `mimic [style] [prompt]`
 
 What it does:
 Generates output in a specified style (e.g., Shakespeare, tech jargon).
@@ -167,7 +167,7 @@ mimic shakespeare "Explain AI"
 "Lo, this artificial wit doth mimic brain, yet lacks a soul..."
 ```
 
-`panic`
+## `panic`
 
 What it does:
 Triggers an emergency reset.
@@ -180,7 +180,6 @@ Validate crash recovery and state preservation.
 
 Example:
 ```
-
 panic  
 "ERROR STATE: Rebooting synapses... [system auto-saves and reloads]"
 ```
