@@ -1,7 +1,8 @@
 # TODO:
 
 ### Key Feature Addition - Lightweight Decision-Making Framework 
-Implement Lightweight Decision-Making Framework for Automomous Decision Making: Design and integrate a flexible decision-making mechanism into the SOVL System, enabling lightweight, adaptable reasoning for various system optimization tasks. The framework will initially focus on evaluating memory health metrics and making adjustments for stability using LLM-based reasoning, with the potential to expand to other domains in the future like the ability to control it's own parametrs, 
+- Implement Lightweight Decision-Making Framework for Automomous Decision Making 
+Design and integrate a flexible decision-making mechanism into the SOVL System, enabling lightweight, adaptable reasoning for various system optimization tasks. The framework will initially focus on evaluating memory health metrics and making adjustments for stability using LLM-based reasoning, with the potential to expand to other domains in the future like the ability to control it's own parametrs, 
 
 **Define Input Metrics**:
 Identify key metrics relevant to specific optimization tasks (e.g., Memory Usage, Error Rate, Stability Score for memory health).
