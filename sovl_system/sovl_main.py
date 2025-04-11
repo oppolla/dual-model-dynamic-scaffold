@@ -1796,5 +1796,5 @@ if not TRAIN_DATA or not VALID_DATA:
 print("Quantization mode:", QUANTIZATION_MODE)
 
 if __name__ == "__main__":
-    from cli import run_cli
+    from sovl_CLI import run_cli
     run_cli()
