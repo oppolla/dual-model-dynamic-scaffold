@@ -225,7 +225,6 @@ Start fresh without relaunching the script.
 
 **Example:**
 ```
-reset
 Output: Resetting system state...
         New conversation: 5678-1234-efgh-abcd (Previous: 1234-5678-abcd-efgh)
 ```
@@ -243,10 +242,26 @@ Explore the system’s curiosity mechanism.
 
 **Example:**
 ```
-reset
-spark
 Output: Curiosity: What is the purpose of this system?
         Response: This system is designed for autonomous learning and virtual lifeform simulation.
+```
+
+### `reflect`
+
+**What it does:**  
+Reflects on recent interactions and generates a response based on patterns or observations.
+
+**How it works:**  
+The system reviews the last 3 logged interactions, identifies recurring themes or notable prompts, and formulates a reflective statement. It then generates an elaboration using its language model.
+
+**Use case:**  
+Analyze the system's behavior and responses over recent interactions.
+
+**Example:**
+```
+reflect  
+Output: Reflection: I've noticed a lot of talk about memory lately.  
+        Elaboration: Memory is a fascinating topic, as it allows systems to retain context and adapt 
 ```
 
 ## Configuration (config.json)
