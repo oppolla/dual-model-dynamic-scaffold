@@ -231,10 +231,13 @@ Output: Resetting system state...
 ```
 
 ### `spark`
+
 **What it does:**  
 Generates a curiosity-driven question.
+
 **How it works:**  
 Calls generate_curiosity_question() and logs the question and response.
+
 **Use case:**  
 Explore the system’s curiosity mechanism.
 
