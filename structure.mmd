@@ -1,10 +1,14 @@
 flowchart TD
     UserPrompt([User Prompt]) --> BaseLLM([Base LLM])
     UserPrompt --> ScaffoldLLM([Scaffold LLM])
+    ScaffoldLLM -->|Influence| BaseLLM
     BaseLLM --> CrossAttention([Cross-Attention Layer])
     ScaffoldLLM --> CrossAttention
     CrossAttention --> TokenMap([Token Map Layer])
-    TokenMap --> Log([Log])
+    TokenMap -->|Memory Updates| ScaffoldLLM
     TokenMap --> SleepScheduler([Sleep Scheduler])
-    SleepScheduler --> Gestation([Gestation Phase])
+    SleepScheduler -->|Check Logs| Gestation([Gestation Phase])
+    Gestation -->|Trigger Conditions| SleepTraining([Sleep Training])
     Gestation --> Dreaming([Dream Mechanism])
+    SleepTraining -->|Optimize| ScaffoldLLM
+    Dreaming -->|Memory Updates| TokenMap
