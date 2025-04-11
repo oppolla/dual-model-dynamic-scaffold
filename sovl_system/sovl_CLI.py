@@ -1,7 +1,7 @@
 import time
 import torch
 import traceback
-from sovl_system import SOVLSystem  # Adjust import based on your main file name
+from sovl_system import SOVLSystem  # Adjust if main file name differs
 
 def run_cli():
     print("\nInitializing SOVL System...")
