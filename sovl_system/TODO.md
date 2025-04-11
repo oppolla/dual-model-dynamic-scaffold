@@ -10,13 +10,13 @@ Ensure metrics are well-defined, measurable, and consistently available in the s
 **Design Prompt Structure**:
 Create clear, adaptable prompts to feed metrics into the LLM for decision-making.
 Example Prompt:
-Code
+```
 Given the following [task-specific] metrics:  
 Metric 1: [value]  
 Metric 2: [value]  
 Metric 3: [value]  
 Decide if adjustments are needed. Respond only with true or false.  
-
+```
 **Implement Integration**:
 Build a mechanism to feed relevant metrics into the LLM as input for decision-making.
 Ensure outputs are captured and processed appropriately to drive system actions.
