@@ -7,6 +7,34 @@ from collections import defaultdict
 import sys
 from pathlib import Path
 
+"""
+This module implements the DreamingMemoryTest class, designed to test the dreaming and memory
+capabilities of the SOVLSystem (Self-Organizing Virtual Lifeform). The test suite includes 
+multiple scenarios to evaluate the system's ability to handle dreaming, memory management, 
+and prompt-driven behavior under different conditions. Below are the key components:
+
+1. Initialization:
+   - Sets up output directories for logs and summaries.
+   - Configures test logging and initializes the SOVLSystem.
+
+2. Test Scenarios:
+   - Dream Triggering Test: Adjusts system parameters to force dreaming and evaluates the 
+     novelty and memory entries generated during dreams.
+   - Memory Overload Test: Floods the system with prompts to assess memory pruning strategies.
+   - Prompt-Driven Dreams Test: Repeats specific prompts to determine if dreams reflect 
+     recent input and evaluate the similarity between dreams and prompts.
+
+3. Summary Generation:
+   - Aggregates and summarizes the results of all tests, including metrics like novelty, 
+     memory size, and pruning effectiveness.
+
+4. Cleanup:
+   - Ensures proper cleanup of resources, including releasing GPU memory if applicable.
+
+The test results and logs are saved in the specified output directory, providing insights 
+into the SOVLSystem's performance and areas for improvement.
+"""
+
 # Assuming SOVLSystem is in the same directory or importable
 from sovl_system import SOVLSystem  # Adjust import based on your file structure
 
