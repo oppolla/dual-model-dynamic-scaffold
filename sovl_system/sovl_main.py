@@ -81,7 +81,7 @@ def calculate_confidence_score(logits, generated_ids):
 
 # Load training data
 try:
-    TRAIN_DATA = load_jsonl("sample_log.jsonl")
+    TRAIN_DATA = load_jsonl("sovl_seed.jsonl")
 except InsufficientDataError as e:
     print(e)
     TRAIN_DATA = []  # Fallback to empty list
@@ -90,10 +90,10 @@ except Exception as e:
     TRAIN_DATA = []  # Fallback to empty list
 
 if not TRAIN_DATA:
-    print("Error: No data loaded from sample_log.jsonl!")
+    print("Error: No data loaded from sovl_seed.jsonl!")
 
 # Load config and set global variables
-with open("config.json", "r") as f:
+with open("sovl_config.json", "r") as f:
     config = json.load(f)
 
 def get_config_value(config, key, default=None):
@@ -338,7 +338,7 @@ class CuriosityPressure:
         return self.value > threshold and random.random() < 0.3
 
 class ThreadSafeLogger:
-    def __init__(self, filename="log.jsonl"):
+    def __init__(self, filename="sovl_log.jsonl"):
         self.filename = filename
         self.lock = Lock()
 
@@ -392,9 +392,9 @@ class ThreadSafeLogger:
 
 class SOVLSystem:
     def __init__(self):
-        self.logger = ThreadSafeLogger("log.jsonl")  # Moved up for config loading
+        self.logger = ThreadSafeLogger("sovl_log.jsonl")  # Moved up for config loading
         try:
-            with open("config.json", "r", encoding="utf-8") as f:
+            with open("sovl_config.json", "r", encoding="utf-8") as f:
                 config = json.load(f)
                 self.quantization_mode = config.get("quantization_mode", QUANTIZATION_MODE)
                 self.enable_error_listening = get_config_value(config, "controls_config.enable_error_listening", ENABLE_ERROR_LISTENING)
@@ -476,7 +476,7 @@ class SOVLSystem:
         self.use_scaffold_memory = USE_SCAFFOLD_MEMORY
         self.use_token_map_memory = USE_TOKEN_MAP_MEMORY
         self.memory_decay_rate = MEMORY_DECAY_RATE
-        self.logger = ThreadSafeLogger("log.jsonl")
+        self.logger = ThreadSafeLogger("sovl_log.jsonl")
         self.history = ConversationHistory()
         self.last_trained = 0
         self.dynamic_cross_attn_mode = DYNAMIC_CROSS_ATTN_MODE
@@ -1933,7 +1933,7 @@ if __name__ == "__main__":
             last_input_time = time.time()
 
     except FileNotFoundError as e:
-        print(f"\nFile error: {e}. Check 'config.json' and 'sample_log.jsonl'.")
+        print(f"\nFile error: {e}. Check 'sovl_config.json' and 'sovl_seed.jsonl'.")
     except torch.cuda.OutOfMemoryError:
         print("\nOut of GPU memory! Try smaller BATCH_SIZE, MAX_SEQ_LENGTH, or INT8/INT4.")
     except Exception as e:
