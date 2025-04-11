@@ -14,7 +14,7 @@ import contextlib
 from collections import deque, defaultdict
 import uuid
 import os
-from threading import Lock
+from sovl_logger import Logger
 
 class InsufficientDataError(Exception):
     pass
@@ -337,62 +337,9 @@ class CuriosityPressure:
     def should_erupt(self, threshold):
         return self.value > threshold and random.random() < 0.3
 
-class ThreadSafeLogger:
-    def __init__(self, filename="sovl_log.jsonl"):
-        self.filename = filename
-        self.lock = Lock()
-
-    def write(self, data):
-        if "error" in data or "warning" in data:  # Identify errors or warnings
-            data["is_error_prompt"] = True  # Flag as system error prompt
-            data["conversation_id"] = data.get("conversation_id", str(uuid.uuid4()))  # Unique ID if not provided
-        try:
-            with self.lock:
-                with open(self.filename, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(data) + "\n")
-        except (IOError, TypeError, ValueError) as e:
-            print(f"Logging failed: {e}")
-            raise
-
-    def read(self):
-        data = []
-        try:
-            with self.lock:
-                with open(self.filename, "r", encoding="utf-8") as f:
-                    for line in f:
-                        data.append(json.loads(line.strip()))
-            return data
-        except FileNotFoundError:
-            return []
-        except Exception as e:
-            print(f"Log read failed: {e}")
-            raise
-
-    def read(self):
-        data = []
-        try:
-            with self.lock:
-                with open(self.filename, "r", encoding="utf-8") as f:
-                    for line in f:
-                        data.append(json.loads(line.strip()))
-            return data
-        except FileNotFoundError:
-            return []
-        except Exception as e:
-            print(f"Log read failed: {e}")
-            raise
-
-    def clear(self):
-        try:
-            with self.lock:
-                open(self.filename, "w").close()
-        except Exception as e:
-            print(f"Log clear failed: {e}")
-            raise
-
 class SOVLSystem:
     def __init__(self):
-        self.logger = ThreadSafeLogger("sovl_log.jsonl")  # Moved up for config loading
+        self.logger = Logger("sovl_logs.jsonl")
         try:
             with open("sovl_config.json", "r", encoding="utf-8") as f:
                 config = json.load(f)
@@ -468,15 +415,14 @@ class SOVLSystem:
         self.seen_prompts = set()
         self.best_valid_loss = float('inf')
         self.patience = 0
-        self.memory_lock = Lock()  # Thread safety for memory adjustments
-        self.mem_usage_history = deque(maxlen=10)  # Track last 10 memory ratios
-        self.dynamic_threshold_base = MEMORY_THRESHOLD  # Base threshold from config
+        self.memory_lock = Lock()  # Still needed for memory health
+        self.mem_usage_history = deque(maxlen=10)
+        self.dynamic_threshold_base = MEMORY_THRESHOLD
         self.max_patience = MAX_PATIENCE
         self.has_woken = HAS_WOKEN
         self.use_scaffold_memory = USE_SCAFFOLD_MEMORY
         self.use_token_map_memory = USE_TOKEN_MAP_MEMORY
         self.memory_decay_rate = MEMORY_DECAY_RATE
-        self.logger = ThreadSafeLogger("sovl_log.jsonl")
         self.history = ConversationHistory()
         self.last_trained = 0
         self.dynamic_cross_attn_mode = DYNAMIC_CROSS_ATTN_MODE
