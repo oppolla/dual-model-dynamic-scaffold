@@ -23,23 +23,12 @@ from sovl_scaffold import inject_cross_attention, CrossAttentionInjector
 from sovl_processor import LogitsProcessor
 from sovl_utils import (
     NumericalGuard,
-    safe_compare,
     safe_divide,
     memory_usage,
     log_memory_usage,
-    dynamic_batch_size,
     cosine_similarity_matrix,
-    normalize_scores,
-    weighted_sample,
-    decay_weights,
     float_lt,
-    float_gt,
-    float_eq,
     get_parameter_count,
-    set_seed,
-    tensor_size_bytes,
-    validate_layer_indices,
-    log_gradient_norms
 )
 
 class InsufficientDataError(Exception):
