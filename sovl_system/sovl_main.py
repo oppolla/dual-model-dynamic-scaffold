@@ -248,31 +248,27 @@ def _validate_config(self):
             if invalid_custom:
                 raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
         # Log successful validation
-        self.logger.record({
+        self.logger.write({
             "event": "config_validation",
             "status": "success",
             "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id,
             "config_snapshot": config_snapshot
         })
     except Exception as e:
-        self.error_logger.record({
+        self.error_logger.write({
             "error": f"Config validation failed: {str(e)}",
             "type": type(e).__name__,
             "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id if hasattr(self, 'history') else str(uuid.uuid4()),
             "stack_trace": traceback.format_exc(),
             "config_snapshot": config_snapshot,
             "validation_stage": "pre-init" if not hasattr(self, 'logger') else "runtime"
         })
         raise
 
-# Split training data
-random.seed(RANDOM_SEED)
-random.shuffle(TRAIN_DATA)
-split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
-TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
-print(f"Dataset split: {len(TRAIN_DATA)} train, {len(VALID_DATA)} validation")
-if not TRAIN_DATA or not VALID_DATA:
-    print("Warning: TRAIN_DATA or VALID_DATA empty. Training may fail.")
+    if not TRAIN_DATA or not VALID_DATA:
+        print("Warning: TRAIN_DATA or VALID_DATA empty. Training may fail.")
 
 def get_cross_attention_layers(model):
     total_layers = len(model.transformer.h) if hasattr(model, 'transformer') else len(model.layers)
@@ -438,7 +434,20 @@ class SOVLSystem:
             enable_dreaming=ENABLE_DREAMING,
             repetition_n=3,
             sigmoid_scale=SIGMOID_SCALE,
-            sigmoid_shift=SIGMOID_SHIFT
+            sigmoid_shift=SIGMOID_SHIFT,
+            curiosity_weight_ignorance=CURIOSITY_WEIGHT_IGNORANCE,
+            curiosity_weight_novelty=CURIOSITY_WEIGHT_NOVELTY,
+            curiosity_pressure_threshold=CURIOSITY_PRESSURE_THRESHOLD,
+            curiosity_pressure_drop=CURIOSITY_PRESSURE_DROP,
+            curiosity_novelty_threshold_spontaneous=CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS,
+            curiosity_novelty_threshold_response=CURIOSITY_NOVELTY_THRESHOLD_RESPONSE,
+            curiosity_silence_threshold=CURIOSITY_SILENCE_THRESHOLD,
+            curiosity_question_cooldown=CURIOSITY_QUESTION_COOLDOWN,
+            curiosity_queue_maxlen=CURIOSITY_QUEUE_MAXLEN,
+            curiosity_max_new_tokens=CURIOSITY_MAX_NEW_TOKENS,
+            curiosity_base_temperature=CURIOSITY_BASE_TEMPERATURE,
+            curiosity_temperament_influence=CURIOSITY_TEMPERAMENT_INFLUENCE,
+            curiosity_top_k=CURIOSITY_TOP_K
         )
         def loss_fn(logits, labels):
             mask = labels != -100
@@ -452,7 +461,7 @@ class SOVLSystem:
             config=training_config,
             device=DEVICE,
             loss_fn=loss_fn,
-            logger=self.logger.record,
+            logger=self.logger,
             memory_lock=Lock(),
             tokenizer=self.base_tokenizer,
             state=None  # Set after state initialization
@@ -460,10 +469,27 @@ class SOVLSystem:
         self.trainer.memory_check = self.check_memory_health
 
         # Register callbacks for curiosity
-        self.trainer.register_callback("on_training_complete", self.handle_training_complete)
-        self.trainer.register_callback("on_gestation_complete", self.handle_gestation_complete)
-        self.trainer.register_callback("on_dream_complete", self.handle_dream_complete)
-        self.trainer.register_callback("on_sleep_train_complete", self.handle_sleep_train_complete)
+        def log_curiosity_event(event_name: str, details: dict):
+            log_entry = {
+                "event": event_name,
+                "details": details,
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            }
+            self.logger.write(log_entry)
+        
+        self.trainer.register_callback("on_training_complete", lambda epoch, loss, exposure: log_curiosity_event(
+            "training_complete", {"epoch": epoch, "avg_loss": loss, "data_exposure": exposure}
+        ))
+        self.trainer.register_callback("on_gestation_complete", lambda batch_size, loss: log_curiosity_event(
+            "gestation_complete", {"batch_size": batch_size, "avg_loss": loss}
+        ))
+        self.trainer.register_callback("on_dream_complete", lambda prompt, novel, count: log_curiosity_event(
+            "dream_complete", {"dream_prompt": prompt, "is_novel": novel, "memory_count": count}
+        ))
+        self.trainer.register_callback("on_sleep_train_complete", lambda batch_size, exposure: log_curiosity_event(
+            "sleep_train_complete", {"batch_size": batch_size, "data_exposure": exposure}
+        ))
 
         def build_token_map(base_tokenizer, scaffold_tokenizer):
             token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
@@ -501,7 +527,7 @@ class SOVLSystem:
         self.is_sleeping = False
 
         # Initialize state from config
-        self.state = SOVLState(config)
+        self.state = SOVLState(self.config_manager)
         self.state.set_scaffold_unk_id(self.scaffold_tokenizer.unk_token_id)
         self.trainer.state = self.state  # Share state with trainer
        
@@ -529,6 +555,11 @@ class SOVLSystem:
             # Use the new memory_usage utility
             mem_stats = memory_usage(DEVICE)
             if not mem_stats:
+                self.logger.record({
+                    "warning": "Failed to retrieve memory stats",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id
+                })
                 return
 
             current_mem = mem_stats['allocated'] * (1024 ** 3)  # Convert back to bytes
@@ -548,7 +579,7 @@ class SOVLSystem:
                 max(
                     0.7,
                     self.dynamic_threshold_base * (1 + (model_size / total_mem) * 0.1 - avg_mem_usage * 0.2)
-                )  # Corrected: Added closing parenthesis here
+                )
             )
             lifecycle_stage = self.trainer.data_exposure / self.trainer.lora_capacity if self.trainer.lora_capacity > 0 else 0.0
 
@@ -584,7 +615,7 @@ class SOVLSystem:
                     self.set_quantization_mode("int8")
                     quantization_changed = True
 
-                self.logger.write({
+                self.logger.record({
                     "error": "memory_threshold_exceeded",
                     "details": {
                         "current_memory": current_mem,
@@ -612,7 +643,8 @@ class SOVLSystem:
                     BATCH_SIZE = self._original_batch_size
                     config_manager.update("training_config.batch_size", BATCH_SIZE)
                     print(f"Restored batch size to {BATCH_SIZE}")
-                    delattr(self, '_original_batch_size')
+                    if hasattr(self, '_original_batch_size'):
+                        delattr(self, '_original_batch_size')
 
     def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
         if not ENABLE_CURIOSITY:
@@ -640,96 +672,19 @@ class SOVLSystem:
     
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
         """Handle training completion callback."""
-        if not ENABLE_CURIOSITY or not self.curiosity:
-            return
-        context = f"Training completed at epoch {epoch} with loss {avg_loss:.4f}"
-        q = self.generate_curiosity_question(context, spontaneous=False)
-        if q:
-            score = self.curiosity.calculate_metric(q)
-            self.state.unanswered_q.append((q, score))
-            self.logger.record({
-                "prompt": q,
-                "response": "",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "confidence_score": 0.0,
-                "is_system_question": True
-            })
-            self.update_metrics(q, score, spontaneous=False)
-            self.pressure.value -= CURIOSITY_PRESSURE_DROP
-            print(f"Pressure after training question: {self.pressure.value:.2f}")
-            self.last_question_time = time.time()
-            print(f"Curiosity question after training: {q}")
+        pass
 
     def handle_gestation_complete(self, batch_size: int, avg_loss: float):
         """Handle gestation completion callback."""
-        if not ENABLE_CURIOSITY or not self.curiosity:
-            return
-        context = f"Gestation processed {batch_size} entries with loss {avg_loss:.4f}"
-        q = self.generate_curiosity_question(context, spontaneous=False)
-        if q:
-            score = self.curiosity.calculate_metric(q)
-            self.state.unanswered_q.append((q, score))
-            self.logger.record({
-                "prompt": q,
-                "response": "",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "confidence_score": 0.0,
-                "is_system_question": True
-            })
-            self.update_metrics(q, score, spontaneous=False)
-            self.pressure.value -= CURIOSITY_PRESSURE_DROP
-            print(f"Pressure after gestation question: {self.pressure.value:.2f}")
-            self.last_question_time = time.time()
-            print(f"Curiosity question after gestation: {q}")
+        pass
 
     def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
         """Handle dream completion callback."""
-        if not ENABLE_CURIOSITY or not self.curiosity:
-            return
-        context = f"Dreamed about '{dream_prompt[:30]}...' (novel: {is_novel}, memories: {memory_count})"
-        q = self.generate_curiosity_question(context, spontaneous=False)
-        if q:
-            score = self.curiosity.calculate_metric(q)
-            self.state.unanswered_q.append((q, score))
-            self.logger.record({
-                "prompt": q,
-                "response": "",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "confidence_score": 0.0,
-                "is_system_question": True
-            })
-            self.update_metrics(q, score, spontaneous=False)
-            self.pressure.value -= CURIOSITY_PRESSURE_DROP
-            print(f"Pressure after dream question: {self.pressure.value:.2f}")
-            self.last_question_time = time.time()
-            print(f"Curiosity question after dreaming: {q}")
+        pass
 
     def handle_sleep_train_complete(self, batch_size: int, data_exposure: float):
         """Handle sleep training completion callback."""
-        if not ENABLE_CURIOSITY or not self.curiosity:
-            return
-        context = f"Sleep training processed {batch_size} entries, exposure {data_exposure}"
-        q = self.generate_curiosity_question(context, spontaneous=False)
-        if q:
-            score = self.curiosity.calculate_metric(q)
-            self.state.unanswered_q.append((q, score))
-            self.logger.record({
-                "prompt": q,
-                "response": "",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "confidence_score": 0.0,
-                "is_system_question": True
-            })
-            self.update_metrics(q, score, spontaneous=False)
-            self.pressure.value -= CURIOSITY_PRESSURE_DROP
-            print(f"Pressure after sleep training question: {self.pressure.value:.2f}")
-            self._update_temperament()
-            self.last_question_time = time.time()
-            print(f"Curiosity question after sleep training: {q}")
+        pass
     
     def update_metrics(self, question, score, spontaneous=False, answered=False):
         self.metrics["curiosity_eruptions"] += 1
@@ -1714,6 +1669,7 @@ class SOVLSystem:
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         """Generate a response for the given prompt."""
+        generated_ids = []
         try:
             generation_params = {
                 "prompt_length": len(prompt),
@@ -1740,7 +1696,7 @@ class SOVLSystem:
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
 
             temp = adjust_temperature(
-                BASE_TEMPERATURE,
+                BASE_TEMPERAMENT,
                 self.state.temperament_score,
                 TEMP_MOOD_INFLUENCE
             )
@@ -1770,7 +1726,6 @@ class SOVLSystem:
 
             # Prepare scaffold and dream memory context
             self._clear_scaffold_cache()
-            generated_ids = []
             chunk_size = 512
             memory_tensors = None
             dream_memory_info = {"used": False, "tensor_count": 0, "shapes": []}
@@ -1779,7 +1734,6 @@ class SOVLSystem:
                     dream_tensors, dream_weights = zip(*self.state.dream_memory)
                     dream_memory_info["tensor_count"] = len(dream_tensors)
                     dream_memory_info["shapes"] = [list(t.shape) for t in dream_tensors]
-                    # Validate dream tensors
                     for tensor in dream_tensors:
                         if tensor.shape[-1] != self.state.hidden_size:
                             raise ValueError(f"Dream tensor shape {tensor.shape} mismatches hidden_size {self.state.hidden_size}")
@@ -1882,8 +1836,6 @@ class SOVLSystem:
             if ENABLE_GESTATION and self._should_gestate():
                 self._gestate()
             print(f"Generation took {time.time() - start_time:.2f} seconds.")
-            if DEVICE.type == 'cuda':
-                torch.cuda.empty_cache()
             return response
 
         except torch.cuda.OutOfMemoryError as oom:
@@ -1899,7 +1851,7 @@ class SOVLSystem:
                 } if torch.cuda.is_available() else None,
                 "generation_params": generation_params
             }
-            self.error_logger.write(error_details)
+            self.error_logger.record(error_details)
             torch.cuda.empty_cache()
 
             if self.enable_error_listening:
@@ -1923,7 +1875,7 @@ class SOVLSystem:
                 "stack_trace": traceback.format_exc(),
                 "generation_params": generation_params
             }
-            self.error_logger.write(error_details)
+            self.error_logger.record(error_details)
 
             if self.enable_error_listening:
                 try:
@@ -1936,6 +1888,15 @@ class SOVLSystem:
                         "stack_trace": traceback.format_exc()
                     })
             return "An error occurred during generation"
+
+        finally:
+            # Cleanup temporary data
+            if generated_ids:
+                del generated_ids
+            if 'outputs' in locals():
+                del outputs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     @torch.no_grad()
     def validate_epoch(self, valid_data):
