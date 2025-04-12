@@ -44,6 +44,7 @@ class TrainingConfig:
     exposure_gain_default: int = 2
     dream_memory_weight: float = 0.1
     enable_dreaming: bool = True
+    repetition_n: int = 3  # For repetition checking
 
     def __post_init__(self):
         if self.metrics_to_track is None:
@@ -53,6 +54,7 @@ class TrainingConfig:
         assert self.max_grad_norm > 0, "Max gradient norm must be positive"
         assert self.scheduler_type in ["linear", "cosine", "constant"], "Invalid scheduler type"
         assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "Invalid lifecycle curve"
+        assert self.repetition_n >= 2, "Repetition check length must be at least 2"
 
 def collate_batch(batch: List[dict], pad_token_id: int, max_seq_length: int, tokenizer) -> dict:
     """Collate batch of prompt-completion pairs into tensors."""
@@ -116,12 +118,16 @@ class SOVLTrainer:
         self.memory_check = None
         self.data_exposure = 0
         self.lora_capacity = sum(p.numel() for p in model.parameters() if p.requires_grad) * config.lifecycle_capacity_factor
-        self.scaffold_context = None  # Temporary storage for scaffold context
+        self.scaffold_context = None
         self.is_gestating = False
         self.gestation_progress = 0
         self.gestation_batch = []
         self.gestation_total_loss = 0.0
         self.gestation_steps = 0
+        self.sleep_progress = 0
+        self.sleep_batch = []
+        self.sleep_total_loss = 0.0
+        self.sleep_steps = 0
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -154,7 +160,7 @@ class SOVLTrainer:
 
     def get_life_curve_weight(self):
         """Calculate lifecycle weight based on data exposure."""
-        x = self.data_exposure / self.lora_capacity
+        x = self.data_exposure / self.lora_capacity if self.lora_capacity > 0 else 0
         if self.config.lifecycle_curve == "sigmoid_linear":
             weight = 1 - math.exp(-2.0 * x)
         else:  # exponential
@@ -172,6 +178,24 @@ class SOVLTrainer:
             if self.state and prompt not in self.state.seen_prompts:
                 self.state.add_seen_prompt(prompt)
                 self.data_exposure += exposure_gain
+
+    def has_repetition(self, output_ids: torch.Tensor, special_ids: set) -> bool:
+        """Check for repeated sequences in output_ids."""
+        ids = output_ids.tolist()
+        filtered = [i for i in ids if i not in special_ids]
+        n = self.config.repetition_n
+        for i in range(len(filtered) - 2 * n):
+            if filtered[i:i + n] == filtered[i + n:i + 2 * n]:
+                return True
+        return False
+
+    def get_loss_weight(self, batch: dict, log_entries: List[dict]) -> float:
+        """Calculate loss weight based on log entries."""
+        prompts = batch['prompt']
+        for prompt in prompts:
+            if any(e["prompt"] == prompt and e.get("is_system_question", False) and e["response"] for e in log_entries):
+                return 1.2
+        return 1.0
 
     def train_step(
         self,
@@ -423,7 +447,7 @@ class SOVLTrainer:
         self.gestation_steps = 0
 
     def _should_dream(self):
-        """Determine if dreaming should occur (placeholder for integration)."""
+        """Determine if dreaming should occur."""
         if not self.state:
             return False
         swing_dream = len(self.state.confidence_history) >= 5 and torch.var(torch.tensor(list(self.state.confidence_history))).item() > 0.1
@@ -435,7 +459,7 @@ class SOVLTrainer:
         return swing_dream or lifecycle_dream or (True and history_dream)
 
     def _dream(self):
-        """Placeholder for dream integration (logs intent to dream)."""
+        """Placeholder for dream integration."""
         self.logger({
             "event": "dream_triggered",
             "timestamp": time.time(),
@@ -472,7 +496,37 @@ class SOVLTrainer:
             len(entry["prompt"]) + len(entry["response"])
             for entry in batch
         )
+        self._reset_sleep_state()
         print(f"Sleep Training Loss: Logged via trainer")
+
+    def _reset_sleep_state(self):
+        """Reset sleep-related state."""
+        self.sleep_progress = 0
+        self.sleep_batch = []
+        self.sleep_total_loss = 0.0
+        self.sleep_steps = 0
+
+    def cleanup(self):
+        """Clean up trainer resources."""
+        try:
+            self._reset_gestation_state()
+            self._reset_sleep_state()
+            self.optimizer.zero_grad(set_to_none=True)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self.logger({
+                "event": "trainer_cleanup",
+                "timestamp": time.time(),
+                "details": "Trainer resources cleared"
+            })
+            print("Trainer cleanup completed")
+        except Exception as e:
+            self.logger({
+                "event": "trainer_cleanup_failed",
+                "error": str(e),
+                "timestamp": time.time()
+            })
+            print(f"Trainer cleanup failed: {e}")
 
     def train(
         self,
