@@ -199,12 +199,14 @@ class SOVLTrainer:
 
         # Register curiosity callbacks
         def log_curiosity_question(question: str, score: float):
-            self.logger({
+            log_entry = {
                 "event": "curiosity_question_generated",
                 "question": question,
                 "curiosity_score": score,
-                "timestamp": time.time()
-            })
+                "timestamp": time.time(),
+                "conversation_id": self.state.history.conversation_id if self.state and hasattr(self.state, "history") else str(uuid.uuid4())
+            }
+            self.logger.write(log_entry)
         self.curiosity_manager.register_callback("question_generated", log_curiosity_question)
 
         # Callback system for trainer events
@@ -580,13 +582,14 @@ class SOVLTrainer:
             trend = torch.tensor(list(self.state.temperament_history)).mean().item() - self.state.temperament_history[0]
             history_dream = abs(trend) > 0.3
         should_dream = swing_dream or lifecycle_dream or history_dream
-        self.logger({
+        self.logger.write({
             "event": "dream_check",
             "swing_dream": swing_dream,
             "lifecycle_dream": lifecycle_dream,
             "history_dream": history_dream,
             "should_dream": should_dream,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "conversation_id": self.state.history.conversation_id if self.state and hasattr(self.state, "history") else str(uuid.uuid4())
         })
         return should_dream
 
@@ -596,10 +599,11 @@ class SOVLTrainer:
         log_entries = self.logger.read() if hasattr(self.logger, "read") else []
         if not log_entries:
             print("No memories to dream on.")
-            self.logger({
+            self.logger.write({
                 "event": "dream_failed",
                 "reason": "No log entries",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "conversation_id": self.state.history.conversation_id if self.state and hasattr(self.state, "history") else str(uuid.uuid4())
             })
             return
 
@@ -712,7 +716,7 @@ class SOVLTrainer:
             self.state.append_dream_memory(dream_layer, min(weight, 1.5))
             print(f"Added dream memory (weight: {min(weight, 1.5):.2f}), Total memories: {len(self.state.dream_memory)}")
 
-        # Generate curiosity-driven question
+        # Generate curiosity-driven question (logged via callback)
         question = self.curiosity_manager.generate_question(
             state=self.state,
             tokenizer=self.tokenizer,
@@ -722,14 +726,14 @@ class SOVLTrainer:
         if question:
             print(f"Generated curiosity-driven question: {question}")
 
-        self.logger({
+        self.logger.write({
             "event": "dream_completed",
             "prompt": dream_prompt,
             "novelty": is_novel,
             "curiosity_score": curiosity_score,
             "memory_count": len(self.state.dream_memory),
-            "question": question,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "conversation_id": self.state.history.conversation_id if self.state and hasattr(self.state, "history") else str(uuid.uuid4())
         })
         print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, curiosity score: {curiosity_score:.2f}, dream count: {len(self.state.dream_memory)}")
         print("--- Dream Concluded ---")
@@ -1368,12 +1372,8 @@ class SOVLTrainer:
             )
             if question:
                 print(f"Generated curiosity-driven question: {question}")
-                self.logger({
-                    "event": "curiosity_question",
-                    "question": question,
-                    "prompt": last_prompt,
-                    "timestamp": time.time()
-                })
+                # Logging handled by curiosity_manager callback
+                # No additional logging here to avoid redundancy
 
         self._reset_gestation_state()
         return False
@@ -1567,12 +1567,7 @@ class SOVLTrainer:
             )
             if question:
                 print(f"Generated curiosity-driven question: {question}")
-                self.logger({
-                    "event": "curiosity_question",
-                    "question": question,
-                    "prompt": last_prompt,
-                    "timestamp": time.time()
-                })
+                # Logging handled by curiosity_manager callback
 
         self._reset_sleep_state()
         print("Sleep Training Complete")
