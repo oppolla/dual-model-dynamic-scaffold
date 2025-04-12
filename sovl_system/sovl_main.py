@@ -14,11 +14,12 @@ import uuid
 import os
 from threading import Lock
 from sovl_logger import Logger
-from sovl_io import load_config, get_config_value, load_jsonl
+from sovl_io import load_jsonl, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
 from sovl_config import ConfigManager
 from sovl_scaffold import inject_cross_attention, CrossAttentionInjector
+from sovl_processor import LogitsProcessor
 
 class InsufficientDataError(Exception):
     pass
@@ -34,176 +35,178 @@ def calculate_confidence_score(logits, generated_ids) -> float:
         print(f"Confidence score error: {str(e)} - Using default 0.5")
         return 0.5
 
+# Initialize logger for data loading
+logger = Logger("sovl_logs.jsonl")
+
 # Load training data
 try:
-    TRAIN_DATA = load_jsonl("sovl_seed.jsonl")
+    TRAIN_DATA = load_jsonl("sovl_seed.jsonl", min_entries=0, logger=logger.write)
 except InsufficientDataError as e:
-    print(e)
-    TRAIN_DATA = []  # Fallback to empty list
+    logger.write({"error": str(e), "timestamp": time.time(), "conversation_id": "init"})
+    print(f"Data loading error: {e}")
+    TRAIN_DATA = []
 except Exception as e:
+    logger.write({"error": f"Unexpected error during data loading: {e}", "timestamp": time.time(), "conversation_id": "init"})
     print(f"Unexpected error during data loading: {e}")
-    TRAIN_DATA = []  # Fallback to empty list
+    TRAIN_DATA = []
 
 if not TRAIN_DATA:
-    print("Error: No data loaded from sovl_seed.jsonl!")
+    logger.write({"warning": "No data loaded from sovl_seed.jsonl", "timestamp": time.time(), "conversation_id": "init"})
+    print("Warning: No data loaded from sovl_seed.jsonl!")
 
-# Load config and set global variables
-with open("sovl_config.json", "r") as f:
-    config = json.load(f)
+# Split training data
+if TRAIN_DATA:
+    random.seed(RANDOM_SEED)
+    random.shuffle(TRAIN_DATA)
+    split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
+    TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
+else:
+    VALID_DATA = []
+if TRAIN_DATA:
+    random.seed(RANDOM_SEED)
+    random.shuffle(TRAIN_DATA)
+    split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
+    TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
+else:
+    VALID_DATA = []
 
-def get_config_value(config, key, default=None):
-    if isinstance(config, dict):
-        keys = key.split('.')
-        value = config
-        for k in keys:
-            value = value.get(k, {})
-            if not isinstance(value, dict) and k != keys[-1]:
-                return default
-        if isinstance(value, dict) and not value:
-            print(f"Warning: '{key}' missing or empty, using {default}")
-            return default
-        return value if value != {} else default
-    print(f"Warning: '{key}' not found, using {default}")
-    return default
+# Initialize ConfigManager
+config_manager = ConfigManager("sovl_config.json")
 
 # Core Model Config
-core_config = config.get("core_config", {})
-BASE_MODEL_NAME = get_config_value(core_config, "base_model_name", "gpt2")
-SCAFFOLD_MODEL_NAME = get_config_value(core_config, "scaffold_model_name", "gpt2")
-CROSS_ATTN_LAYERS = get_config_value(core_config, "cross_attn_layers", [0, 1, 2])
-USE_DYNAMIC_LAYERS = get_config_value(core_config, "use_dynamic_layers", False)
-LAYER_SELECTION_MODE = get_config_value(core_config, "layer_selection_mode", "balanced")
-CUSTOM_LAYERS = get_config_value(core_config, "custom_layers", [])
-VALID_SPLIT_RATIO = get_config_value(core_config, "valid_split_ratio", 0.2)
-RANDOM_SEED = get_config_value(core_config, "random_seed", 42)
-QUANTIZATION_MODE = get_config_value(core_config, "quantization", "fp16")
+BASE_MODEL_NAME = config_manager.get("core_config.base_model_name", "gpt2", expected_type=str)
+SCAFFOLD_MODEL_NAME = config_manager.get("core_config.scaffold_model_name", "gpt2", expected_type=str)
+CROSS_ATTN_LAYERS = config_manager.get("core_config.cross_attn_layers", [0, 1, 2], expected_type=list)
+USE_DYNAMIC_LAYERS = config_manager.get("core_config.use_dynamic_layers", False, expected_type=bool)
+LAYER_SELECTION_MODE = config_manager.get("core_config.layer_selection_mode", "balanced", expected_type=str)
+CUSTOM_LAYERS = config_manager.get("core_config.custom_layers", [], expected_type=list)
+VALID_SPLIT_RATIO = config_manager.get("core_config.valid_split_ratio", 0.2, expected_type=float)
+RANDOM_SEED = config_manager.get("core_config.random_seed", 42, expected_type=int)
+QUANTIZATION_MODE = config_manager.get("core_config.quantization", "fp16", expected_type=str)
 if QUANTIZATION_MODE not in ["fp16", "int8", "int4"]:
+    logger.write({"warning": f"Invalid quantization '{QUANTIZATION_MODE}'. Defaulting to 'fp16'.", "timestamp": time.time(), "conversation_id": "init"})
     print(f"Warning: Invalid quantization '{QUANTIZATION_MODE}'. Defaulting to 'fp16'.")
     QUANTIZATION_MODE = "fp16"
 
 # LoRA Config
-lora_config = get_config_value(config, "lora_config", {})
-LORA_RANK = get_config_value(lora_config, "lora_rank", 8)
-LORA_ALPHA = get_config_value(lora_config, "lora_alpha", 16)
-LORA_DROPOUT = get_config_value(lora_config, "lora_dropout", 0.1)
-LORA_TARGET_MODULES = get_config_value(lora_config, "lora_target_modules", ["q_proj", "v_proj"])
+LORA_RANK = config_manager.get("lora_config.lora_rank", 8, expected_type=int)
+LORA_ALPHA = config_manager.get("lora_config.lora_alpha", 16, expected_type=int)
+LORA_DROPOUT = config_manager.get("lora_config.lora_dropout", 0.1, expected_type=float)
+LORA_TARGET_MODULES = config_manager.get("lora_config.lora_target_modules", ["q_proj", "v_proj"], expected_type=list)
 
 # Training Config
-training_config = get_config_value(config, "training_config", {})
-LEARNING_RATE = get_config_value(training_config, "learning_rate", 2e-5)
-TRAIN_EPOCHS = get_config_value(training_config, "train_epochs", 3)
-BATCH_SIZE = get_config_value(training_config, "batch_size", 2)
-MAX_SEQ_LENGTH = get_config_value(training_config, "max_seq_length", 512)
-SIGMOID_SCALE = get_config_value(training_config, "sigmoid_scale", 0.5)
-SIGMOID_SHIFT = get_config_value(training_config, "sigmoid_shift", 5.0)
+LEARNING_RATE = config_manager.get("training_config.learning_rate", 2e-5, expected_type=float)
+TRAIN_EPOCHS = config_manager.get("training_config.train_epochs", 3, expected_type=int)
+BATCH_SIZE = config_manager.get("training_config.batch_size", 2, expected_type=int)
+MAX_SEQ_LENGTH = config_manager.get("training_config.max_seq_length", 512, expected_type=float)
+SIGMOID_SCALE = config_manager.get("training_config.sigmoid_scale", 0.5, expected_type=float)
+SIGMOID_SHIFT = config_manager.get("training_config.sigmoid_shift", 5.0, expected_type=float)
 
 # Exposed Controls
-controls_config = get_config_value(config, "controls_config", {})
-SLEEP_CONF_THRESHOLD = get_config_value(controls_config, "sleep_conf_threshold", 0.7)
-SLEEP_TIME_FACTOR = get_config_value(controls_config, "sleep_time_factor", 1.0)
-SLEEP_LOG_MIN = get_config_value(controls_config, "sleep_log_min", 10)
-DREAM_SWING_VAR = get_config_value(controls_config, "dream_swing_var", 0.1)
-DREAM_LIFECYCLE_DELTA = get_config_value(controls_config, "dream_lifecycle_delta", 0.1)
-DREAM_TEMPERAMENT_ON = get_config_value(controls_config, "dream_temperament_on", True)
-DREAM_NOISE_SCALE = get_config_value(controls_config, "dream_noise_scale", 0.05)
-TEMP_EAGER_THRESHOLD = get_config_value(controls_config, "temp_eager_threshold", 0.8)
-TEMP_SLUGGISH_THRESHOLD = get_config_value(controls_config, "temp_sluggish_threshold", 0.6)
-MEMORY_THRESHOLD = get_config_value(controls_config, "memory_threshold", 0.85)
+SLEEP_CONF_THRESHOLD = config_manager.get("controls_config.sleep_conf_threshold", 0.7, expected_type=float)
+SLEEP_TIME_FACTOR = config_manager.get("controls_config.sleep_time_factor", 1.0, expected_type=float)
+SLEEP_LOG_MIN = config_manager.get("controls_config.sleep_log_min", 10, expected_type=int)
+DREAM_SWING_VAR = config_manager.get("controls_config.dream_swing_var", 0.1, expected_type=float)
+DREAM_LIFECYCLE_DELTA = config_manager.get("controls_config.dream_lifecycle_delta", 0.1, expected_type=float)
+DREAM_TEMPERAMENT_ON = config_manager.get("controls_config.dream_temperament_on", True, expected_type=bool)
+DREAM_NOISE_SCALE = config_manager.get("controls_config.dream_noise_scale", 0.05, expected_type=float)
+TEMP_EAGER_THRESHOLD = config_manager.get("controls_config.temp_eager_threshold", 0.8, expected_type=float)
+TEMP_SLUGGISH_THRESHOLD = config_manager.get("controls_config.temp_sluggish_threshold", 0.6, expected_type=float)
+MEMORY_THRESHOLD = config_manager.get("controls_config.memory_threshold", 0.85, expected_type=float)
 if not isinstance(MEMORY_THRESHOLD, (int, float)) or MEMORY_THRESHOLD <= 0 or MEMORY_THRESHOLD > 1:
-    MEMORY_THRESHOLD = 0.85  # Reset to default if invalid
-TEMP_MOOD_INFLUENCE = get_config_value(controls_config, "temp_mood_influence", 0.0)
-SCAFFOLD_WEIGHT_CAP = get_config_value(controls_config, "scaffold_weight_cap", 1.0)
-BASE_TEMPERATURE = get_config_value(controls_config, "base_temperature", 0.7)
-SAVE_PATH_PREFIX = get_config_value(controls_config, "save_path_prefix", "state")
-DREAM_MEMORY_WEIGHT = get_config_value(controls_config, "dream_memory_weight", 0.1)
-DREAM_MEMORY_MAXLEN = get_config_value(controls_config, "dream_memory_maxlen", 10)
-DREAM_PROMPT_WEIGHT = get_config_value(controls_config, "dream_prompt_weight", 0.5)
-DREAM_NOVELTY_BOOST = get_config_value(controls_config, "dream_novelty_boost", 0.03)
-TEMP_CURIOSITY_BOOST = get_config_value(controls_config, "temp_curiosity_boost", 0.5)
-TEMP_RESTLESS_DROP = get_config_value(controls_config, "temp_restless_drop", 0.1)
-TEMP_MELANCHOLY_NOISE = get_config_value(controls_config, "temp_melancholy_noise", 0.02)
-CONF_FEEDBACK_STRENGTH = get_config_value(controls_config, "conf_feedback_strength", 0.5)
-TEMP_SMOOTHING_FACTOR = get_config_value(controls_config, "temp_smoothing_factor", 0.0)
-LIFECYCLE_CAPACITY_FACTOR = get_config_value(training_config, "lifecycle_capacity_factor", 0.01)
-LIFECYCLE_CURVE = get_config_value(training_config, "lifecycle_curve", "sigmoid_linear")
-DREAM_MEMORY_DECAY = get_config_value(controls_config, "dream_memory_decay", 0.95)
-DREAM_PRUNE_THRESHOLD = get_config_value(controls_config, "dream_prune_threshold", 0.1)
-USE_SCAFFOLD_MEMORY = get_config_value(controls_config, "use_scaffold_memory", True)
-USE_TOKEN_MAP_MEMORY = get_config_value(controls_config, "use_token_map_memory", True)
-DYNAMIC_CROSS_ATTN_MODE = get_config_value(controls_config, "dynamic_cross_attn_mode", None)
-DRY_RUN = get_config_value(training_config, "dry_run", False)
-dry_run_config = get_config_value(training_config, "dry_run_params", {})
-DRY_RUN_MAX_SAMPLES = get_config_value(dry_run_config, "max_samples", 2)
-DRY_RUN_MAX_LENGTH = get_config_value(dry_run_config, "max_length", 128)
-DRY_RUN_VALIDATE_ARCH = get_config_value(dry_run_config, "validate_architecture", True)
-DRY_RUN_SKIP_TRAINING = get_config_value(dry_run_config, "skip_training", True)
-MEMORY_DECAY_RATE = get_config_value(controls_config, "memory_decay_rate", 0.95)
-HAS_WOKEN = get_config_value(controls_config, "has_woken", False)
-IS_SLEEPING = get_config_value(controls_config, "is_sleeping", False)
-ACCUMULATION_STEPS = get_config_value(training_config, "accumulation_steps", 4)
-EXPOSURE_GAIN_EAGER = get_config_value(training_config, "exposure_gain_eager", 3)
-EXPOSURE_GAIN_DEFAULT = get_config_value(training_config, "exposure_gain_default", 2)
-MAX_PATIENCE = get_config_value(training_config, "max_patience", 2)
-CONFIDENCE_HISTORY_MAXLEN = get_config_value(controls_config, "confidence_history_maxlen", 5)
-TEMPERAMENT_HISTORY_MAXLEN = get_config_value(controls_config, "temperament_history_maxlen", 5)
-ENABLE_DREAMING = get_config_value(controls_config, "enable_dreaming", True)
-ENABLE_TEMPERAMENT = get_config_value(controls_config, "enable_temperament", True)
-ENABLE_CONFIDENCE_TRACKING = get_config_value(controls_config, "enable_confidence_tracking", True)
-ENABLE_GESTATION = get_config_value(controls_config, "enable_gestation", True)
-ENABLE_SLEEP_TRAINING = get_config_value(controls_config, "enable_sleep_training", True)
-ENABLE_CROSS_ATTENTION = get_config_value(controls_config, "enable_cross_attention", True)
-ENABLE_DYNAMIC_CROSS_ATTENTION = get_config_value(controls_config, "enable_dynamic_cross_attention", True)
-ENABLE_LORA_ADAPTERS = get_config_value(controls_config, "enable_lora_adapters", True)
-ENABLE_REPETITION_CHECK = get_config_value(controls_config, "enable_repetition_check", True)
-ENABLE_PROMPT_DRIVEN_DREAMS = get_config_value(controls_config, "enable_prompt_driven_dreams", True)
-ENABLE_LIFECYCLE_WEIGHTING = get_config_value(controls_config, "enable_lifecycle_weighting", True)
-ENABLE_ERROR_LISTENING = get_config_value(controls_config, "enable_error_listening", True)
+    logger.write({"warning": f"Invalid MEMORY_THRESHOLD '{MEMORY_THRESHOLD}'. Defaulting to 0.85.", "timestamp": time.time(), "conversation_id": "init"})
+    MEMORY_THRESHOLD = 0.85
+TEMP_MOOD_INFLUENCE = config_manager.get("controls_config.temp_mood_influence", 0.0, expected_type=float)
+SCAFFOLD_WEIGHT_CAP = config_manager.get("controls_config.scaffold_weight_cap", 1.0, expected_type=float)
+BASE_TEMPERATURE = config_manager.get("controls_config.base_temperature", 0.7, expected_type=float)
+SAVE_PATH_PREFIX = config_manager.get("controls_config.save_path_prefix", "state", expected_type=str)
+DREAM_MEMORY_WEIGHT = config_manager.get("controls_config.dream_memory_weight", 0.1, expected_type=float)
+DREAM_MEMORY_MAXLEN = config_manager.get("controls_config.dream_memory_maxlen", 10, expected_type=int)
+DREAM_PROMPT_WEIGHT = config_manager.get("controls_config.dream_prompt_weight", 0.5, expected_type=float)
+DREAM_NOVELTY_BOOST = config_manager.get("controls_config.dream_novelty_boost", 0.03, expected_type=float)
+TEMP_CURIOSITY_BOOST = config_manager.get("controls_config.temp_curiosity_boost", 0.5, expected_type=float)
+TEMP_RESTLESS_DROP = config_manager.get("controls_config.temp_restless_drop", 0.1, expected_type=float)
+TEMP_MELANCHOLY_NOISE = config_manager.get("controls_config.temp_melancholy_noise", 0.02, expected_type=float)
+CONF_FEEDBACK_STRENGTH = config_manager.get("controls_config.conf_feedback_strength", 0.5, expected_type=float)
+TEMP_SMOOTHING_FACTOR = config_manager.get("controls_config.temp_smoothing_factor", 0.0, expected_type=float)
+LIFECYCLE_CAPACITY_FACTOR = config_manager.get("training_config.lifecycle_capacity_factor", 0.01, expected_type=float)
+LIFECYCLE_CURVE = config_manager.get("training_config.lifecycle_curve", "sigmoid_linear", expected_type=str)
+DREAM_MEMORY_DECAY = config_manager.get("controls_config.dream_memory_decay", 0.95, expected_type=float)
+DREAM_PRUNE_THRESHOLD = config_manager.get("controls_config.dream_prune_threshold", 0.1, expected_type=float)
+USE_SCAFFOLD_MEMORY = config_manager.get("controls_config.use_scaffold_memory", True, expected_type=bool)
+USE_TOKEN_MAP_MEMORY = config_manager.get("controls_config.use_token_map_memory", True, expected_type=bool)
+DYNAMIC_CROSS_ATTN_MODE = config_manager.get("controls_config.dynamic_cross_attn_mode", None)
+DRY_RUN = config_manager.get("training_config.dry_run", False, expected_type=bool)
+DRY_RUN_MAX_SAMPLES = config_manager.get("training_config.dry_run_params.max_samples", 2, expected_type=int)
+DRY_RUN_MAX_LENGTH = config_manager.get("training_config.dry_run_params.max_length", 128, expected_type=int)
+DRY_RUN_VALIDATE_ARCH = config_manager.get("training_config.dry_run_params.validate_architecture", True, expected_type=bool)
+DRY_RUN_SKIP_TRAINING = config_manager.get("training_config.dry_run_params.skip_training", True, expected_type=bool)
+MEMORY_DECAY_RATE = config_manager.get("controls_config.memory_decay_rate", 0.95, expected_type=float)
+HAS_WOKEN = config_manager.get("controls_config.has_woken", False, expected_type=bool)
+IS_SLEEPING = config_manager.get("controls_config.is_sleeping", False, expected_type=bool)
+ACCUMULATION_STEPS = config_manager.get("training_config.accumulation_steps", 4, expected_type=int)
+EXPOSURE_GAIN_EAGER = config_manager.get("training_config.exposure_gain_eager", 3, expected_type=int)
+EXPOSURE_GAIN_DEFAULT = config_manager.get("training_config.exposure_gain_default", 2, expected_type=int)
+MAX_PATIENCE = config_manager.get("training_config.max_patience", 2, expected_type=int)
+CONFIDENCE_HISTORY_MAXLEN = config_manager.get("controls_config.confidence_history_maxlen", 5, expected_type=int)
+TEMPERAMENT_HISTORY_MAXLEN = config_manager.get("controls_config.temperament_history_maxlen", 5, expected_type=int)
+ENABLE_DREAMING = config_manager.get("controls_config.enable_dreaming", True, expected_type=bool)
+ENABLE_TEMPERAMENT = config_manager.get("controls_config.enable_temperament", True, expected_type=bool)
+ENABLE_CONFIDENCE_TRACKING = config_manager.get("controls_config.enable_confidence_tracking", True, expected_type=bool)
+ENABLE_GESTATION = config_manager.get("controls_config.enable_gestation", True, expected_type=bool)
+ENABLE_SLEEP_TRAINING = config_manager.get("controls_config.enable_sleep_training", True, expected_type=bool)
+ENABLE_CROSS_ATTENTION = config_manager.get("controls_config.enable_cross_attention", True, expected_type=bool)
+ENABLE_DYNAMIC_CROSS_ATTENTION = config_manager.get("controls_config.enable_dynamic_cross_attention", True, expected_type=bool)
+ENABLE_LORA_ADAPTERS = config_manager.get("controls_config.enable_lora_adapters", True, expected_type=bool)
+ENABLE_REPETITION_CHECK = config_manager.get("controls_config.enable_repetition_check", True, expected_type=bool)
+ENABLE_PROMPT_DRIVEN_DREAMS = config_manager.get("controls_config.enable_prompt_driven_dreams", True, expected_type=bool)
+ENABLE_LIFECYCLE_WEIGHTING = config_manager.get("controls_config.enable_lifecycle_weighting", True, expected_type=bool)
+ENABLE_ERROR_LISTENING = config_manager.get("controls_config.enable_error_listening", True, expected_type=bool)
 # TCQS Controls
-ENABLE_CURIOSITY = get_config_value(controls_config, "enable_curiosity", True)
-CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = get_config_value(controls_config, "curiosity_novelty_threshold_spontaneous", 0.9)
-CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = get_config_value(controls_config, "curiosity_novelty_threshold_response", 0.8)
-CURIOSITY_PRESSURE_THRESHOLD = get_config_value(controls_config, "curiosity_pressure_threshold", 0.7)
-CURIOSITY_PRESSURE_DROP = get_config_value(controls_config, "curiosity_pressure_drop", 0.3)
-CURIOSITY_SILENCE_THRESHOLD = get_config_value(controls_config, "curiosity_silence_threshold", 20.0)
-CURIOSITY_QUESTION_COOLDOWN = get_config_value(controls_config, "curiosity_question_cooldown", 60.0)
-CURIOSITY_QUEUE_MAXLEN = get_config_value(controls_config, "curiosity_queue_maxlen", 10)
-CURIOSITY_WEIGHT_IGNORANCE = get_config_value(controls_config, "curiosity_weight_ignorance", 0.7)
-CURIOSITY_WEIGHT_NOVELTY = get_config_value(controls_config, "curiosity_weight_novelty", 0.3)
+ENABLE_CURIOSITY = config_manager.get("controls_config.enable_curiosity", True, expected_type=bool)
+CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = config_manager.get("controls_config.curiosity_novelty_threshold_spontaneous", 0.9, expected_type=float)
+CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = config_manager.get("controls_config.curiosity_novelty_threshold_response", 0.8, expected_type=float)
+CURIOSITY_PRESSURE_THRESHOLD = config_manager.get("controls_config.curiosity_pressure_threshold", 0.7, expected_type=float)
+CURIOSITY_PRESSURE_DROP = config_manager.get("controls_config.curiosity_pressure_drop", 0.3, expected_type=float)
+CURIOSITY_SILENCE_THRESHOLD = config_manager.get("controls_config.curiosity_silence_threshold", 20.0, expected_type=float)
+CURIOSITY_QUESTION_COOLDOWN = config_manager.get("controls_config.curiosity_question_cooldown", 60.0, expected_type=float)
+CURIOSITY_QUEUE_MAXLEN = config_manager.get("controls_config.curiosity_queue_maxlen", 10, expected_type=int)
+CURIOSITY_WEIGHT_IGNORANCE = config_manager.get("controls_config.curiosity_weight_ignorance", 0.7, expected_type=float)
+CURIOSITY_WEIGHT_NOVELTY = config_manager.get("controls_config.curiosity_weight_novelty", 0.3, expected_type=float)
 # Curiosity Generation Controls
-CURIOSITY_MAX_NEW_TOKENS = get_config_value(controls_config, "curiosity_max_new_tokens", 8)
-CURIOSITY_BASE_TEMPERATURE = get_config_value(controls_config, "curiosity_base_temperature", 1.1)
-CURIOSITY_TEMPERAMENT_INFLUENCE = get_config_value(controls_config, "curiosity_temperament_influence", 0.4)
-CURIOSITY_TOP_K = get_config_value(controls_config, "curiosity_top_k", 30)
+CURIOSITY_MAX_NEW_TOKENS = config_manager.get("controls_config.curiosity_max_new_tokens", 8, expected_type=int)
+CURIOSITY_BASE_TEMPERATURE = config_manager.get("controls_config.curiosity_base_temperature", 1.1, expected_type=float)
+CURIOSITY_TEMPERAMENT_INFLUENCE = config_manager.get("controls_config.curiosity_temperament_influence", 0.4, expected_type=float)
+CURIOSITY_TOP_K = config_manager.get("controls_config.curiosity_top_k", 30, expected_type=int)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 def _validate_config():
-    required_keys = ["core_config.base_model_name", "training_config.learning_rate"]
-    missing_keys = []
-    for key in required_keys:
-        keys = key.split('.')
-        value = config
-        for k in keys:
-            value = value.get(k, {})
-        if not value:
-            missing_keys.append(key)
-    
-    if missing_keys:
-        error_message = f"Missing required configuration keys: {', '.join(missing_keys)}"
-        print(f"Configuration Validation Error: {error_message}")
-        raise ValueError(error_message)
+    """Validate required configuration keys and layer settings."""
+    # Validate required keys with types
+    config_manager.validate_keys([
+        ("core_config.base_model_name", str),
+        ("training_config.learning_rate", float)
+    ])
 
-    assert isinstance(CROSS_ATTN_LAYERS, list), "CROSS_ATTN_LAYERS must be a list!"
+    # Validate CROSS_ATTN_LAYERS
+    if not isinstance(CROSS_ATTN_LAYERS, list):
+        logger.write({"error": "CROSS_ATTN_LAYERS must be a list!", "timestamp": time.time(), "conversation_id": "init"})
+        raise ValueError("CROSS_ATTN_LAYERS must be a list!")
+    
     if not USE_DYNAMIC_LAYERS:
         base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
         if invalid_layers:
+            logger.write({"error": f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.", "timestamp": time.time(), "conversation_id": "init"})
             raise ValueError(f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.")
+    
     if LAYER_SELECTION_MODE == "custom":
         base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
         if invalid_custom:
+            logger.write({"error": f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}", "timestamp": time.time(), "conversation_id": "init"})
             raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
 
 _validate_config()
@@ -261,12 +264,15 @@ class CuriosityPressure:
         return self.value > threshold and random.random() < 0.3
 
 class SOVLSystem:
-    def __init__(self):
+    def __init__(self, config_manager):
         self.logger = Logger("sovl_logs.jsonl")
-        config_defaults = {"quantization_mode": QUANTIZATION_MODE, "enable_error_listening": ENABLE_ERROR_LISTENING}
-        config = load_config("sovl_config.json", config_defaults)
-        self.quantization_mode = config.get("quantization_mode", QUANTIZATION_MODE)
-        self.enable_error_listening = get_config_value(config, "controls_config.enable_error_listening", ENABLE_ERROR_LISTENING)
+        self.config_manager = config_manager
+        self.quantization_mode = config_manager.get("core_config.quantization", "fp16", expected_type=str)
+        self.enable_error_listening = config_manager.get("controls_config.enable_error_listening", True, expected_type=bool)
+        self.base_temperature = config_manager.get("controls_config.base_temperature", 0.7, expected_type=float)
+        self.use_scaffold_memory = config_manager.get("controls_config.use_scaffold_memory", True, expected_type=bool)
+        self.use_token_map_memory = config_manager.get("controls_config.use_token_map_memory", True, expected_type=bool)
+        self.scaffold_weight = config_manager.get("controls_config.scaffold_weight_cap", 1.0, expected_type=float)
 
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
@@ -475,13 +481,14 @@ class SOVLSystem:
                 if BATCH_SIZE > 1:
                     global BATCH_SIZE
                     BATCH_SIZE = max(1, BATCH_SIZE // 2)
+                    config_manager.update("training_config.batch_size", BATCH_SIZE)
                     batch_size_reduced = True
     
                 if self.quantization_mode != "int8":
                     self.set_quantization_mode("int8")
                     quantization_changed = True
     
-                self.logger.record({
+                self.logger.write({
                     "error": "memory_threshold_exceeded",
                     "details": {
                         "current_memory": current_mem,
@@ -507,6 +514,7 @@ class SOVLSystem:
                 if hasattr(self, '_original_batch_size') and BATCH_SIZE < self._original_batch_size:
                     global BATCH_SIZE
                     BATCH_SIZE = self._original_batch_size
+                    config_manager.update("training_config.batch_size", BATCH_SIZE)
                     print(f"Restored batch size to {BATCH_SIZE}")
                     delattr(self, '_original_batch_size')
 
@@ -676,6 +684,7 @@ class SOVLSystem:
                        weight_ignorance=None, weight_novelty=None, max_new_tokens=None, base_temperature=None, 
                        temperament_influence=None, top_k=None):
         if enable is not None:
+            config_manager.update("controls_config.enable_curiosity", bool(enable))
             global ENABLE_CURIOSITY
             ENABLE_CURIOSITY = bool(enable)
             if ENABLE_CURIOSITY and not self.curiosity:
@@ -685,44 +694,78 @@ class SOVLSystem:
                 self.curiosity = None
                 self.pressure = None
         if spontaneous_threshold is not None and 0.5 <= spontaneous_threshold <= 1.0:
+            config_manager.update("controls_config.curiosity_novelty_threshold_spontaneous", spontaneous_threshold)
             global CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS
             CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = spontaneous_threshold
         if response_threshold is not None and 0.5 <= response_threshold <= 1.0:
+            config_manager.update("controls_config.curiosity_novelty_threshold_response", response_threshold)
             global CURIOSITY_NOVELTY_THRESHOLD_RESPONSE
             CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = response_threshold
         if pressure_threshold is not None and 0.5 <= pressure_threshold <= 0.9:
+            config_manager.update("controls_config.curiosity_pressure_threshold", pressure_threshold)
             global CURIOSITY_PRESSURE_THRESHOLD
             CURIOSITY_PRESSURE_THRESHOLD = pressure_threshold
         if pressure_drop is not None and 0.1 <= pressure_drop <= 0.5:
+            config_manager.update("controls_config.curiosity_pressure_drop", pressure_drop)
             global CURIOSITY_PRESSURE_DROP
             CURIOSITY_PRESSURE_DROP = pressure_drop
         if silence_threshold is not None and 5.0 <= silence_threshold <= 60.0:
+            config_manager.update("controls_config.curiosity_silence_threshold", silence_threshold)
             global CURIOSITY_SILENCE_THRESHOLD
             CURIOSITY_SILENCE_THRESHOLD = silence_threshold
         if question_cooldown is not None and 30.0 <= question_cooldown <= 120.0:
+            config_manager.update("controls_config.curiosity_question_cooldown", question_cooldown)
             global CURIOSITY_QUESTION_COOLDOWN
             CURIOSITY_QUESTION_COOLDOWN = question_cooldown
         if queue_maxlen is not None and 5 <= queue_maxlen <= 20:
+            config_manager.update("controls_config.curiosity_queue_maxlen", queue_maxlen)
             self.state.curiosity_queue_maxlen = queue_maxlen
             self.state.unanswered_q = deque(self.state.unanswered_q, maxlen=queue_maxlen)
         if weight_ignorance is not None and 0.0 <= weight_ignorance <= 1.0:
+            config_manager.update("controls_config.curiosity_weight_ignorance", weight_ignorance)
             global CURIOSITY_WEIGHT_IGNORANCE
             CURIOSITY_WEIGHT_IGNORANCE = weight_ignorance
         if weight_novelty is not None and 0.0 <= weight_novelty <= 1.0:
+            config_manager.update("controls_config.curiosity_weight_novelty", weight_novelty)
             global CURIOSITY_WEIGHT_NOVELTY
             CURIOSITY_WEIGHT_NOVELTY = weight_novelty
         if max_new_tokens is not None and 5 <= max_new_tokens <= 12:
+            config_manager.update("controls_config.curiosity_max_new_tokens", max_new_tokens)
             global CURIOSITY_MAX_NEW_TOKENS
             CURIOSITY_MAX_NEW_TOKENS = max_new_tokens
         if base_temperature is not None and 0.5 <= base_temperature <= 1.5:
+            config_manager.update("controls_config.curiosity_base_temperature", base_temperature)
             global CURIOSITY_BASE_TEMPERATURE
             CURIOSITY_BASE_TEMPERATURE = base_temperature
         if temperament_influence is not None and 0.1 <= temperament_influence <= 0.6:
+            config_manager.update("controls_config.curiosity_temperament_influence", temperament_influence)
             global CURIOSITY_TEMPERAMENT_INFLUENCE
             CURIOSITY_TEMPERAMENT_INFLUENCE = temperament_influence
         if top_k is not None and 10 <= top_k <= 50:
+            config_manager.update("controls_config.curiosity_top_k", top_k)
             global CURIOSITY_TOP_K
             CURIOSITY_TOP_K = top_k
+        self.logger.write({
+            "event": "tune_curiosity",
+            "params": {
+                "enable": ENABLE_CURIOSITY,
+                "spontaneous_threshold": CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS,
+                "response_threshold": CURIOSITY_NOVELTY_THRESHOLD_RESPONSE,
+                "pressure_threshold": CURIOSITY_PRESSURE_THRESHOLD,
+                "pressure_drop": CURIOSITY_PRESSURE_DROP,
+                "silence_threshold": CURIOSITY_SILENCE_THRESHOLD,
+                "question_cooldown": CURIOSITY_QUESTION_COOLDOWN,
+                "queue_maxlen": self.state.curiosity_queue_maxlen,
+                "weight_ignorance": CURIOSITY_WEIGHT_IGNORANCE,
+                "weight_novelty": CURIOSITY_WEIGHT_NOVELTY,
+                "max_new_tokens": CURIOSITY_MAX_NEW_TOKENS,
+                "base_temperature": CURIOSITY_BASE_TEMPERATURE,
+                "temperament_influence": CURIOSITY_TEMPERAMENT_INFLUENCE,
+                "top_k": CURIOSITY_TOP_K
+            },
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id
+        })
         print(f"Curiosity params: enable={ENABLE_CURIOSITY}, spontaneous_threshold={CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS}, "
               f"response_threshold={CURIOSITY_NOVELTY_THRESHOLD_RESPONSE}, pressure_threshold={CURIOSITY_PRESSURE_THRESHOLD}, "
               f"pressure_drop={CURIOSITY_PRESSURE_DROP}, silence_threshold={CURIOSITY_SILENCE_THRESHOLD}, "
@@ -880,98 +923,183 @@ class SOVLSystem:
 
     def set_sleep_params(self, conf_threshold=None, time_factor=None, log_min=None):
         if conf_threshold is not None and 0.5 <= conf_threshold <= 0.9:
+            config_manager.update("controls_config.sleep_conf_threshold", conf_threshold)
             global SLEEP_CONF_THRESHOLD
             SLEEP_CONF_THRESHOLD = conf_threshold
             self.trainer.config.sleep_conf_threshold = SLEEP_CONF_THRESHOLD
         if time_factor is not None and 0.5 <= time_factor <= 5.0:
+            config_manager.update("controls_config.sleep_time_factor", time_factor)
             global SLEEP_TIME_FACTOR
             SLEEP_TIME_FACTOR = time_factor
         if log_min is not None and 5 <= log_min <= 20:
+            config_manager.update("controls_config.sleep_log_min", log_min)
             global SLEEP_LOG_MIN
             SLEEP_LOG_MIN = log_min
             self.trainer.config.sleep_log_min = SLEEP_LOG_MIN
+        self.logger.record({
+            "event": "set_sleep_params",
+            "params": {
+                "conf_threshold": SLEEP_CONF_THRESHOLD,
+                "time_factor": SLEEP_TIME_FACTOR,
+                "log_min": SLEEP_LOG_MIN
+            },
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id
+        })
         print(f"Sleep params: conf={SLEEP_CONF_THRESHOLD}, time_factor={SLEEP_TIME_FACTOR}, log_min={SLEEP_LOG_MIN}")
 
     def tune_dream(self, swing_var=None, lifecycle_delta=None, temperament_on=None, noise_scale=None, memory_weight=None, memory_maxlen=None, prompt_weight=None, novelty_boost=None, memory_decay=None, prune_threshold=None):
         if swing_var is not None and 0.05 <= swing_var <= 0.2:
+            config_manager.update("controls_config.dream_swing_var", swing_var)
             global DREAM_SWING_VAR
             DREAM_SWING_VAR = swing_var
         if lifecycle_delta is not None and 0.05 <= lifecycle_delta <= 0.2:
+            config_manager.update("controls_config.dream_lifecycle_delta", lifecycle_delta)
             global DREAM_LIFECYCLE_DELTA
             DREAM_LIFECYCLE_DELTA = lifecycle_delta
         if temperament_on is not None:
+            config_manager.update("controls_config.dream_temperament_on", bool(temperament_on))
             global DREAM_TEMPERAMENT_ON
             DREAM_TEMPERAMENT_ON = bool(temperament_on)
         if noise_scale is not None and 0.01 <= noise_scale <= 0.1:
+            config_manager.update("controls_config.dream_noise_scale", noise_scale)
             global DREAM_NOISE_SCALE
             DREAM_NOISE_SCALE = noise_scale
         if memory_weight is not None and 0 <= memory_weight <= 0.5:
+            config_manager.update("controls_config.dream_memory_weight", memory_weight)
             global DREAM_MEMORY_WEIGHT
             DREAM_MEMORY_WEIGHT = memory_weight
             self.trainer.config.dream_memory_weight = DREAM_MEMORY_WEIGHT
         if memory_maxlen is not None and 5 <= memory_maxlen <= 20:
+            config_manager.update("controls_config.dream_memory_maxlen", memory_maxlen)
             self.state.dream_memory_maxlen = memory_maxlen
             self.state.dream_memory = deque(self.state.dream_memory, maxlen=memory_maxlen)
         if prompt_weight is not None and 0 <= prompt_weight <= 1:
+            config_manager.update("controls_config.dream_prompt_weight", prompt_weight)
             global DREAM_PROMPT_WEIGHT
             DREAM_PROMPT_WEIGHT = prompt_weight
         if novelty_boost is not None and 0 <= novelty_boost <= 0.05:
+            config_manager.update("controls_config.dream_novelty_boost", novelty_boost)
             global DREAM_NOVELTY_BOOST
             DREAM_NOVELTY_BOOST = novelty_boost
         if memory_decay is not None and 0 <= memory_decay <= 1:
+            config_manager.update("controls_config.dream_memory_decay", memory_decay)
             global DREAM_MEMORY_DECAY
             DREAM_MEMORY_DECAY = memory_decay
         if prune_threshold is not None and 0 <= prune_threshold <= 1:
+            config_manager.update("controls_config.dream_prune_threshold", prune_threshold)
             global DREAM_PRUNE_THRESHOLD
             DREAM_PRUNE_THRESHOLD = prune_threshold
+        self.logger.record({
+            "event": "tune_dream",
+            "params": {
+                "swing_var": DREAM_SWING_VAR,
+                "lifecycle_delta": DREAM_LIFECYCLE_DELTA,
+                "temperament_on": DREAM_TEMPERAMENT_ON,
+                "noise_scale": DREAM_NOISE_SCALE,
+                "memory_weight": DREAM_MEMORY_WEIGHT,
+                "memory_maxlen": self.state.dream_memory_maxlen,
+                "prompt_weight": DREAM_PROMPT_WEIGHT,
+                "novelty_boost": DREAM_NOVELTY_BOOST,
+                "memory_decay": DREAM_MEMORY_DECAY,
+                "prune_threshold": DREAM_PRUNE_THRESHOLD
+            },
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id
+        })
         print(f"Dream params: swing_var={DREAM_SWING_VAR}, lifecycle_delta={DREAM_LIFECYCLE_DELTA}, temperament_on={DREAM_TEMPERAMENT_ON}, noise_scale={DREAM_NOISE_SCALE}, memory_weight={DREAM_MEMORY_WEIGHT}, memory_maxlen={self.state.dream_memory_maxlen}, prompt_weight={DREAM_PROMPT_WEIGHT}, novelty_boost={DREAM_NOVELTY_BOOST}, memory_decay={DREAM_MEMORY_DECAY}, prune_threshold={DREAM_PRUNE_THRESHOLD}")
 
     def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None, curiosity_boost=None, restless_drop=None, melancholy_noise=None, conf_feedback_strength=None, temp_smoothing_factor=None):
         if eager_threshold is not None and 0.7 <= eager_threshold <= 0.9:
+            config_manager.update("controls_config.temp_eager_threshold", eager_threshold)
             global TEMP_EAGER_THRESHOLD
             TEMP_EAGER_THRESHOLD = eager_threshold
         if sluggish_threshold is not None and 0.4 <= sluggish_threshold <= 0.6:
+            config_manager.update("controls_config.temp_sluggish_threshold", sluggish_threshold)
             global TEMP_SLUGGISH_THRESHOLD
             TEMP_SLUGGISH_THRESHOLD = sluggish_threshold
         if mood_influence is not None and 0 <= mood_influence <= 1:
+            config_manager.update("controls_config.temp_mood_influence", mood_influence)
             global TEMP_MOOD_INFLUENCE
             TEMP_MOOD_INFLUENCE = mood_influence
         if curiosity_boost is not None and 0 <= curiosity_boost <= 0.5:
+            config_manager.update("controls_config.temp_curiosity_boost", curiosity_boost)
             global TEMP_CURIOSITY_BOOST
             TEMP_CURIOSITY_BOOST = curiosity_boost
         if restless_drop is not None and 0 <= restless_drop <= 0.5:
+            config_manager.update("controls_config.temp_restless_drop", restless_drop)
             global TEMP_RESTLESS_DROP
             TEMP_RESTLESS_DROP = restless_drop
         if melancholy_noise is not None and 0 <= melancholy_noise <= 0.05:
+            config_manager.update("controls_config.temp_melancholy_noise", melancholy_noise)
             global TEMP_MELANCHOLY_NOISE
             TEMP_MELANCHOLY_NOISE = melancholy_noise
         if conf_feedback_strength is not None and 0 <= conf_feedback_strength <= 1:
+            config_manager.update("controls_config.conf_feedback_strength", conf_feedback_strength)
             global CONF_FEEDBACK_STRENGTH
             CONF_FEEDBACK_STRENGTH = conf_feedback_strength
         if temp_smoothing_factor is not None and 0 <= temp_smoothing_factor <= 1:
+            config_manager.update("controls_config.temp_smoothing_factor", temp_smoothing_factor)
             global TEMP_SMOOTHING_FACTOR
             TEMP_SMOOTHING_FACTOR = temp_smoothing_factor
+        self.logger.record({
+            "event": "adjust_temperament",
+            "params": {
+                "eager_threshold": TEMP_EAGER_THRESHOLD,
+                "sluggish_threshold": TEMP_SLUGGISH_THRESHOLD,
+                "mood_influence": TEMP_MOOD_INFLUENCE,
+                "curiosity_boost": TEMP_CURIOSITY_BOOST,
+                "restless_drop": TEMP_RESTLESS_DROP,
+                "melancholy_noise": TEMP_MELANCHOLY_NOISE,
+                "conf_feedback_strength": CONF_FEEDBACK_STRENGTH,
+                "temp_smoothing_factor": TEMP_SMOOTHING_FACTOR
+            },
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id
+        })
         print(f"Temperament params: eager={TEMP_EAGER_THRESHOLD}, sluggish={TEMP_SLUGGISH_THRESHOLD}, mood_influence={TEMP_MOOD_INFLUENCE}, curiosity_boost={TEMP_CURIOSITY_BOOST}, restless_drop={TEMP_RESTLESS_DROP}, melancholy_noise={TEMP_MELANCHOLY_NOISE}, conf_feedback_strength={CONF_FEEDBACK_STRENGTH}, smoothing_factor={TEMP_SMOOTHING_FACTOR}")
 
     def set_global_blend(self, weight_cap=None, base_temp=None):
         if weight_cap is not None and 0.5 <= weight_cap <= 1.0:
+            config_manager.update("controls_config.scaffold_weight_cap", weight_cap)
             global SCAFFOLD_WEIGHT_CAP
             SCAFFOLD_WEIGHT_CAP = weight_cap
         if base_temp is not None and 0.5 <= base_temp <= 1.5:
+            config_manager.update("controls_config.base_temperature", base_temp)
             global BASE_TEMPERATURE
             BASE_TEMPERATURE = base_temp
+        self.logger.record({
+            "event": "set_global_blend",
+            "params": {
+                "weight_cap": SCAFFOLD_WEIGHT_CAP,
+                "base_temp": BASE_TEMPERATURE
+            },
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id
+        })
         print(f"Global blend: weight_cap={SCAFFOLD_WEIGHT_CAP}, base_temp={BASE_TEMPERATURE}")
 
     def tune_lifecycle(self, capacity_factor=None, curve=None):
         if capacity_factor is not None and 0.001 <= capacity_factor <= 0.1:
+            config_manager.update("training_config.lifecycle_capacity_factor", capacity_factor)
             global LIFECYCLE_CAPACITY_FACTOR
             LIFECYCLE_CAPACITY_FACTOR = capacity_factor
             self.trainer.config.lifecycle_capacity_factor = LIFECYCLE_CAPACITY_FACTOR
             self.trainer.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * LIFECYCLE_CAPACITY_FACTOR
         if curve in ["sigmoid_linear", "exponential"]:
+            config_manager.update("training_config.lifecycle_curve", curve)
             global LIFECYCLE_CURVE
             LIFECYCLE_CURVE = curve
             self.trainer.config.lifecycle_curve = LIFECYCLE_CURVE
+        self.logger.record({
+            "event": "tune_lifecycle",
+            "params": {
+                "capacity_factor": LIFECYCLE_CAPACITY_FACTOR,
+                "curve": LIFECYCLE_CURVE
+            },
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id
+        })
         print(f"Lifecycle params: capacity_factor={LIFECYCLE_CAPACITY_FACTOR}, curve={LIFECYCLE_CURVE}")
 
     def save_state(self, path_prefix=None):
@@ -1675,5 +1803,7 @@ if not TRAIN_DATA or not VALID_DATA:
 print("Quantization mode:", QUANTIZATION_MODE)
 
 if __name__ == "__main__":
+    from sovl_config import ConfigManager
     from sovl_cli import run_cli
-    run_cli()
+    config_manager = ConfigManager("sovl_config.json")
+    run_cli(config_manager=config_manager)
