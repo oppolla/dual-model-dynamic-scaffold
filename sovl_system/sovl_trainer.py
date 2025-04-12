@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Callable, Union, Tuple
 import torch
 import torch.nn.functional as F
+import time
+import uuid 
 import math
 import os
 import threading
@@ -83,7 +85,7 @@ class TrainingConfig:
 
 @dataclass 
 class DreamMemoryConfig:
-    """Configuration for dream memory system"""
+    """Centralized configuration for dream memory behavior"""
     max_memories: int = 100
     novelty_boost: float = 0.03
     base_weight: float = 0.1
@@ -94,7 +96,7 @@ class DreamMemoryConfig:
     melancholy_noise: float = 0.02
 
 class DreamMemory:
-    """Centralized dream memory management"""
+    """Thread-safe dream memory management system"""
     def __init__(self, config: DreamMemoryConfig, device: torch.device):
         self.memory = deque(maxlen=config.max_memories)
         self.config = config
@@ -105,34 +107,43 @@ class DreamMemory:
                  prompt: str, 
                  hidden_state: torch.Tensor, 
                  is_novel: bool,
-                 temperament: float = 0.0):
-        """Add a new memory with automatic maintenance"""
+                 temperament: float = 0.0) -> None:
+        """Add and maintain dream memories with automatic pruning"""
         with self.lock:
-            # Apply decay and pruning
+            # 1. Apply decay and pruning to existing memories
             self._maintain_memory()
             
-            # Calculate weight
-            weight = self.config.base_weight
-            if is_novel:
-                weight += self.config.novelty_boost
-            weight = min(weight, self.config.max_weight)
+            # 2. Calculate memory weight
+            weight = self._calculate_memory_weight(is_novel)
             
-            # Apply temperament-adjusted noise
-            noise = torch.randn_like(hidden_state) * (
-                self.config.noise_scale + 
-                (self.config.melancholy_noise if temperament < -0.5 else 0)
-            )
-            memory_vector = (hidden_state + noise).detach().cpu()
+            # 3. Apply noise based on temperament
+            noisy_state = self._apply_noise(hidden_state, temperament)
             
-            # Store memory
+            # 4. Store the new memory
             self.memory.append({
-                "vector": memory_vector,
+                "vector": noisy_state,
                 "weight": weight,
                 "prompt": prompt,
                 "timestamp": time.time()
             })
     
-    def _maintain_memory(self):
+    def _calculate_memory_weight(self, is_novel: bool) -> float:
+        """Calculate weight with novelty boost"""
+        weight = self.config.base_weight
+        if is_novel:
+            weight += self.config.novelty_boost
+        return min(weight, self.config.max_weight)
+    
+    def _apply_noise(self, hidden_state: torch.Tensor, temperament: float) -> torch.Tensor:
+        """Apply temperament-adjusted noise to hidden state"""
+        noise_level = self.config.noise_scale
+        if temperament < -0.5:  # Melancholy state
+            noise_level += self.config.melancholy_noise
+        
+        noise = torch.randn_like(hidden_state) * noise_level
+        return (hidden_state + noise).detach().cpu()
+    
+    def _maintain_memory(self) -> None:
         """Apply decay and prune weak memories"""
         self.memory = deque(
             {**m, "weight": m["weight"] * self.config.decay_rate}
@@ -143,7 +154,12 @@ class DreamMemory:
     def get_memories(self, n: int = 5) -> List[dict]:
         """Get top-n most relevant memories by weight"""
         with self.lock:
-            return sorted(self.memory, key=lambda x: -x["weight"])[:n]        
+            return sorted(self.memory, key=lambda x: -x["weight"])[:n]
+    
+    def __len__(self) -> int:
+        """Current number of memories"""
+        with self.lock:
+            return len(self.memory)        
 
 def collate_batch(batch: List[dict], pad_token_id: int, max_seq_length: int, tokenizer) -> dict:
     """Collate batch of prompt-completion pairs into tensors."""
@@ -490,11 +506,23 @@ class SOVLTrainer:
         return avg_loss, metrics
 
     def save_checkpoint(self, step: int, suffix: Optional[str] = None):
-        """Save trainer state to checkpoint."""
         checkpoint_dir = self.config.checkpoint_path
         os.makedirs(checkpoint_dir, exist_ok=True)
         checkpoint_name = f"checkpoint_{step}{f'_{suffix}' if suffix else ''}.pth"
         checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
+
+        # Prepare memory data for saving (thread-safe)
+        memory_data = None
+        if hasattr(self, 'dream_memory'):
+            with self.dream_memory.lock:
+                memory_data = {
+                    'memory': list(self.dream_memory.memory),  # Convert deque to list
+                    'config': {
+                        'max_memories': self.dream_memory.memory.maxlen,
+                        'novelty_boost': self.dream_memory.config.novelty_boost,
+                        # Include other config params as needed
+                    }
+                }
 
         state_dict = {
             "model_state": self.model.state_dict(),
@@ -503,19 +531,21 @@ class SOVLTrainer:
             "global_step": self.global_step,
             "best_valid_loss": self.best_valid_loss,
             "patience": self.patience,
-            "data_exposure": self.data_exposure
+            "data_exposure": self.data_exposure,
+            "dream_memory": memory_data  # Add serialized memory
         }
+
         torch.save(state_dict, checkpoint_path)
         self.logger({
             "event": "checkpoint_saved",
             "path": checkpoint_path,
             "step": step,
+            "memory_count": len(self.dream_memory) if hasattr(self, 'dream_memory') else 0,
             "timestamp": time.time()
         })
-        print(f"Checkpoint saved: {checkpoint_path}")
+        print(f"Checkpoint saved: {checkpoint_path} (Memories: {len(self.dream_memory) if hasattr(self, 'dream_memory') else 0})")
 
     def load_checkpoint(self, checkpoint_path: str):
-        """Load trainer state from checkpoint."""
         if not os.path.exists(checkpoint_path):
             self.logger({
                 "event": "checkpoint_load_failed",
@@ -526,6 +556,8 @@ class SOVLTrainer:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
         state_dict = torch.load(checkpoint_path, map_location=self.device)
+
+        # Load core states
         self.model.load_state_dict(state_dict["model_state"])
         self.optimizer.load_state_dict(state_dict["optimizer_state"])
         if state_dict["scheduler_state"] and self.scheduler:
@@ -534,13 +566,29 @@ class SOVLTrainer:
         self.best_valid_loss = state_dict["best_valid_loss"]
         self.patience = state_dict["patience"]
         self.data_exposure = state_dict.get("data_exposure", 0)
+
+        # Restore dream memory if exists in checkpoint
+        if 'dream_memory' in state_dict and state_dict['dream_memory'] is not None:
+            if not hasattr(self, 'dream_memory'):
+                self._init_dream_memory()  # Initialize if not exists
+
+            with self.dream_memory.lock:
+                # Restore memory content and configuration
+                self.dream_memory.memory = deque(
+                    state_dict['dream_memory']['memory'],
+                    maxlen=state_dict['dream_memory']['config']['max_memories']
+                )
+                # Update config if needed
+                self.dream_memory.config.novelty_boost = state_dict['dream_memory']['config']['novelty_boost']
+
         self.logger({
             "event": "checkpoint_loaded",
             "path": checkpoint_path,
             "step": self.global_step,
+            "memory_count": len(self.dream_memory) if hasattr(self, 'dream_memory') else 0,
             "timestamp": time.time()
         })
-        print(f"Checkpoint loaded: {checkpoint_path} at step {self.global_step}")
+        print(f"Checkpoint loaded: {checkpoint_path} at step {self.global_step} (Memories: {len(self.dream_memory) if hasattr(self, 'dream_memory') else 0})")
 
     def should_stop(self) -> bool:
         """Check if training should stop based on early stopping criteria."""
@@ -652,100 +700,186 @@ class SOVLTrainer:
         })
         return should_dream
 
-    def _dream(self):
-        """Enhanced dream generation using centralized memory system"""
+    def _dream(self) -> None:
+        """Execute a complete dream cycle with memory creation"""
+        if not self.config.enable_dreaming:
+            return
+
+        # Initialize dream memory if needed
         if not hasattr(self, 'dream_memory'):
-            self.dream_memory = DreamMemory(
-                config=DreamMemoryConfig(
-                    max_memories=100,
-                    novelty_boost=self.config.dream_novelty_boost,
-                    base_weight=self.config.dream_memory_weight,
-                    decay_rate=self.config.dream_memory_decay,
-                    prune_threshold=self.config.dream_prune_threshold,
-                    noise_scale=self.config.dream_noise_scale,
-                    melancholy_noise=self.config.temp_melancholy_noise
-                ),
-                device=self.device
-            )
-    
-        # Get recent logs
+            self._init_dream_memory()
+
+        # Get log entries for dreaming
+        log_entries = self._get_dream_log_entries()
+        if not log_entries:
+            return
+
+        # Select and process dream prompt
+        dream_prompt = self._select_dream_prompt(log_entries)
+        hidden_state = self._process_dream_prompt(dream_prompt)
+
+        # Store the memory
+        self._store_dream_memory(dream_prompt, hidden_state)
+
+        # Log the dream event
+        self._log_dream_event(dream_prompt)
+
+    def _init_dream_memory(self) -> None:
+        """Initialize the dream memory system"""
+        self.dream_memory = DreamMemory(
+            config=DreamMemoryConfig(
+                max_memories=100,
+                novelty_boost=self.config.dream_novelty_boost,
+                base_weight=self.config.dream_memory_weight,
+                decay_rate=self.config.dream_memory_decay,
+                prune_threshold=self.config.dream_prune_threshold,
+                noise_scale=self.config.dream_noise_scale,
+                melancholy_noise=self.config.temp_melancholy_noise
+            ),
+            device=self.device
+        )
+
+    def _get_dream_log_entries(self) -> List[dict]:
+        """Retrieve log entries for dreaming"""
         log_entries = self.logger.read() if hasattr(self.logger, "read") else []
         if not log_entries:
-            self.logger({"event": "dream_skipped", "reason": "empty_logs"})
-            return
-    
-        # Select dream prompt
-        dream_prompt = self._select_dream_prompt(log_entries)
-        
-        # Process through model
-        with torch.no_grad():
-            inputs = self.tokenizer(
-                dream_prompt,
-                return_tensors="pt",
-                max_length=self.config.max_seq_length,
-                truncation=True
-            ).to(self.device)
-            hidden_state = self.model(**inputs).hidden_states[-1].mean(dim=1)
-        
-        # Store memory
-        is_novel = dream_prompt not in getattr(self.state, "seen_prompts", set())
-        self.dream_memory.add_memory(
-            prompt=dream_prompt,
-            hidden_state=hidden_state,
-            is_novel=is_novel,
-            temperament=getattr(self.state, "temperament_score", 0.0)
-        )
-        
-        # Log results
-        memories = self.dream_memory.get_memories()
-        self.logger({
-            "event": "dream_cycle",
-            "prompt": dream_prompt,
-            "memory_count": len(memories),
-            "top_weight": memories[0]["weight"] if memories else 0,
-            "timestamp": time.time()
-        })
-    
+            self.logger({
+                "event": "dream_skipped",
+                "reason": "empty_logs",
+                "timestamp": time.time()
+            })
+        return log_entries
+
     def _select_dream_prompt(self, log_entries: List[dict]) -> str:
-        """Select prompt for dreaming based on recency and similarity"""
+        """Select prompt for dreaming based on configuration"""
         if not self.config.enable_prompt_driven_dreams:
             return random.choice(log_entries)["prompt"]
+
+        # Get reference prompt (most recent interaction)
+        reference_prompt = self._get_reference_prompt(log_entries)
+
+        # Calculate weighted prompt selection
+        return self._select_by_similarity(reference_prompt, log_entries)
+
+    def _get_reference_prompt(self, log_entries: List[dict]) -> str:
+        """Get reference prompt for similarity comparison"""
+        if hasattr(self.state, "history") and self.state.history.messages:
+            return self.state.history.messages[-1]["prompt"]
+        return random.choice(log_entries)["prompt"]
+
+    def _select_by_similarity(self, reference: str, log_entries: List[dict]) -> str:
+        """Select prompt with temperature-adjusted sampling"""
+        if not log_entries:
+            raise ValueError("No log entries available for dreaming")
         
-        # Get last interaction
-        last_prompt = (
-            self.state.history.messages[-1]["prompt"]
-            if hasattr(self.state, "history") and self.state.history.messages
-            else random.choice(log_entries)["prompt"]
-        )
-        
-        # Calculate similarities
+        # Calculate all similarities first
         similarities = []
+        valid_entries = []
+        
         for entry in log_entries:
             if "prompt" not in entry:
                 continue
+                
             inputs = self.tokenizer(
-                [last_prompt, entry["prompt"]],
+                [reference, entry["prompt"]],
                 padding=True,
                 truncation=True,
                 max_length=self.config.max_seq_length,
                 return_tensors="pt"
             ).to(self.device)
+            
             with torch.no_grad():
                 hidden = self.model(**inputs).hidden_states[-1].mean(dim=1)
                 sim = F.cosine_similarity(hidden[0], hidden[1]).item()
+            
             similarities.append(sim)
+            valid_entries.append(entry)
         
-        # Weight by similarity and recency
-        weights = [
+        if not similarities:
+            raise ValueError("No valid prompts found in log entries")
+        
+        # Combine similarity with recency using temperature
+        recency_weights = [i/len(valid_entries) for i in range(len(valid_entries))]
+        combined = [
             (self.config.dream_prompt_weight * sim) + 
-            ((1-self.config.dream_prompt_weight) * (i/len(log_entries)))
-            for i, sim in enumerate(similarities)
+            ((1 - self.config.dream_prompt_weight) * recency)
+            for sim, recency in zip(similarities, recency_weights)
         ]
+        
+        # Apply temperature scaling (0.5 makes distribution more uniform)
+        temperature = 0.5
+        scaled_weights = torch.softmax(
+            torch.tensor(combined) / temperature, 
+            dim=0
+        ).tolist()
+        
+        # Select based on final weights
         return random.choices(
-            [e["prompt"] for e in log_entries], 
-            weights=weights, 
+            [e["prompt"] for e in valid_entries],
+            weights=scaled_weights,
             k=1
         )[0]
+
+    def _process_dream_prompt(self, prompt: str) -> torch.Tensor:
+        """Process prompt through model to get hidden state"""
+        with torch.no_grad():
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                max_length=self.config.max_seq_length,
+                truncation=True
+            ).to(self.device)
+            return self.model(**inputs).hidden_states[-1].mean(dim=1)
+        
+    def _check_novelty(self, prompt: str, hidden_state: torch.Tensor) -> Tuple[bool, float]:
+        """
+        Enhanced novelty check with semantic similarity analysis
+        Returns:
+            Tuple of (is_novel: bool, similarity_score: float)
+        """
+        # 1. Basic novelty check
+        basic_novel = prompt not in getattr(self.state, "seen_prompts", set())
+        if basic_novel or not hasattr(self, 'dream_memory') or len(self.dream_memory) == 0:
+            return (basic_novel, 0.0)
+
+        # 2. Semantic similarity check with existing memories
+        similarities = []
+        with self.dream_memory.lock:
+            for memory in self.dream_memory.memory:
+                # Calculate cosine similarity between hidden states
+                sim = F.cosine_similarity(
+                    hidden_state.flatten(),
+                    memory['vector'].to(self.device).flatten(),
+                    dim=0
+                ).item()
+                similarities.append(sim)
+
+        max_similarity = max(similarities) if similarities else 0.0
+        is_semantically_novel = max_similarity < 0.7  # Threshold for considering novel
+
+        return (is_semantically_novel, max_similarity)    
+
+    def _store_dream_memory(self, prompt: str, hidden_state: torch.Tensor) -> None:
+        """Store processed prompt in dream memory"""
+        is_novel = prompt not in getattr(self.state, "seen_prompts", set())
+        self.dream_memory.add_memory(
+            prompt=prompt,
+            hidden_state=hidden_state,
+            is_novel=is_novel,
+            temperament=getattr(self.state, "temperament_score", 0.0)
+        )
+
+    def _log_dream_event(self, prompt: str) -> None:
+        """Log dream event details"""
+        memories = self.dream_memory.get_memories()
+        self.logger({
+            "event": "dream_cycle",
+            "prompt": prompt,
+            "memory_count": len(self.dream_memory),
+            "top_weight": memories[0]["weight"] if memories else 0,
+            "timestamp": time.time(),
+            "conversation_id": str(uuid.uuid4())  # Generate new ID if state not available
+        })
 
     def sleep_train(self, log_entries: List[dict]):
         """Perform sleep training on log_entries."""
@@ -925,6 +1059,46 @@ class SOVLTrainer:
 
         # Trigger callback after training completes
         self.on_training_complete(self.config.max_epochs, avg_epoch_loss, self.data_exposure)
+
+    def get_memory_stats(self) -> dict:
+        """Get detailed statistics about dream memory usage"""
+        if not hasattr(self, 'dream_memory'):
+            return {
+                'status': 'dream_memory_not_initialized',
+                'count': 0,
+                'average_weight': 0,
+                'oldest': None,
+                'newest': None
+            }
+
+        with self.dream_memory.lock:
+            memories = list(self.dream_memory.memory)
+            if not memories:
+                return {
+                    'status': 'empty',
+                    'count': 0,
+                    'average_weight': 0,
+                    'oldest': None,
+                    'newest': None
+                }
+
+            weights = [m['weight'] for m in memories]
+            timestamps = [m['timestamp'] for m in memories]
+
+            return {
+                'status': 'active',
+                'count': len(memories),
+                'average_weight': sum(weights) / len(weights),
+                'max_weight': max(weights),
+                'min_weight': min(weights),
+                'oldest': min(timestamps),
+                'newest': max(timestamps),
+                'config': {
+                    'max_memories': self.dream_memory.memory.maxlen,
+                    'decay_rate': self.dream_memory.config.decay_rate,
+                    'prune_threshold': self.dream_memory.config.prune_threshold
+                }
+            }
 
     def __post_init__(self):
         if self.metrics_to_track is None:
