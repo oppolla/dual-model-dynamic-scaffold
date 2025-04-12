@@ -13,6 +13,7 @@ from collections import deque, defaultdict, OrderedDict
 import traceback
 import os
 from threading import Lock
+from sovl_curiosity import CuriosityPressure
 from sovl_logger import Logger
 from sovl_io import load_jsonl, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
