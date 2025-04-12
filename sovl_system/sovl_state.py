@@ -1,10 +1,9 @@
-from typing import Optional, Deque, Dict, Set, Tuple, DefaultDict, Any
+import logging
+from typing import Optional, Deque, Dict, Set, Tuple, DefaultDict, Any, List
 from collections import deque, defaultdict
 from dataclasses import dataclass
 import torch
 import uuid
-import json
-import time
 import random
 from threading import Lock
 
@@ -33,7 +32,6 @@ class CuriosityPressure:
 
 class SOVLState:
     def __init__(self, config: Dict[str, Any]):
-        # Configuration-dependent initialization
         self.dream_memory_maxlen = config.get("dream_memory_maxlen", 10)
         self.temperament_history_maxlen = config.get("temperament_history_maxlen", 5)
         self.confidence_history_maxlen = config.get("confidence_history_maxlen", 5)
@@ -41,17 +39,14 @@ class SOVLState:
         self.scaffold_unk_id = 0  # To be set explicitly by main system
         self.hidden_size = config.get("core_config", {}).get("hidden_size", 768)  # Default to 768 (e.g., GPT-2)
 
-        # Conversation state
         self.history = ConversationHistory()
         self.memory_lock = Lock()
-        
-        # Memory systems
-        self.dream_memory: Deque[Tuple[torch.Tensor, float]] = deque(maxlen=self.dream_memory_maxlen)
+
+        self.dream_memory: Deque[Tuple[torch.FloatTensor, float]] = deque(maxlen=self.dream_memory_maxlen)
         self.seen_prompts: Set[str] = set()
-        self.token_map: DefaultDict[int, Dict] = defaultdict(lambda: [self.scaffold_unk_id])
+        self.token_map: DefaultDict[int, List[int]] = defaultdict(lambda: [self.scaffold_unk_id])
         self.last_prompt_embedding: Optional[torch.Tensor] = None
 
-        # Training state
         self.data_exposure = 0
         self.last_trained = 0
         self.global_step = 0
@@ -59,7 +54,6 @@ class SOVLState:
         self.patience = 0
         self.lora_capacity = 0  # Will be set by system
 
-        # Behavioral state
         self.temperament_score = 0.0
         self.last_temperament_score = 0.0
         self.temperament_history: Deque[float] = deque(maxlen=self.temperament_history_maxlen)
@@ -67,11 +61,9 @@ class SOVLState:
         self.sleep_confidence_sum = 0.0
         self.sleep_confidence_count = 0
 
-        # Curiosity system
         self.pressure = CuriosityPressure()
         self.unanswered_q: Deque[Tuple[str, float]] = deque(maxlen=self.curiosity_queue_maxlen)
 
-        # Dynamic controls
         self.last_weight = 0.0
         self.is_sleeping = False
         self.sleep_progress = 0
@@ -79,25 +71,29 @@ class SOVLState:
         self.sleep_total_loss = 0.0
         self.sleep_steps = 0
 
+        self.logger = logging.getLogger(__name__)
+
     def set_scaffold_unk_id(self, unk_id: int):
         """Set the unknown token ID for the scaffold model"""
+        if not isinstance(unk_id, int):
+            self.logger.error(f"unk_id must be an integer, got {type(unk_id)}")
+            return
         self.scaffold_unk_id = unk_id
-        # Update the defaultdict factory function
         self.token_map = defaultdict(lambda: [self.scaffold_unk_id], self.token_map)
 
     def append_dream_memory(self, tensor: torch.Tensor, weight: float):
         """Append a tensor to dream_memory with shape validation"""
         if not isinstance(tensor, torch.Tensor):
-            print(f"Warning: Invalid dream memory tensor type: {type(tensor)}")
+            self.logger.warning(f"Invalid dream memory tensor type: {type(tensor)}")
             return
         if not isinstance(weight, (int, float)) or weight < 0:
-            print(f"Warning: Invalid dream memory weight: {weight}")
+            self.logger.warning(f"Invalid dream memory weight: {weight}")
             return
         if tensor.shape[-1] != self.hidden_size:
-            print(f"Warning: Dream memory tensor shape {tensor.shape} mismatches hidden_size {self.hidden_size}")
+            self.logger.warning(f"Dream memory tensor shape {tensor.shape} mismatches hidden_size {self.hidden_size}")
             return
         with self.memory_lock:
-            self.dream_memory.append((tensor, weight))
+            self.dream_memory.append((tensor.float(), weight))
 
     def reset_conversation(self):
         """Start fresh conversation while retaining memory"""
@@ -142,18 +138,22 @@ class SOVLState:
         """Load state from dict"""
         self.history = ConversationHistory(data["history"]["conversation_id"])
         self.history.messages = deque(data["history"]["messages"], maxlen=10)
-        
-        self.dream_memory = deque(
-            [(torch.tensor(m, dtype=torch.float32).to(device), w) for m, w in data.get("dream_memory", [])],
-            maxlen=self.dream_memory_maxlen
-        )
-        
+
+        try:
+            self.dream_memory = deque(
+                [(torch.tensor(m, dtype=torch.float32).to(device), w) for m, w in data.get("dream_memory", [])],
+                maxlen=self.dream_memory_maxlen
+            )
+        except (TypeError, ValueError) as e:
+            self.logger.error(f"Error loading dream_memory: {e}")
+            self.dream_memory = deque(maxlen=self.dream_memory_maxlen)
+
         self.seen_prompts = set(data.get("seen_prompts", []))
-        
+
         loaded_map = data.get("token_map", {})
-        self.token_map = defaultdict(lambda: [self.scaffold_unk_id], 
-                                   {int(k): v for k, v in loaded_map.items()})
-        
+        self.token_map = defaultdict(lambda: [self.scaffold_unk_id],
+                                       {int(k): v for k, v in loaded_map.items()})
+
         # Training state
         self.data_exposure = data.get("data_exposure", 0)
         self.last_trained = data.get("last_trained", 0)
@@ -161,22 +161,22 @@ class SOVLState:
         self.best_valid_loss = data.get("best_valid_loss", float('inf'))
         self.patience = data.get("patience", 0)
         self.lora_capacity = data.get("lora_capacity", 0)
-        
+
         # Behavioral state
         self.temperament_score = data.get("temperament_score", 0.0)
         self.last_temperament_score = data.get("last_temperament_score", 0.0)
-        self.temperament_history = deque(data.get("temperament_history", []), 
-                                       maxlen=self.temperament_history_maxlen)
-        self.confidence_history = deque(data.get("confidence_history", []), 
-                                      maxlen=self.confidence_history_maxlen)
+        self.temperament_history = deque(data.get("temperament_history", []),
+                                            maxlen=self.temperament_history_maxlen)
+        self.confidence_history = deque(data.get("confidence_history", []),
+                                            maxlen=self.confidence_history_maxlen)
         self.sleep_confidence_sum = data.get("sleep_confidence_sum", 0.0)
         self.sleep_confidence_count = data.get("sleep_confidence_count", 0)
-        
+
         # Curiosity system
         self.pressure.value = data.get("pressure_value", 0.0)
-        self.unanswered_q = deque(data.get("unanswered_q", []), 
-                                maxlen=self.curiosity_queue_maxlen)
-        
+        self.unanswered_q = deque(data.get("unanswered_q", []),
+                                    maxlen=self.curiosity_queue_maxlen)
+
         # Dynamic controls
         self.last_weight = data.get("last_weight", 0.0)
         self.is_sleeping = data.get("is_sleeping", False)
