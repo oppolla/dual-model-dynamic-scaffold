@@ -270,19 +270,6 @@ def _validate_config(self):
     if not TRAIN_DATA or not VALID_DATA:
         print("Warning: TRAIN_DATA or VALID_DATA empty. Training may fail.")
 
-def get_cross_attention_layers(model):
-    total_layers = len(model.transformer.h) if hasattr(model, 'transformer') else len(model.layers)
-    if total_layers == 0:
-        return []
-    if LAYER_SELECTION_MODE == "early":
-        return list(range(0, total_layers//3))
-    elif LAYER_SELECTION_MODE == "late":
-        return list(range(2*total_layers//3, total_layers))
-    elif LAYER_SELECTION_MODE == "custom" and CUSTOM_LAYERS:
-        return [l for l in CUSTOM_LAYERS if 0 <= l < total_layers]
-    else:
-        return list(range(total_layers//3, 2*total_layers//3))
-
 class TrueCuriosity:
     def __init__(self, sovl_system):
         self.sovl = sovl_system
@@ -874,62 +861,35 @@ class SOVLSystem:
             print(f"Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
     def set_scaffold_influence(self, weight=None, blend_strength=None, layer_weights=None):
-        base_layers = self._get_model_layers(self.base_model)
-        layers = get_cross_attention_layers(self.base_model) if USE_DYNAMIC_LAYERS else CROSS_ATTN_LAYERS
-        
         if weight is not None:
             self.last_weight = weight
-        
-        if layer_weights is not None and len(layer_weights) == len(layers):
-            for idx, layer_idx in enumerate(layers):
-                if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
-                    try:
-                        base_layers[layer_idx].cross_attn.set_influence_weight(layer_weights[idx])
-                    except Exception as e:
-                        self.logger.record({
-                            "error": f"Failed to set influence weight for layer {layer_idx}: {str(e)}",
-                            "timestamp": time.time(),
-                            "conversation_id": self.history.conversation_id
-                        })
-            weight_display = "per-layer"
-        else:
-            for layer_idx in layers:
-                if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
-                    try:
-                        base_layers[layer_idx].cross_attn.set_influence_weight(self.last_weight)
-                    except Exception as e:
-                        self.logger.record({
-                            "error": f"Failed to set influence weight for layer {layer_idx}: {str(e)}",
-                            "timestamp": time.time(),
-                            "conversation_id": self.history.conversation_id
-                        })
-            weight_display = f"{self.last_weight:.2f}"
-    
-        if blend_strength is not None:
-            for layer_idx in layers:
-                if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
-                    try:
-                        base_layers[layer_idx].cross_attn.set_blend_strength(blend_strength)
-                    except Exception as e:
-                        self.logger.record({
-                            "error": f"Failed to set blend strength for layer {layer_idx}: {str(e)}",
-                            "timestamp": time.time(),
-                            "conversation_id": self.history.conversation_id
-                        })
-    
-        if ENABLE_LIFECYCLE_WEIGHTING and weight is not None:
-            for layer_idx in layers:
-                if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
-                    try:
-                        base_layers[layer_idx].cross_attn.set_lifecycle_weight(self.last_weight, curve=LIFECYCLE_CURVE)
-                    except Exception as e:
-                        self.logger.record({
-                            "error": f"Failed to set lifecycle weight for layer {layer_idx}: {str(e)}",
-                            "timestamp": time.time(),
-                            "conversation_id": self.history.conversation_id
-                        })
-    
-        print(f"Scaffold influence: weight={weight_display}, blend_strength={blend_strength if blend_strength is not None else 'unchanged'}")
+
+        injector = CrossAttentionInjector(
+            hidden_size=self.base_config.hidden_size,
+            num_heads=self.base_config.num_attention_heads,
+            logger=self.logger.record
+        )
+
+        layers = injector.get_cross_attention_layers(self.base_model, mode=LAYER_SELECTION_MODE) if USE_DYNAMIC_LAYERS else CROSS_ATTN_LAYERS
+
+        try:
+            injector.set_scaffold_influence(
+                model=self.base_model,
+                layers=layers,
+                weight=self.last_weight if weight is not None else None,
+                blend_strength=blend_strength,
+                layer_weights=layer_weights,
+                lifecycle_curve=LIFECYCLE_CURVE if ENABLE_LIFECYCLE_WEIGHTING else None
+            )
+            weight_display = f"[{', '.join(f'{w:.2f}' for w in layer_weights)}]" if layer_weights else f"{self.last_weight:.2f}"
+            print(f"Scaffold influence: weight={weight_display}, blend_strength={blend_strength if blend_strength is not None else 'unchanged'}")
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to set scaffold influence: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
+            print(f"Error setting scaffold influence: {str(e)}")
 
     def tune_cross_attention(self, weight=None, blend_strength=None, layer_weights=None, dynamic_mode=None):
         if layer_weights is not None:
@@ -1240,24 +1200,37 @@ class SOVLSystem:
 
     def _clear_scaffold_cache(self):
         with self.memory_lock:
-            if hasattr(self, '_temp_scaffold_context') and isinstance(self._temp_scaffold_context, torch.Tensor):
-                self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
-                del self._temp_scaffold_context
-            self._temp_scaffold_context = None
-            if self.state.last_prompt_embedding is not None:
-                last_emb = self.state.last_prompt_embedding.detach().cpu()
-                del last_emb
-                self.state.last_prompt_embedding = None
-            if hasattr(self.state, 'dream_memory'):
-                if self.state.dream_memory:
-                    new_memory = deque(maxlen=self.state.dream_memory_maxlen)
-                    for tensor, weight in self.state.dream_memory:
-                        new_memory.append((tensor.detach().cpu(), weight))
-                    self.state.dream_memory = new_memory
-                else:
+            try:
+                # Clear _temp_scaffold_context
+                if hasattr(self, '_temp_scaffold_context') and self._temp_scaffold_context is not None:
+                    if isinstance(self._temp_scaffold_context, torch.Tensor):
+                        self._temp_scaffold_context = self._temp_scaffold_context.detach()
+                    del self._temp_scaffold_context
+                self._temp_scaffold_context = None
+
+                # Clear last_prompt_embedding
+                if self.state.last_prompt_embedding is not None:
+                    if isinstance(self.state.last_prompt_embedding, torch.Tensor):
+                        self.state.last_prompt_embedding = self.state.last_prompt_embedding.detach()
+                    del self.state.last_prompt_embedding
+                    self.state.last_prompt_embedding = None
+
+                # Clear dream_memory
+                if hasattr(self.state, 'dream_memory') and self.state.dream_memory:
+                    self.state.dream_memory.clear()
                     self.state.dream_memory = deque(maxlen=self.state.dream_memory_maxlen)
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+
+                # Clear CUDA cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            except Exception as e:
+                self.logger.record({
+                    "error": f"Failed to clear scaffold cache: {str(e)}",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id
+                })
+
 
     @contextlib.contextmanager
     def _scaffold_context(self, scaffold_hidden_states):
@@ -1274,12 +1247,27 @@ class SOVLSystem:
             "event": "system_stats",
             "gpu_allocated": torch.cuda.memory_allocated() if torch.cuda.is_available() else None,
             "gpu_reserved": torch.cuda.memory_reserved() if torch.cuda.is_available() else None,
-            "cpu_usage": psutil.cpu_percent(),
-            "ram_usage": psutil.virtual_memory().percent,
+            "gpu_memory_percent": None,
+            "cpu_load": None,
             "temperament": self.state.temperament_score,
             "confidence_history": list(self.state.confidence_history)
         }
-        self.logger.write(stats)
+        if torch.cuda.is_available():
+            try:
+                total_memory = torch.cuda.get_device_properties(0).total_memory
+                allocated_memory = torch.cuda.memory_allocated()
+                stats["gpu_memory_percent"] = (allocated_memory / total_memory * 100) if total_memory > 0 else None
+            except Exception as e:
+                self.logger.record({
+                    "warning": f"Failed to calculate GPU memory percent: {str(e)}",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id
+                })
+        try:
+            stats["cpu_load"] = os.getloadavg()[0]  # 1-minute load average
+        except (AttributeError, OSError):
+            stats["cpu_load"] = None  # Not available on Windows or unsupported systems
+        self.logger.record(stats)
 
     def log_training_metrics(self, metrics):
         """Batch log training metrics"""
@@ -1330,10 +1318,30 @@ class SOVLSystem:
             print("Cross-attention disabled.")
             return
 
+        injector = CrossAttentionInjector(
+            hidden_size=self.base_config.hidden_size,
+            num_heads=self.base_config.num_attention_heads,
+            cross_attention_config={
+                'use_pooling': True,
+                'use_gating': True,
+                'dropout_rate': LORA_DROPOUT,
+                'use_residual': True,
+                'scale_attention': True,
+                'use_sparse_attention': False,
+                'gradient_checkpointing': DEVICE.type == 'cuda',
+                'quantization_mode': QUANTIZATION_MODE,
+            },
+            gradient_checkpointing=DEVICE.type == 'cuda',
+            custom_layers=CUSTOM_LAYERS,
+            logger=self.logger.record,
+        )
+
+        layers_to_inject = injector.get_cross_attention_layers(self.base_model, mode=LAYER_SELECTION_MODE) if USE_DYNAMIC_LAYERS else CROSS_ATTN_LAYERS
+
         config = {
             'hidden_size': self.base_config.hidden_size,
             'num_heads': self.base_config.num_attention_heads,
-            'layers_to_inject': get_cross_attention_layers(self.base_model) if USE_DYNAMIC_LAYERS else CROSS_ATTN_LAYERS,
+            'layers_to_inject': layers_to_inject,
             'injection_strategy': 'sequential',
             'cross_attention_config': {
                 'use_pooling': True,
@@ -1365,7 +1373,7 @@ class SOVLSystem:
             })
             print(f"Cross-attention injection complete in {elapsed:.2f}s.")
         except Exception as e:
-            self.error_logger.write({
+            self.error_logger.record({
                 "error": f"Cross-attention injection failed: {str(e)}",
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc(),
@@ -1403,9 +1411,19 @@ class SOVLSystem:
                 else:
                     try:
                         mapped_entry = self.state.token_map[base_id_item]
-                        mapped_tokens = mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
+                        # Handle both dict and list formats
+                        if isinstance(mapped_entry, dict):
+                            mapped_tokens = mapped_entry['ids']
+                        elif isinstance(mapped_entry, list):
+                            mapped_tokens = mapped_entry
+                        else:
+                            mapped_tokens = [self.scaffold_unk_id]
                     except Exception as e:
-                        print(f"Token mapping error for ID {base_id_item}: {e}")
+                        self.logger.record({
+                            "warning": f"Token mapping error for ID {base_id_item}: {str(e)}",
+                            "timestamp": time.time(),
+                            "conversation_id": self.history.conversation_id
+                        })
                         mapped_tokens = [self.scaffold_unk_id]
 
                 if position + len(mapped_tokens) > max_expanded_len:
@@ -1423,16 +1441,14 @@ class SOVLSystem:
                     break
 
         if truncated:
+            self.logger.record({
+                "warning": f"Token mapping truncated to {max_expanded_len}",
+                "original_length": seq_len,
+                "allowed_length": max_expanded_len,
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
             print(f"Warning: Token mapping truncated to {max_expanded_len}. Consider adjusting limits or input size.")
-            self.logger.record(
-                {
-                    "warning": f"Token mapping truncated to {max_expanded_len}",
-                    "original_length": seq_len,
-                    "allowed_length": max_expanded_len,
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id
-                }
-            )
 
         return mapped_ids[:, :min(max_expanded_len, MAX_SEQ_LENGTH)]
 
