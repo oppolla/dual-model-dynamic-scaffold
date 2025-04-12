@@ -1897,6 +1897,11 @@ class SOVLSystem:
                 del outputs
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            self.logger.record({
+                "event": "generate_cleanup",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
 
     @torch.no_grad()
     def validate_epoch(self, valid_data):
