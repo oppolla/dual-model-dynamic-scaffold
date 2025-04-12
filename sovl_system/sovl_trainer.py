@@ -44,7 +44,9 @@ class TrainingConfig:
     exposure_gain_default: int = 2
     dream_memory_weight: float = 0.1
     enable_dreaming: bool = True
-    repetition_n: int = 3  # For repetition checking
+    repetition_n: int = 3
+    sigmoid_scale: float = 0.5  # Controls steepness of sigmoid curve
+    sigmoid_shift: float = 5.0  # Shifts sigmoid curve along x-axis
 
     def __post_init__(self):
         if self.metrics_to_track is None:
@@ -55,6 +57,8 @@ class TrainingConfig:
         assert self.scheduler_type in ["linear", "cosine", "constant"], "Invalid scheduler type"
         assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "Invalid lifecycle curve"
         assert self.repetition_n >= 2, "Repetition check length must be at least 2"
+        assert self.sigmoid_scale > 0, "Sigmoid scale must be positive"
+        assert self.sigmoid_shift >= 0, "Sigmoid shift must be non-negative"
 
 def collate_batch(batch: List[dict], pad_token_id: int, max_seq_length: int, tokenizer) -> dict:
     """Collate batch of prompt-completion pairs into tensors."""
@@ -468,7 +472,7 @@ class SOVLTrainer:
         print("--- Trainer Dreaming (Placeholder) ---")
 
     def sleep_train(self, log_entries: List[dict]):
-        """Perform sleep training on log entries."""
+        """Perform sleep training on log_entries."""
         if not self.config.enable_sleep_training or not self._should_gestate(log_entries):
             return
         print("\n--- Sleep Training Initiated ---")
