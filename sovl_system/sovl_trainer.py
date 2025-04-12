@@ -166,7 +166,7 @@ class SOVLTrainer:
         """Calculate lifecycle weight based on data exposure."""
         x = self.data_exposure / self.lora_capacity if self.lora_capacity > 0 else 0
         if self.config.lifecycle_curve == "sigmoid_linear":
-            weight = 1 - math.exp(-2.0 * x)
+            weight = 1 / (1 + math.exp(-self.config.sigmoid_scale * (x - self.config.sigmoid_shift)))
         else:  # exponential
             weight = 1 - math.exp(-x)
         return min(1.0, weight)
