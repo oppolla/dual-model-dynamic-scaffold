@@ -7,7 +7,6 @@ import warnings
 from collections import defaultdict
 import time
 
-
 class CrossAttentionLayer(nn.Module):
     """
     Enhanced cross-attention layer with gating, memory efficiency, and dynamic control.
