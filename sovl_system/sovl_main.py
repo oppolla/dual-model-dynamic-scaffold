@@ -636,6 +636,7 @@ class SOVLSystem:
             self.update_metrics(q, score, spontaneous=False)
             self.pressure.value -= CURIOSITY_PRESSURE_DROP
             print(f"Pressure after sleep training question: {self.pressure.value:.2f}")
+            self._update_temperament()
             self.last_question_time = time.time()
             print(f"Curiosity question after sleep training: {q}")
     
@@ -1017,6 +1018,11 @@ class SOVLSystem:
             if self.state.last_prompt_embedding is not None:
                 self.state.last_prompt_embedding = self.state.last_prompt_embedding.detach().cpu()
                 self.state.last_prompt_embedding = None
+            if hasattr(self.state, 'dream_memory') and self.state.dream_memory:
+                new_memory = deque(maxlen=self.state.dream_memory_maxlen)
+                for tensor, weight in self.state.dream_memory:
+                    new_memory.append((tensor.detach().cpu(), weight))
+                self.state.dream_memory = new_memory
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -1244,6 +1250,9 @@ class SOVLSystem:
         self.state.temperament_score = max(-1.0, min(1.0, self.state.temperament_score))
         self.state.temperament_history = deque(self.state.temperament_history, maxlen=TEMPERAMENT_HISTORY_MAXLEN)
         self.state.temperament_history.append(self.state.temperament_score)
+    
+        if ENABLE_CURIOSITY and self.pressure:
+            self.pressure.update(self.state.temperament_score, avg_confidence, 0.0)
     
         label = "melancholic" if self.state.temperament_score <= -0.5 else "restless" if self.state.temperament_score <= 0.0 else "calm" if self.state.temperament_score <= 0.5 else "curious"
         print(f"Temperament score: {self.state.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
