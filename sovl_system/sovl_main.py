@@ -3,8 +3,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, AdamW, get_linear_schedule_with_warmup
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from peft import LoraConfig, get_peft_model, TaskType
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
 import time
 import random
 import bitsandbytes as bnb
@@ -18,23 +20,20 @@ from threading import Lock
 from sovl_logger import Logger
 from sovl_io import load_config, get_config_value, load_jsonl
 from sovl_state import SOVLState, ConversationHistory
+from sovl_trainer import TrainingConfig, SOVLTrainer
 
 class InsufficientDataError(Exception):
     pass
 
-def calculate_confidence_score(logits, generated_ids):
-    if not logits or not isinstance(logits, (list, tuple)) or len(logits) == 0 or len(logits) != len(generated_ids):
-        print(f"Warning: Logits length {len(logits) if logits else 'N/A'} != generated_ids length {len(generated_ids)}. Defaulting confidence to 0.5.")
-        return 0.5
+from sovl_processor import LogitsProcessor
+
+def calculate_confidence_score(logits, generated_ids) -> float:
+    """Wrapper for backward compatibility"""
     try:
-        stacked_logits = torch.stack(logits)
-        probs = torch.softmax(stacked_logits, dim=-1)
-        max_probs = torch.max(probs, dim=-1).values
-        if max_probs.var().item() < 1e-5:  # Flat probs = low confidence
-            return 0.2
-        return max_probs.mean().item()
-    except (RuntimeError, TypeError) as e:
-        print(f"Confidence score failed: {e}")
+        processor = LogitsProcessor(logits)
+        return processor.calculate_confidence(generated_ids)
+    except Exception as e:
+        print(f"Confidence score error: {str(e)} - Using default 0.5")
         return 0.5
 
 # Load training data
@@ -332,6 +331,46 @@ class SOVLSystem:
         self.base_model.config.pad_token_id = self.base_tokenizer.pad_token_id
         self.scaffolds[0].config.pad_token_id = self.scaffold_tokenizer.pad_token_id
 
+        # Initialize SOVLTrainer
+        training_config = TrainingConfig(
+            learning_rate=LEARNING_RATE,
+            grad_accum_steps=ACCUMULATION_STEPS,
+            weight_decay=0.01,
+            total_steps=(len(TRAIN_DATA) // BATCH_SIZE) * TRAIN_EPOCHS,
+            max_grad_norm=1.0,
+            use_amp=(DEVICE.type == "cuda"),
+            max_patience=MAX_PATIENCE,
+            batch_size=BATCH_SIZE,
+            max_epochs=TRAIN_EPOCHS,
+            validate_every_n_steps=len(TRAIN_DATA) // BATCH_SIZE,  # Validate once per epoch
+            checkpoint_interval=1000,
+            checkpoint_path="checkpoints/sovl_trainer",
+            scheduler_type="linear",
+            cosine_min_lr=1e-6,
+            warmup_ratio=0.1,
+            dropout_rate=LORA_DROPOUT,
+            max_seq_length=MAX_SEQ_LENGTH,
+            metrics_to_track=["loss", "accuracy", "confidence"]
+        )
+        def loss_fn(logits, labels):
+            mask = labels != -100
+            return F.cross_entropy(
+                logits.view(-1, logits.size(-1))[mask.view(-1)],
+                labels.view(-1)[mask.view(-1)],
+                ignore_index=-100
+            )
+        self.trainer = SOVLTrainer(
+            model=self.scaffolds[0],
+            config=training_config,
+            device=DEVICE,
+            loss_fn=loss_fn,
+            logger=self.logger.record,
+            memory_lock=Lock(),  # Dedicated lock for trainer
+            tokenizer=self.base_tokenizer
+        )
+        self.trainer.loss_weight_fn = self.get_loss_weight
+        self.trainer.memory_check = self.check_memory_health
+
         def build_token_map(base_tokenizer, scaffold_tokenizer):
             token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
             for base_token, base_id in base_tokenizer.get_vocab().items():
@@ -353,11 +392,6 @@ class SOVLSystem:
         print("Cross-attention injection complete.")
 
         self._temp_scaffold_context = None
-        self.optimizer = None
-        self.scheduler = None
-        self.global_step = 0
-        self.best_valid_loss = float('inf')
-        self.patience = 0
         self.memory_lock = Lock()
         self.mem_usage_history = deque(maxlen=10)
         self.dynamic_threshold_base = MEMORY_THRESHOLD
@@ -428,8 +462,8 @@ class SOVLSystem:
                     self.dynamic_threshold_base * (1 + (model_size/total_mem) * 0.1 - avg_mem_usage * 0.2)
                 )
             )
-    
-            if mem_ratio > dynamic_threshold:
+            from sovl_utils import float_lt
+            if float_lt(lifecycle_stage, 0.25):
                 memory_pruned = False
                 quantization_changed = False
                 cache_cleared = False
@@ -931,7 +965,11 @@ class SOVLSystem:
                             dream_tensors, dream_weights = zip(*self._parent_system.state.dream_memory)
                             dream_tensors = torch.stack(dream_tensors).to(base_hidden_state_output.device)
                             dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=base_hidden_state_output.device)
-                            dream_avg = (dream_tensors * dream_weights.unsqueeze(-1)).sum(dim=0) / dream_weights.sum()
+                            from sovl_utils import safe_divide
+                            dream_avg = safe_divide(
+                                (dream_tensors * dream_weights.unsqueeze(-1)).sum(dim=0),
+                                dream_weights.sum()
+                            )
                             scaffold_context = (1 - DREAM_MEMORY_WEIGHT) * scaffold_context + DREAM_MEMORY_WEIGHT * dream_avg
                         fused_hidden_state = self.cross_attn(base_hidden_state_output, scaffold_context)
                         return (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
@@ -944,13 +982,6 @@ class SOVLSystem:
         self.dry_run = True
         self.dry_run_params = {'max_samples': max_samples, 'max_length': max_length, 'validate_architecture': validate_architecture, 'skip_training': skip_training}
         print(f"Dry run activated (max_samples={max_samples}, max_length={max_length})")
-
-    def setup_optimizer(self, num_training_steps):
-        trainable_params = list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else [])
-        print(f"Optimizer Setup: {len(trainable_params)} trainable parameters with learning rate {LEARNING_RATE}.")
-        self.optimizer = AdamW(trainable_params, lr=LEARNING_RATE)
-        self.scheduler = get_linear_schedule_with_warmup(self.optimizer, num_warmup_steps=0, num_training_steps=num_training_steps)
-        print("Optimizer and scheduler successfully initialized.")
 
     def map_sequence(self, base_input_ids):
         batch_size = base_input_ids.size(0)
@@ -1048,42 +1079,56 @@ class SOVLSystem:
             self._reset_sleep_state()
             return False
 
-        if resume and (not self.sleep_batch or not self.sleep_optimizer):
+        if resume and not self.sleep_batch:
             print("Warning: Resume requested but sleep state invalid. Starting fresh.")
             resume = False
 
         if not resume:
             self.is_sleeping = True
             self.sleep_progress = 0
-            self.sleep_batch = [(self.base_tokenizer(entry["prompt"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE),
-                                self.base_tokenizer(entry["response"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).input_ids.to(DEVICE))
-                                for entry in log_entries if "prompt" in entry and "response" in entry]
-            lr = LEARNING_RATE * 0.5 * math.exp(-self.state.data_exposure / self.lora_capacity)
-            self.sleep_optimizer = AdamW(self.scaffolds[0].parameters(), lr=lr)
+            self.sleep_batch = [
+                {
+                    'prompt': entry["prompt"],
+                    'completion': entry["response"]
+                }
+                for entry in log_entries
+                if "prompt" in entry and "response" in entry
+            ]
             self.sleep_total_loss = 0.0
             self.sleep_steps = 0
             print("\nSystem Gestating...")
             if ENABLE_DREAMING and self._should_dream():
                 self._dream()
-            self.state.data_exposure += sum(len(entry["prompt"]) + len(entry["response"]) for entry in log_entries)
+            self.state.data_exposure += sum(
+                len(entry["prompt"]) + len(entry["response"])
+                for entry in log_entries
+            )
 
         if self.sleep_progress < len(self.sleep_batch):
-            inputs, labels = self.sleep_batch[self.sleep_progress]
-            self.scaffolds[0].train()
-            scaffold_inputs = self.tokenize_and_map(inputs["input_ids"])
+            batch = [self.sleep_batch[self.sleep_progress]]
+            formatted_batch = collate_batch(
+                batch,
+                self.base_tokenizer.pad_token_id,
+                self.trainer.config.max_seq_length,
+                self.base_tokenizer
+            )
+            prompts = formatted_batch['prompt']
+            scaffold_inputs = self.tokenize_and_map(prompts)
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-            with self._scaffold_context(scaffold_hidden_states):
-                outputs = self.base_model(**inputs)
-                weight = 1.2 if any(e["prompt"] == inputs["input_ids"] and e["is_system_question"] and e["response"] for e in log_entries) else 1.0
-                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1)) * weight
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.scaffolds[0].parameters(), 1.0)
-            self.sleep_optimizer.step()
-            self.sleep_optimizer.zero_grad()
-            self.sleep_total_loss += loss.item()
-            self.sleep_steps += 1
+
+            loss, confidence = self.trainer.train_step(
+                batch=formatted_batch,
+                scaffold_context=scaffold_hidden_states,
+                grad_clip=True,
+                loss_weight_fn=self.get_loss_weight,
+                dry_run=False,
+                memory_check=self.check_memory_health
+            )
+
+            self.sleep_total_loss += loss if loss is not None else 0.0
+            self.sleep_steps += 1 if loss is not None else 0
             self.sleep_progress += 1
-            if self.sleep_steps % 5 == 0:
+            if self.sleep_steps % 5 == 0 and self.sleep_steps > 0:
                 print(f"Gestation progress: {self.sleep_progress}/{len(self.sleep_batch)}, loss: {self.sleep_total_loss / self.sleep_steps:.4f}")
             return True
 
@@ -1098,7 +1143,7 @@ class SOVLSystem:
         q = self.generate_curiosity_question() if not self.state.unanswered_q else self.state.unanswered_q.popleft()[0]
         if q:
             print(f"{q}")
-            self.logger.write({
+            self.logger.record({
                 "prompt": q,
                 "response": "",
                 "timestamp": time.time(),
@@ -1196,30 +1241,34 @@ class SOVLSystem:
         if ENABLE_DREAMING and self._should_dream():
             self._dream()
 
-        self.scaffolds[0].train()
-        optimizer = AdamW(self.scaffolds[0].parameters(), lr=LEARNING_RATE * 0.5)
-        batch = []
-        for entry in log_entries:
-            if "prompt" in entry and "response" in entry:
-                inputs = self.base_tokenizer(entry["prompt"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
-                labels = self.base_tokenizer(entry["response"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).input_ids.to(DEVICE)
-                batch.append((inputs, labels))
+        batch = [
+            {
+                'prompt': entry["prompt"],
+                'completion': entry["response"]
+            }
+            for entry in log_entries
+            if "prompt" in entry and "response" in entry
+        ]
+        if not batch:
+            print("No valid training data in logs.")
+            return
 
-        total_loss = 0
-        for inputs, labels in batch:
-            scaffold_inputs = self.tokenize_and_map(inputs["input_ids"])
-            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-            with self._scaffold_context(scaffold_hidden_states):
-                outputs = self.base_model(**inputs)
-                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1))
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.scaffolds[0].parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
-            total_loss += loss.item()
+        def scaffold_provider(batch):
+            prompts = batch['prompt']
+            scaffold_inputs = self.tokenize_and_map(prompts)
+            return self.get_scaffold_hidden_states(scaffold_inputs)
 
-        avg_loss = total_loss / len(batch) if batch else 0
-        print(f"Sleep Training Loss: {avg_loss:.4f}")
+        # Temporarily adjust config for sleep training
+        original_epochs = self.trainer.config.max_epochs
+        self.trainer.config.max_epochs = 1
+        self.trainer.train(
+            train_data=batch,
+            valid_data=None,
+            scaffold_provider=scaffold_provider
+        )
+        self.trainer.config.max_epochs = original_epochs
+
+        print(f"Sleep Training Loss: Logged via trainer")
         self.last_trained = time.time()
         self.logger.clear()
         self.last_weight = self.get_life_curve_weight()
@@ -1257,87 +1306,65 @@ class SOVLSystem:
     def train_step(self, batch):
         if self.dry_run:
             print("Dry run train step")
-            dry_batch = [{'prompt': item['prompt'][:self.dry_run_params['max_length']], 'completion': item['completion'][:self.dry_run_params['max_length']]} for item in batch[:self.dry_run_params['max_samples']]]
-            with torch.no_grad():
-                full_texts = [p + c for p, c in zip([item['prompt'] for item in dry_batch], [item['completion'] for item in dry_batch])]
-                inputs = self.base_tokenizer(full_texts, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
-                outputs = self.base_model(**inputs)
-                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), inputs.input_ids.view(-1), ignore_index=-100)
-                print(f"Dry run loss: {loss.item()}")
+            dry_batch = [
+                {
+                    'prompt': item['prompt'][:self.dry_run_params['max_length']],
+                    'completion': item['completion'][:self.dry_run_params['max_length']]
+                }
+                for item in batch[:self.dry_run_params['max_samples']]
+            ]
+            loss, confidence = self.trainer.train_step(
+                batch=collate_batch(
+                    dry_batch,
+                    self.base_tokenizer.pad_token_id,
+                    self.trainer.config.max_seq_length,
+                    self.base_tokenizer
+                ),
+                dry_run=True
+            )
+            print(f"Dry run loss: {loss}")
             return None
 
-        if not self.optimizer:
-            print("Optimizer not set up. Setting up optimizer now.")
-            num_training_steps = (len(TRAIN_DATA) // BATCH_SIZE) * TRAIN_EPOCHS
-            self.setup_optimizer(num_training_steps)
-
-        self.scaffolds[0].train()
-        self.base_model.eval()
-
+        # Prepare scaffold context
         prompts = [item['prompt'] for item in batch]
-        completions = [item['completion'] for item in batch]
-        full_texts = [p + c for p, c in zip(prompts, completions)]
+        scaffold_inputs = self.tokenize_and_map(prompts)
+        scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
 
-        base_inputs = self.base_tokenizer(full_texts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
-        base_input_ids = base_inputs.input_ids
-        base_attention_mask = base_inputs.attention_mask
+        # Train step
+        formatted_batch = collate_batch(
+            batch,
+            self.base_tokenizer.pad_token_id,
+            self.trainer.config.max_seq_length,
+            self.base_tokenizer
+        )
+        loss, confidence = self.trainer.train_step(
+            batch=formatted_batch,
+            scaffold_context=scaffold_hidden_states,
+            grad_clip=True,
+            loss_weight_fn=self.get_loss_weight,
+            dry_run=False,
+            memory_check=self.check_memory_health
+        )
 
-        prompts_base = self.base_tokenizer(prompts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH)
-        scaffold_input_ids = self.map_sequence(prompts_base.input_ids)
-        scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
-        scaffold_inputs = {'input_ids': scaffold_input_ids, 'attention_mask': scaffold_attention_mask}
+        # Update exposure and token map
+        if loss is not None:
+            exposure_gain = (
+                EXPOSURE_GAIN_EAGER
+                if self.state.temperament_score > 0.5
+                else EXPOSURE_GAIN_DEFAULT
+            )
+            for prompt in prompts:
+                if prompt not in self.state.seen_prompts:
+                    self.state.add_seen_prompt(prompt)
+                    self.state.data_exposure += exposure_gain
+            if self.use_token_map_memory and confidence is not None:
+                self._update_token_map_memory(prompts[0], confidence)
 
-        labels = base_input_ids.clone()
-        labels[labels == self.base_tokenizer.pad_token_id] = -100
-        prompt_mask = self.base_tokenizer(prompts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH).attention_mask.to(DEVICE)
-        labels = torch.where(prompt_mask.bool(), -100, base_input_ids)
-
-        with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
-            scaffold_outputs = self.scaffolds[0](**scaffold_inputs, output_hidden_states=True)
-            scaffold_hidden_states = scaffold_outputs.hidden_states[-1]
-            with self._scaffold_context(scaffold_hidden_states):
-                outputs = self.base_model(input_ids=base_input_ids, attention_mask=base_attention_mask)
-                log_entries = self.logger.read()
-                weight = 1.2 if any(e["prompt"] in prompts and e.get("is_system_question", False) and e["response"] for e in log_entries) else 1.0
-                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1)) * weight
-
-        if torch.isnan(loss) or torch.isinf(loss):
-            print("Warning: Invalid loss. Skipping batch.")
-            self.optimizer.zero_grad()
-            return None
-
-        accumulation_steps = ACCUMULATION_STEPS
-        scaled_loss = loss / accumulation_steps
-        scaled_loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else []), max_norm=1.0)
-
-        if (self.global_step + 1) % accumulation_steps == 0:
-            if self.use_scaffold_memory:
-               confidence = calculate_confidence_score(outputs.logits, base_input_ids)
-               if confidence > 0.7:
-                   for param in self.scaffolds[0].parameters():
-                       if param.grad is not None:
-                           torch.nn.utils.clip_grad_norm_(param, max_norm=1.0)
-                           param.data += param.grad * 0.01
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
-        self.global_step += 1
-
-        exposure_gain = EXPOSURE_GAIN_EAGER if self.state.temperament_score > 0.5 else EXPOSURE_GAIN_DEFAULT
-        for prompt in prompts:
-            if prompt not in self.state.seen_prompts:
-                self.state.add_seen_prompt(prompt)
-                self.state.data_exposure += exposure_gain
-        if self.use_token_map_memory:
-            self._update_token_map_memory(prompts[0], calculate_confidence_score(outputs.logits, base_input_ids))
-
-        return loss.item()
+        return loss
 
     def run_training_cycle(self, train_data, valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
-        num_training_steps = (len(train_data) // batch_size) * epochs
-        if num_training_steps == 0:
-            print("Not enough data or epochs for training.")
+        if len(train_data) < batch_size or not valid_data:
+            print("Not enough data for training.")
             return
 
         if ENABLE_LIFECYCLE_WEIGHTING:
@@ -1347,40 +1374,29 @@ class SOVLSystem:
         self.set_scaffold_influence(influence_weight)
         print(f"Data exposure: {self.state.data_exposure} | Scaffold influence: {influence_weight:.3f}")
 
-        if not self.dry_run or not self.dry_run_params['skip_training']:
-            self.setup_optimizer(num_training_steps)
+        if self.dry_run and self.dry_run_params['skip_training']:
+            print("\n=== DRY RUN TRAINING ===")
+            dry_batch = train_data[:self.dry_run_params['max_samples']]
+            loss = self.train_step(dry_batch)
+            print(f"Dry run training complete: Loss = {loss}")
+            return
+
         print(f"\n--- Training ({epochs} epochs) ---")
         start_time = time.time()
 
-        for epoch in range(epochs):
-            print(f"\nEpoch {epoch + 1}/{epochs}")
-            epoch_loss = 0
-            steps_in_epoch = 0
-            random.shuffle(train_data)
-            for i in range(0, len(train_data), batch_size):
-                batch = train_data[i:i + batch_size]
-                if not batch:
-                    continue
-                step_loss = self.train_step(batch)
-                if step_loss is not None:
-                    epoch_loss += step_loss
-                    steps_in_epoch += 1
-                    print(f"  Step {self.global_step}/{num_training_steps} | Loss: {step_loss:.4f}")
-            valid_loss = self.validate_epoch(valid_data)
-            avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0
-            print(f"Epoch {epoch + 1} Stats: Train Loss: {avg_epoch_loss:.4f}, Valid Loss: {valid_loss:.4f}")
+        def scaffold_provider(batch):
+            prompts = batch['prompt']
+            scaffold_inputs = self.tokenize_and_map(prompts)
+            return self.get_scaffold_hidden_states(scaffold_inputs)
 
-            if self.dry_run and self.dry_run_params['skip_training']:
-                break
-            if valid_loss < self.best_valid_loss:
-                self.best_valid_loss = valid_loss
-                self.patience = 0
-            else:
-                self.patience += 1
-                print(f"Patience: {self.patience}/{self.max_patience}")
-                if self.patience >= self.max_patience:
-                    print("Early stopping.")
-                    break
+        self.trainer.train(
+            train_data=train_data,
+            valid_data=valid_data,
+            scaffold_provider=scaffold_provider
+        )
+
+        self.last_weight = self.get_life_curve_weight()
+        self.set_scaffold_influence(self.last_weight)
         print(f"--- Training Finished ({time.time() - start_time:.2f}s) ---")
 
     def has_repetition(self, output_ids, n=3):
@@ -1412,6 +1428,14 @@ class SOVLSystem:
         })
         self.history = temp_history
         return response
+    
+    def get_loss_weight(self, batch):
+        log_entries = self.logger.read()
+        prompts = batch['prompt']
+        for prompt in prompts:
+            if any(e["prompt"] == prompt and e.get("is_system_question", False) and e["response"] for e in log_entries):
+                return 1.2
+        return 1.0
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
@@ -1551,30 +1575,15 @@ class SOVLSystem:
         if self.dry_run:
             print("\n=== DRY RUN VALIDATION ===")
             return random.random()
-        self.scaffolds[0].eval()
-        total_loss, batches = 0, 0
 
-        for i in range(0, len(valid_data), BATCH_SIZE):
-            batch = valid_data[i:i + BATCH_SIZE]
-            if not batch:
-                continue
-            prompts = [item['prompt'] for item in batch]
-            completions = [item['completion'] for item in batch]
-            full_texts = [p + c for p, c in zip(prompts, completions)]
-
+        def scaffold_provider(batch):
+            prompts = batch['prompt']
             scaffold_inputs = self.tokenize_and_map(prompts)
-            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
+            return self.get_scaffold_hidden_states(scaffold_inputs)
 
-            with self._scaffold_context(scaffold_hidden_states):
-                base_inputs = self.base_tokenizer(full_texts, return_tensors='pt', padding='max_length', truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
-                labels = base_inputs.input_ids.clone()
-                labels[labels == self.base_tokenizer.pad_token_id] = -100
-                outputs = self.base_model(**base_inputs)
-                loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1), ignore_index=-100)
-
-            total_loss += loss.item()
-            batches += 1
-        return total_loss / batches if batches > 0 else 0
+        valid_loss, metrics = self.trainer.validate(valid_data, scaffold_provider)
+        print(f"Validation Loss: {valid_loss:.4f}, Metrics: {metrics}")
+        return valid_loss
 
     def cleanup(self):
         """Comprehensive cleanup with state preservation"""
@@ -1629,5 +1638,5 @@ if not TRAIN_DATA or not VALID_DATA:
 print("Quantization mode:", QUANTIZATION_MODE)
 
 if __name__ == "__main__":
-    from sovl_CLI import run_cli
+    from sovl_cli import run_cli
     run_cli()
