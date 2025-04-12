@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union, Dict
 import warnings
 from collections import defaultdict
+import time
 
 
 class CrossAttentionLayer(nn.Module):
@@ -501,15 +502,15 @@ class CrossAttentionInjector:
 
         return base_model
 
-    def _create_wrapped_layer(
+    def _create_sequential_layer(
         self,
         original_layer: nn.Module,
         cross_attention_layer: CrossAttentionLayer,
         scaffold_models: List[nn.Module],
         token_map: Optional[Dict],
     ) -> nn.Module:
-        """Create a layer that replaces the original with cross-attention."""
-        class WrappedLayer(nn.Module):
+        """Create a layer that runs cross-attention after original layer."""
+        class SequentialLayer(nn.Module):
             def __init__(self, base_layer, cross_attn, scaffolds, token_map, parent):
                 super().__init__()
                 self.base_layer = base_layer
@@ -519,15 +520,16 @@ class CrossAttentionInjector:
                 self._parent = parent
 
             def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
+                outputs = self.base_layer(hidden_states, *args, **kwargs)
+                hidden_states = outputs[0] if isinstance(outputs, tuple) else outputs
                 if scaffold_context is not None:
                     context = scaffold_context.to(hidden_states.device)
                     if self._parent.scaffold_proj is not None:
                         context = self._parent.scaffold_proj(context)
                     hidden_states = self.cross_attn(hidden_states, context, **kwargs)
-                outputs = self.base_layer(hidden_states, *args, **kwargs)
-                return outputs
+                return (hidden_states,) + outputs[1:] if isinstance(outputs, tuple) else hidden_states
 
-        return WrappedLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
+        return SequentialLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
 
     def _create_parallel_layer(
         self,
