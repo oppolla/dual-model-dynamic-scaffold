@@ -5,9 +5,7 @@ from sovl_system.sovl_main import SOVLSystem, get_cross_attention_layers
 """
 This Python test file contains a suite of unit tests for the SOVL (Self-Organizing Virtual 
 Lifeform) System, specifically focusing on the integration and behavior of cross-attention 
-layers within the model. The SOVL System is an AI framework that employs a base language 
-model (LLM) paired with a scaffolded secondary LLM to facilitate autonomous learning, 
-leveraging "sleep" and "dream" mechanisms for continuous improvement.
+layers within the model. 
 
 The tests in this file are structured as follows:
 
