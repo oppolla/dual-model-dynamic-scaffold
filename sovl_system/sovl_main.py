@@ -14,55 +14,12 @@ import contextlib
 from collections import deque, defaultdict
 import uuid
 import os
+from threading import Lock
 from sovl_logger import Logger
+from sovl_io import load_config, get_config_value, load_jsonl
 
 class InsufficientDataError(Exception):
     pass
-
-def load_jsonl(file_path, min_entries=10):
-    data = []
-    error_log = []
-
-    try:
-        # Attempt to open and read the file
-        with open(file_path, 'r') as file:
-            for line_number, line in enumerate(file, start=1):
-                try:
-                    entry = json.loads(line.strip())
-                    # Validate the structure of each entry
-                    if not isinstance(entry.get("prompt"), str) or not isinstance(entry.get("response"), str):
-                        error_log.append(f"Line {line_number}: Missing or invalid 'prompt' or 'response'. Skipping.")
-                        continue
-                    # Append valid entry
-                    data.append({"prompt": entry["prompt"], "completion": entry["response"]})
-                except json.JSONDecodeError as e:
-                    error_log.append(f"Line {line_number}: JSON decode error: {e}. Skipping.")
-        
-        # Print warnings if any
-        if error_log:
-            print("Warnings encountered during data loading:")
-            for error in error_log:
-                print(f"WARNING: {error}")
-            # Optionally, write errors to a file
-            with open("data_load_errors.log", "w") as log_file:
-                log_file.write("\n".join(error_log))
-        
-        # Check if the minimum threshold is met
-        if len(data) < min_entries:
-            print(f"ERROR: Loaded only {len(data)} valid entries from {file_path}. Minimum required: {min_entries}.")
-            raise InsufficientDataError(f"Aborting: Insufficient valid data entries. Check 'data_load_errors.log' for details.")
-    
-    except FileNotFoundError:
-        print(f"CRITICAL: File not found: {file_path}. Aborting process.")
-        sys.exit(1)  # Exit the process cleanly with a failure status
-    
-    except Exception as e:
-        print(f"CRITICAL: Unexpected error: {e}. Aborting process.")
-        sys.exit(1)  # Exit the process cleanly with a failure status
-
-    # Return validated data
-    print(f"INFO: Data Validation: {len(data)} entries loaded successfully.")
-    return data
 
 def calculate_confidence_score(logits, generated_ids):
     if not logits or not isinstance(logits, (list, tuple)) or len(logits) == 0 or len(logits) != len(generated_ids):
@@ -81,7 +38,7 @@ def calculate_confidence_score(logits, generated_ids):
 
 # Load training data
 try:
-    TRAIN_DATA = load_jsonl("sovl_seed.jsonl")
+    TRAIN_DATA = sovl_io.load_jsonl("sovl_seed.jsonl")
 except InsufficientDataError as e:
     print(e)
     TRAIN_DATA = []  # Fallback to empty list
@@ -340,14 +297,11 @@ class CuriosityPressure:
 class SOVLSystem:
     def __init__(self):
         self.logger = Logger("sovl_logs.jsonl")
-        try:
-            with open("sovl_config.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
-                self.quantization_mode = config.get("quantization_mode", QUANTIZATION_MODE)
-                self.enable_error_listening = get_config_value(config, "controls_config.enable_error_listening", ENABLE_ERROR_LISTENING)
-        except FileNotFoundError:
-            self.quantization_mode = QUANTIZATION_MODE
-            self.enable_error_listening = ENABLE_ERROR_LISTENING  # Default if no config file
+        config_defaults = {"quantization_mode": QUANTIZATION_MODE, "enable_error_listening": ENABLE_ERROR_LISTENING}
+        config = load_config("sovl_config.json", config_defaults)
+        self.quantization_mode = config.get("quantization_mode", QUANTIZATION_MODE)  # Still works with top-level keys
+        self.enable_error_listening = get_config_value(config, "controls_config.enable_error_listening", ENABLE_ERROR_LISTENING)
+
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
         self.dry_run = DRY_RUN
