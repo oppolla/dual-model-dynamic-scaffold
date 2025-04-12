@@ -32,6 +32,8 @@ class CrossAttentionLayer(nn.Module):
         gradient_checkpointing: bool = False,
         quantization_mode: str = 'fp16',
         scale_factor: Optional[float] = None,
+        sparse_pattern: str = 'window',
+        sparse_window_size: int = 128,
     ):
         """
         Initialize the cross-attention layer.
@@ -48,6 +50,8 @@ class CrossAttentionLayer(nn.Module):
             gradient_checkpointing (bool): Enable gradient checkpointing.
             quantization_mode (str): Quantization mode ('fp16', 'int8', 'int4').
             scale_factor (Optional[float]): Custom attention scaling factor.
+            sparse_pattern (str): Sparse attention pattern ('window', 'block').
+            sparse_window_size (int): Size of sparse window for 'window' pattern.
 
         Example:
             >>> layer = CrossAttentionLayer(hidden_size=768, num_heads=12, use_pooling=True)
@@ -69,6 +73,8 @@ class CrossAttentionLayer(nn.Module):
         self.quantization_mode = quantization_mode
         self.scale = scale_factor if scale_factor is not None else (self.head_dim ** -0.5 if scale_attention else 1.0)
         self.logger = None  # Will be set by injector if provided
+        self.sparse_pattern = sparse_pattern
+        self.sparse_window_size = sparse_window_size
 
         # Dynamic control parameters
         self.influence_weight = nn.Parameter(torch.tensor(1.0), requires_grad=False)
@@ -108,7 +114,9 @@ class CrossAttentionLayer(nn.Module):
 
         # Sparse attention setup
         if use_sparse_attention:
-            self.sparse_mask = None  # To be initialized based on sequence length
+            self.sparse_mask = self._init_sparse_mask(max_seq_len=512)
+        else:
+            self.sparse_mask = None
 
         # Key-value cache for inference
         self.use_cache = False
@@ -127,6 +135,66 @@ class CrossAttentionLayer(nn.Module):
         if self.use_gating:
             nn.init.xavier_uniform_(self.gate[0].weight, gain=gain)
             nn.init.constant_(self.gate[0].bias, 0.0)
+
+    def _init_sparse_mask(self, max_seq_len: int) -> torch.Tensor:
+        """Initialize sparse attention mask based on pattern."""
+        if self.sparse_pattern == 'window':
+            mask = torch.zeros(max_seq_len, max_seq_len)
+            for i in range(max_seq_len):
+                start = max(0, i - self.sparse_window_size // 2)
+                end = min(max_seq_len, i + self.sparse_window_size // 2 + 1)
+                mask[i, start:end] = 1.0
+            return mask.bool()
+        elif self.sparse_pattern == 'block':
+            block_size = self.sparse_window_size
+            mask = torch.zeros(max_seq_len, max_seq_len)
+            for i in range(0, max_seq_len, block_size):
+                mask[i:i+block_size, i:i+block_size] = 1.0
+            return mask.bool()
+        else:
+            raise ValueError(f"Unknown sparse pattern: {self.sparse_pattern}")
+
+    def _prepare_attention_mask(
+        self,
+        attention_mask: Optional[torch.Tensor],
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        """Prepare attention mask in additive format."""
+        if attention_mask is None:
+            return None
+        try:
+            # Ensure mask is additive (negative infinity for masked positions)
+            if attention_mask.dtype == torch.bool:
+                attention_mask = attention_mask.float().masked_fill(~attention_mask, float('-inf'))
+            elif attention_mask.dtype != torch.float:
+                attention_mask = attention_mask.float()
+            # Broadcast to [batch_size, num_heads, seq_len, seq_len]
+            if attention_mask.dim() == 2:
+                attention_mask = attention_mask.unsqueeze(0).unsqueeze(1)
+            elif attention_mask.dim() == 3:
+                attention_mask = attention_mask.unsqueeze(1)
+            if attention_mask.shape != (batch_size, self.num_heads, seq_len, seq_len):
+                attention_mask = attention_mask.expand(batch_size, self.num_heads, seq_len, seq_len)
+            return attention_mask.to(device)
+        except Exception as e:
+            if hasattr(self, 'logger') and callable(self.logger):
+                self.logger({
+                    "warning": f"Attention mask preparation failed: {str(e)}",
+                    "timestamp": time.time(),
+                    "mask_shape": list(attention_mask.shape) if attention_mask is not None else None
+                })
+            return None
+
+    def reset_cache(self):
+        """Reset key-value cache for inference."""
+        self.kv_cache = None
+        if hasattr(self, 'logger') and callable(self.logger):
+            self.logger({
+                "event": "cache_reset",
+                "timestamp": time.time()
+            })
 
     def set_influence_weight(self, weight: float):
         """Set the influence weight for attention output."""
@@ -193,7 +261,8 @@ class CrossAttentionLayer(nn.Module):
         v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
 
         # Cache keys and values if enabled
-        if use_cache or self.use_cache:
+        self.use_cache = use_cache
+        if self.use_cache:
             if self.kv_cache is None:
                 self.kv_cache = (k, v)
             else:
@@ -201,15 +270,22 @@ class CrossAttentionLayer(nn.Module):
                 k = torch.cat([prev_k, k], dim=2)
                 v = torch.cat([prev_v, v], dim=2)
                 self.kv_cache = (k, v)
+        else:
+            self.kv_cache = None
+
+        # Prepare attention mask
+        seq_len = q.size(-2)
+        attention_mask = self._prepare_attention_mask(attention_mask, batch_size, seq_len, q.device)
 
         # Attention computation
         if self.use_sparse_attention:
-            # Placeholder for sparse attention (e.g., window-based)
+            seq_len = k.size(2)
+            # Resize sparse mask if sequence length differs
+            if self.sparse_mask.shape[-1] < seq_len:
+                self.sparse_mask = self._init_sparse_mask(max_seq_len=seq_len).to(k.device)
+            sparse_mask = self.sparse_mask[:seq_len, :seq_len].unsqueeze(0).unsqueeze(1)
             attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            if self.sparse_mask is None:
-                seq_len = k.size(2)
-                self.sparse_mask = torch.tril(torch.ones(seq_len, seq_len, device=k.device)).unsqueeze(0).unsqueeze(0)
-            attn_scores = attn_scores.masked_fill(self.sparse_mask == 0, float('-inf'))
+            attn_scores = attn_scores + (~sparse_mask).float() * float('-inf')
         elif hasattr(F, 'scaled_dot_product_attention'):
             attn_output = F.scaled_dot_product_attention(
                 q, k, v,
@@ -220,7 +296,7 @@ class CrossAttentionLayer(nn.Module):
         else:
             attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
             if attention_mask is not None:
-                attn_scores = attn_scores.masked_fill(attention_mask == 0, float('-inf'))
+                attn_scores = attn_scores + attention_mask
             attn_probs = torch.softmax(attn_scores, dim=-1)
             attn_output = torch.matmul(attn_probs, v)
 
@@ -500,6 +576,33 @@ class CrossAttentionInjector:
                 raise ValueError(error_msg)
 
         return base_model
+    
+    def _create_wrapped_layer(
+        self,
+        original_layer: nn.Module,
+        cross_attention_layer: CrossAttentionLayer,
+        scaffold_models: List[nn.Module],
+        token_map: Optional[Dict],
+    ) -> nn.Module:
+        """Create a layer that replaces the original layer with cross-attention."""
+        class WrappedLayer(nn.Module):
+            def __init__(self, cross_attn, scaffolds, token_map, parent):
+                super().__init__()
+                self.cross_attn = cross_attn
+                self.scaffolds = scaffolds
+                self.token_map = token_map or defaultdict(lambda: [0])
+                self._parent = parent
+
+            def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
+                if scaffold_context is not None:
+                    context = scaffold_context.to(hidden_states.device)
+                    if self._parent.scaffold_proj is not None:
+                        context = self._parent.scaffold_proj(context)
+                    output = self.cross_attn(hidden_states, context, **kwargs)
+                    return (output,) if isinstance(hidden_states, tuple) else output
+                return hidden_states
+
+        return WrappedLayer(cross_attention_layer, scaffold_models, token_map, self)
 
     def _create_sequential_layer(
         self,
@@ -562,35 +665,6 @@ class CrossAttentionInjector:
                 return base_output
 
         return ParallelLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
-
-    def _create_sequential_layer(
-        self,
-        original_layer: nn.Module,
-        cross_attention_layer: CrossAttentionLayer,
-        scaffold_models: List[nn.Module],
-        token_map: Optional[Dict],
-    ) -> nn.Module:
-        """Create a layer that runs cross-attention after original layer."""
-        class SequentialLayer(nn.Module):
-            def __init__(self, base_layer, cross_attn, scaffolds, token_map, parent):
-                super().__init__()
-                self.base_layer = base_layer
-                self.cross_attn = cross_attn
-                self.scaffolds = scaffolds
-                self.token_map = token_map or defaultdict(lambda: [0])
-                self._parent = parent
-
-            def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
-                outputs = self.base_layer(hidden_states, *args, **kwargs)
-                hidden_states = outputs[0] if isinstance(outputs, tuple) else outputs
-                if scaffold_context is not None:
-                    context = scaffold_context.to(hidden_states.device)
-                    if self._parent.scaffold_proj is not None:
-                        context = self._parent.scaffold_proj(context)
-                    hidden_states = self.cross_attn(hidden_states, context, **kwargs)
-                return (hidden_states,) + outputs[1:] if isinstance(outputs, tuple) else hidden_states
-
-        return SequentialLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
 
     def verify_injection(self, model: nn.Module) -> bool:
         """Verify that cross-attention layers were injected."""
