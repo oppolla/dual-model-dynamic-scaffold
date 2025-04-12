@@ -296,3 +296,94 @@ class SOVLTrainer:
 
     def train(
         self,
+        train_data: Union[List[dict], 'DataLoader'],
+        valid_data: Optional[Union[List[dict], 'DataLoader']] = None,
+        scaffold_provider: Optional[Callable] = None,
+        resume_checkpoint: Optional[str] = None
+    ):
+        """Run training loop over epochs."""
+        if resume_checkpoint:
+            self.load_checkpoint(resume_checkpoint)
+
+        # Prepare data
+        if isinstance(train_data, (list, tuple)):
+            train_iter = [train_data[i:i + self.config.batch_size] for i in range(0, len(train_data), self.config.batch_size)]
+        else:
+            train_iter = train_data
+
+        if valid_data and isinstance(valid_data, (list, tuple)):
+            valid_iter = [valid_data[i:i + self.config.batch_size] for i in range(0, len(valid_data), self.config.batch_size)]
+        else:
+            valid_iter = valid_data
+
+        for epoch in range(self.config.max_epochs):
+            self.model.train()
+            epoch_loss = 0.0
+            steps_in_epoch = 0
+
+            for batch in train_iter:
+                if isinstance(batch, (list, tuple)):
+                    batch = collate_batch(batch, self.tokenizer.pad_token_id, self.config.max_seq_length, self.tokenizer)
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+
+                scaffold_context = scaffold_provider(batch) if scaffold_provider else None
+                if scaffold_context is not None:
+                    scaffold_context = scaffold_context.to(self.device)
+
+                loss, confidence = self.train_step(
+                    batch,
+                    scaffold_context=scaffold_context,
+                    grad_clip=True,
+                    loss_weight_fn=self.loss_weight_fn,
+                    dry_run=False,
+                    memory_check=self.memory_check
+                )
+
+                if loss is not None:
+                    epoch_loss += loss
+                    steps_in_epoch += 1
+                    self.logger({
+                        "event": "train_step",
+                        "epoch": epoch + 1,
+                        "step": self.global_step,
+                        "loss": loss,
+                        "confidence": confidence,
+                        "timestamp": time.time()
+                    })
+
+                # Validate periodically
+                if valid_iter and self.config.validate_every_n_steps and self.global_step % self.config.validate_every_n_steps == 0:
+                    valid_loss, metrics = self.validate(valid_iter, scaffold_provider)
+                    self.logger({
+                        "event": "validation",
+                        "epoch": epoch + 1,
+                        "step": self.global_step,
+                        "loss": valid_loss,
+                        "metrics": metrics,
+                        "timestamp": time.time()
+                    })
+                    if valid_loss < self.best_valid_loss:
+                        self.best_valid_loss = valid_loss
+                        self.patience = 0
+                        self.save_checkpoint(self.global_step, suffix="best")
+                    else:
+                        self.patience += 1
+                    if self.should_stop():
+                        self.logger({
+                            "event": "early_stopping",
+                            "epoch": epoch + 1,
+                            "step": self.global_step,
+                            "valid_loss": valid_loss,
+                            "timestamp": time.time()
+                        })
+                        print(f"Early stopping at epoch {epoch + 1}, step {self.global_step}")
+                        return
+
+            avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0.0
+            self.logger({
+                "event": "epoch_end",
+                "epoch": epoch + 1,
+                "avg_loss": avg_epoch_loss,
+                "timestamp": time.time()
+            })
+            print(f"Epoch {epoch + 1}/{self.config.max_epochs}: Avg Loss = {avg_epoch_loss:.4f}")
