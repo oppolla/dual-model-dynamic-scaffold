@@ -4,8 +4,10 @@ from collections import deque, defaultdict
 from dataclasses import dataclass
 import torch
 import uuid
-import random
 from threading import Lock
+
+# Assuming curiosity.py is in the same directory or appropriate module path
+from curiosity import CuriosityManager
 
 @dataclass
 class ConversationHistory:
@@ -19,19 +21,15 @@ class ConversationHistory:
     def add_message(self, prompt: str, response: str):
         self.messages.append({"prompt": prompt, "response": response})
 
-class CuriosityPressure:
-    def __init__(self):
-        self.value = 0.0
-
-    def update(self, temperament: float, confidence: float, silence: float):
-        self.value += (temperament * 0.1 + (1 - confidence) * 0.05 + silence * 0.02)
-        self.value = max(0.0, min(1.0, self.value))
-
-    def should_erupt(self, threshold):
-        return self.value > threshold and random.random() < 0.3
-
 class SOVLState:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], curiosity_manager: CuriosityManager):
+        """
+        Initialize SOVLState with configuration and curiosity manager.
+
+        Args:
+            config (Dict[str, Any]): Configuration dictionary.
+            curiosity_manager (CuriosityManager): Instance of CuriosityManager for pressure management.
+        """
         self.dream_memory_maxlen = config.get("dream_memory_maxlen", 10)
         self.temperament_history_maxlen = config.get("temperament_history_maxlen", 5)
         self.confidence_history_maxlen = config.get("confidence_history_maxlen", 5)
@@ -61,7 +59,7 @@ class SOVLState:
         self.sleep_confidence_sum = 0.0
         self.sleep_confidence_count = 0
 
-        self.pressure = CuriosityPressure()
+        self.pressure = curiosity_manager.pressure  # Reference CuriosityManager's pressure instance
         self.unanswered_q: Deque[Tuple[str, float]] = deque(maxlen=self.curiosity_queue_maxlen)
 
         self.last_weight = 0.0
@@ -126,7 +124,7 @@ class SOVLState:
             "confidence_history": list(self.confidence_history),
             "sleep_confidence_sum": self.sleep_confidence_sum,
             "sleep_confidence_count": self.sleep_confidence_count,
-            "pressure_value": self.pressure.value,
+            "pressure_value": self.pressure.value,  # Use pressure.value directly
             "unanswered_q": list(self.unanswered_q),
             "last_weight": self.last_weight,
             "is_sleeping": self.is_sleeping,
@@ -152,7 +150,7 @@ class SOVLState:
 
         loaded_map = data.get("token_map", {})
         self.token_map = defaultdict(lambda: [self.scaffold_unk_id],
-                                       {int(k): v for k, v in loaded_map.items()})
+                                     {int(k): v for k, v in loaded_map.items()})
 
         # Training state
         self.data_exposure = data.get("data_exposure", 0)
@@ -166,16 +164,16 @@ class SOVLState:
         self.temperament_score = data.get("temperament_score", 0.0)
         self.last_temperament_score = data.get("last_temperament_score", 0.0)
         self.temperament_history = deque(data.get("temperament_history", []),
-                                            maxlen=self.temperament_history_maxlen)
+                                        maxlen=self.temperament_history_maxlen)
         self.confidence_history = deque(data.get("confidence_history", []),
-                                            maxlen=self.confidence_history_maxlen)
+                                       maxlen=self.confidence_history_maxlen)
         self.sleep_confidence_sum = data.get("sleep_confidence_sum", 0.0)
         self.sleep_confidence_count = data.get("sleep_confidence_count", 0)
 
         # Curiosity system
-        self.pressure.value = data.get("pressure_value", 0.0)
+        self.pressure.value = data.get("pressure_value", 0.0)  # Update pressure value directly
         self.unanswered_q = deque(data.get("unanswered_q", []),
-                                    maxlen=self.curiosity_queue_maxlen)
+                                 maxlen=self.curiosity_queue_maxlen)
 
         # Dynamic controls
         self.last_weight = data.get("last_weight", 0.0)
