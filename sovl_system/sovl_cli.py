@@ -266,15 +266,19 @@ COMMANDS = {
     'rewind': cmd_rewind, 'mimic': cmd_mimic, 'panic': cmd_panic
 }
 
-def run_cli():
+def run_cli(config_manager=None):
+    from sovl_config import ConfigManager  # Import here to avoid circular imports
     print("\nInitializing SOVL System...")
     sovl_system = None
     try:
-        sovl_system = SOVLSystem()
+        # Use provided config_manager or create a new one
+        if config_manager is None:
+            config_manager = ConfigManager("sovl_config.json")
+        sovl_system = SOVLSystem(config_manager)
         print("\nSystem Ready.")
         valid_commands = list(COMMANDS.keys())
         print("Commands: quit, exit, train [epochs] [--dry-run], generate <prompt> [max_tokens], "
-              "save [path], load [path], dream, tune cross [weight], memory <on|off>, "
+              "save [path], load [path], dream, tune cross [weight], memory <on|off], "
               "status, log view, config <key> [value], reset, spark, reflect, muse, flare, "
               "echo [text], debate [topic], glitch [prompt], rewind [steps], mimic [style] [prompt], panic")
 
