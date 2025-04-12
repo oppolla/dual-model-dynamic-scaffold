@@ -43,7 +43,7 @@ def safe_compare(
     
     diff = a - b
     tol = (rel_tol * torch.maximum(torch.abs(a), torch.abs(b)) + abs_tol if isinstance(a, torch.Tensor) \
-          else rel_tol * max(abs(a), abs(b)) + abs_tol
+          else rel_tol * max(abs(a), abs(b)) + abs_tol)
     
     if mode == 'gt': return diff > tol
     elif mode == 'lt': return diff < -tol
@@ -232,3 +232,77 @@ def log_gradient_norms(model: torch.nn.Module, logger=None) -> Dict[str, float]:
         })
     
     return norms
+
+def adjust_temperature(
+    base_temp: float,
+    temperament_score: float,
+    mood_influence: float = 0.3,
+    min_temp: float = 0.5,
+    max_temp: float = 1.5
+) -> float:
+    """
+    Adjust temperature based on system temperament with safety checks
+    Args:
+        base_temp: Base temperature from config
+        temperament_score: Current system temperament (-1 to 1)
+        mood_influence: How strongly mood affects temperature
+        min_temp: Absolute minimum temperature allowed
+        max_temp: Absolute maximum temperature allowed
+    Returns:
+        Safely adjusted temperature value
+    """
+    with NumericalGuard():
+        # Validate inputs
+        base_temp = max(min_temp, min(max_temp, base_temp))
+        temperament_score = max(-1.0, min(1.0, temperament_score))
+        mood_influence = max(0.0, min(1.0, mood_influence))
+        
+        # Calculate adjustment
+        temp_adjustment = mood_influence * 0.3 * temperament_score
+        adjusted_temp = base_temp + temp_adjustment
+        
+        # Final clamping
+        return max(min_temp, min(max_temp, adjusted_temp))
+    
+    def calculate_confidence(
+        logits: Union[torch.Tensor, List[torch.Tensor]], 
+        generated_ids: Union[List[int], torch.Tensor],
+        min_confidence: float = 0.1,
+        smoothing: float = 0.3,
+        device: torch.device = None
+    ) -> float:
+        """
+        Robust confidence calculation with error handling
+        Args:
+            logits: Model output logits (sequence or list per token)
+            generated_ids: Generated token IDs
+            min_confidence: Minimum confidence to return on errors
+            smoothing: Laplace smoothing factor
+            device: Device for tensor operations
+        Returns:
+            Confidence score between min_confidence and 1.0
+        """
+        try:
+            if isinstance(logits, list):
+                logits = torch.stack(logits)
+            if isinstance(generated_ids, list):
+                generated_ids = torch.tensor(generated_ids, device=device)
+            
+            # Handle empty case
+            if len(generated_ids) == 0 or logits.shape[0] == 0:
+                return min_confidence
+                
+            # Convert to probabilities
+            probs = torch.softmax(logits, dim=-1)
+            
+            # Gather probabilities of generated tokens
+            gathered = probs.gather(-1, generated_ids.unsqueeze(-1)).squeeze()
+            
+            # Apply smoothing and clamping
+            conf = (gathered.mean().item() + smoothing) / (1 + smoothing)
+            return max(min_confidence, min(1.0, conf))
+            
+        except Exception as e:
+            print(f"Confidence calculation error: {str(e)}")
+            return min_confidence
+    
