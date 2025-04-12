@@ -122,11 +122,19 @@ def cmd_log(sovl_system, args):
 def cmd_config(sovl_system, args):
     key = args[0]
     if len(args) == 1:
-        value = getattr(sovl_system, 'config', {}).get(key, "Not found")
+        value = sovl_system.config_manager.get(key, "Not found")
         print(f"Config {key}: {value}")
     else:
         value = float(args[1]) if '.' in args[1] else int(args[1])
-        print(f"Setting {key} to {value} (Note: Changes apply on restart)")
+        sovl_system.config_manager.update(key, value)
+        print(f"Set {key} to {value}")
+        sovl_system.logger.write({
+            "event": "config_update",
+            "key": key,
+            "value": value,
+            "timestamp": time.time(),
+            "conversation_id": sovl_system.history.conversation_id
+        })
 
 def cmd_reset(sovl_system, args):
     print("Resetting system state...")
@@ -278,7 +286,7 @@ def run_cli(config_manager=None):
         print("\nSystem Ready.")
         valid_commands = list(COMMANDS.keys())
         print("Commands: quit, exit, train [epochs] [--dry-run], generate <prompt> [max_tokens], "
-              "save [path], load [path], dream, tune cross [weight], memory <on|off], "
+              "save [path], load [path], dream, tune cross [weight], memory <on|off>, "
               "status, log view, config <key> [value], reset, spark, reflect, muse, flare, "
               "echo [text], debate [topic], glitch [prompt], rewind [steps], mimic [style] [prompt], panic")
 
