@@ -937,14 +937,16 @@ class SOVLSystem:
             print(f"Load failed: {e}. Starting fresh.")
 
     def _clear_scaffold_cache(self):
-        if hasattr(self, '_temp_scaffold_context') and isinstance(self._temp_scaffold_context, torch.Tensor):
-            self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
-            del self._temp_scaffold_context
-        self._temp_scaffold_context = None
-        if self.last_prompt_embedding is not None:
-            self.last_prompt_embedding = self.last_prompt_embedding.detach().cpu()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        with self.memory_lock:
+            if hasattr(self, '_temp_scaffold_context') and isinstance(self._temp_scaffold_context, torch.Tensor):
+                self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
+                del self._temp_scaffold_context
+            self._temp_scaffold_context = None
+            if self.last_prompt_embedding is not None:
+                self.last_prompt_embedding = self.last_prompt_embedding.detach().cpu()
+                self.last_prompt_embedding = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     @contextlib.contextmanager
     def _scaffold_context(self, scaffold_hidden_states):
@@ -1101,12 +1103,13 @@ class SOVLSystem:
     def _update_token_map_memory(self, prompt, confidence):
         if not self.use_token_map_memory:
             return
-        tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
-        for token_id in tokens:
-            if token_id in self.token_map:
-                self.token_map[token_id]['weight'] = min(self.token_map[token_id]['weight'] + confidence * 0.1, 2.0)
-        for token_id in self.token_map:
-            self.token_map[token_id]['weight'] *= self.memory_decay_rate
+        with self.memory_lock:
+            tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
+            for token_id in tokens:
+                if token_id in self.token_map:
+                    self.token_map[token_id]['weight'] = min(self.token_map[token_id]['weight'] + confidence * 0.1, 2.0)
+            for token_id in self.token_map:
+                self.token_map[token_id]['weight'] *= self.memory_decay_rate
 
     def _should_gestate(self):
         log_entries = self.logger.read()
@@ -1211,13 +1214,14 @@ class SOVLSystem:
         if not log_entries:
             print("No memories to dream on.")
             return
-
+    
         last_prompt = self.history.messages[-1]["prompt"] if self.history.messages else random.choice(log_entries)["prompt"]
         prompt_inputs = self.base_tokenizer(last_prompt, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
         with torch.no_grad():
             prompt_hidden = self.scaffolds[0](**prompt_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
-        self.last_prompt_embedding = prompt_hidden
-
+        with self.memory_lock:
+            self.last_prompt_embedding = prompt_hidden
+    
         if self.enable_prompt_driven_dreams:
             weights = []
             for i, entry in enumerate(log_entries):
@@ -1233,29 +1237,31 @@ class SOVLSystem:
         else:
             dream_entry = random.choice(log_entries)
         dream_prompt = dream_entry["prompt"]
-
+    
         is_novel = dream_prompt not in self.seen_prompts
         noise_scale = self.dream_noise_scale + (self.temp_melancholy_noise if self.temperament_score <= -0.5 else 0) + (self.dream_novelty_boost if is_novel else 0)
         noise_scale = min(noise_scale, 0.1)
-
+    
         with torch.no_grad():
             inputs = self.tokenize_and_map(dream_prompt)
             hidden_states = self.get_scaffold_hidden_states(inputs)
             noise = torch.randn_like(hidden_states) * noise_scale
             dream_layer = (hidden_states.mean(dim=1) + noise).detach().cpu()
-
+    
+        with self.memory_lock:
             for i in range(len(self.dream_memory)):
-                tensor, weight = self.dream_memory[i]
+                tensor, weight = self.dream_memory
                 self.dream_memory[i] = (tensor, weight * self.dream_memory_decay)
-
+    
             self.dream_memory = deque([(t, w) for t, w in self.dream_memory if w >= self.dream_prune_threshold], maxlen=self.dream_memory_maxlen)
             self.dream_memory.append((dream_layer, 1.0))
-
+    
         for _ in range(3):
             q = self.generate_curiosity_question()
             if q:
-                self.unanswered_q.append((q, self.curiosity.calculate_metric(q)))
-
+                with self.memory_lock:
+                    self.unanswered_q.append((q, self.curiosity.calculate_metric(q)))
+    
         print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(self.dream_memory)}, questions queued: {len(self.unanswered_q)}")
         print("--- Dream Concluded ---")
 
@@ -1541,9 +1547,10 @@ class SOVLSystem:
             confidence_score = 0.5
             if self.enable_confidence_tracking:
                 confidence_score = calculate_confidence_score(outputs.scores, generated_ids)
-                self.sleep_confidence_sum += confidence_score
-                self.sleep_confidence_count += 1
-                self.confidence_history.append(confidence_score)
+                with self.memory_lock:
+                    self.sleep_confidence_sum += confidence_score
+                    self.sleep_confidence_count += 1
+                    self.confidence_history.append(confidence_score)
 
             if self.enable_repetition_check and self.has_repetition(generated_ids, n=3):
                 print("Warning: Repetition detected. Truncating.")
@@ -1587,7 +1594,8 @@ class SOVLSystem:
             })
             self.history.add_message(prompt, response)
             if self.use_token_map_memory:
-                self._update_token_map_memory(prompt, confidence_score)
+                with self.memory_lock:
+                    self._update_token_map_memory(prompt, confidence_score)
 
             if self.enable_gestation and self._should_gestate():
                 self._gestate()
