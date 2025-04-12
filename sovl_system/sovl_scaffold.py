@@ -439,6 +439,90 @@ class CrossAttentionInjector:
         if cross_attention_config:
             self.default_config.update(cross_attention_config)
 
+    def get_cross_attention_layers(self, model: nn.Module, mode: str = 'balanced',
+                                  custom_layers: Optional[List[int]] = None) -> List[int]:
+        """
+        Determine which layers to inject cross-attention into based on selection mode.
+
+        Args:
+            model (nn.Module): The model to analyze.
+            mode (str): Selection mode ('early', 'late', 'balanced', 'custom').
+            custom_layers (Optional[List[int]]): Custom layer indices for 'custom' mode.
+
+        Returns:
+            List[int]: Indices of layers to inject.
+        """
+        total_layers = 0
+        if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+            total_layers = len(model.transformer.h)
+        elif hasattr(model, 'layers'):
+            total_layers = len(model.layers)
+        elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
+            total_layers = len(model.model.layers)
+        elif hasattr(model, 'decoder') and hasattr(model.decoder, 'layers'):
+            total_layers = len(model.decoder.layers)
+
+        if total_layers == 0:
+            if self.logger:
+                self.logger({"warning": "No layers found for cross-attention injection", "timestamp": time.time()})
+            return []
+
+        if mode == "early":
+            return list(range(0, total_layers // 3))
+        elif mode == "late":
+            return list(range(2 * total_layers // 3, total_layers))
+        elif mode == "custom" and custom_layers:
+            return [l for l in custom_layers if 0 <= l < total_layers]
+        else:  # default to 'balanced'
+            return list(range(total_layers // 3, 2 * total_layers // 3))
+
+    def set_scaffold_influence(
+        self,
+        model: nn.Module,
+        layers: List[int],
+        weight: Optional[float] = None,
+        blend_strength: Optional[float] = None,
+        layer_weights: Optional[List[float]] = None,
+        lifecycle_weighting: bool = False,
+        lifecycle_curve: str = 'sigmoid_linear'
+    ):
+        """
+        Set influence weights and blend strengths for cross-attention layers.
+
+        Args:
+            model (nn.Module): Model with injected cross-attention layers.
+            layers (List[int]): Indices of layers to modify.
+            weight (Optional[float]): Uniform influence weight.
+            blend_strength (Optional[float]): Blend strength for residual connections.
+            layer_weights (Optional[List[float]]): Per-layer influence weights.
+            lifecycle_weighting (bool): Enable lifecycle-based weighting.
+            lifecycle_curve (str): Curve for lifecycle weighting ('sigmoid_linear', 'exponential').
+        """
+        model_layers, _ = self.find_model_layers(model)
+        for layer_idx in layers:
+            if layer_idx >= len(model_layers) or not hasattr(model_layers[layer_idx], 'cross_attn'):
+                if self.logger:
+                    self.logger({
+                        "warning": f"Layer {layer_idx} lacks cross_attn or is out of bounds",
+                        "timestamp": time.time()
+                    })
+                continue
+            try:
+                if layer_weights and len(layer_weights) > layer_idx:
+                    model_layers[layer_idx].cross_attn.set_influence_weight(layer_weights[layer_idx])
+                elif weight is not None:
+                    model_layers[layer_idx].cross_attn.set_influence_weight(weight)
+                if blend_strength is not None:
+                    model_layers[layer_idx].cross_attn.set_blend_strength(blend_strength)
+                if lifecycle_weighting and weight is not None:
+                    model_layers[layer_idx].cross_attn.set_lifecycle_weight(weight, curve=lifecycle_curve)
+            except Exception as e:
+                if self.logger:
+                    self.logger({
+                        "error": f"Failed to set influence for layer {layer_idx}: {str(e)}",
+                        "timestamp": time.time()
+                    })            
+
     def find_model_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
         """
         Identify layers suitable for cross-attention injection.
