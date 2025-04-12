@@ -1,3 +1,13 @@
+from dataclasses import dataclass
+from typing import List, Optional, Callable, Union, Tuple
+import torch
+import torch.nn.functional as F
+import math
+import os
+import threading
+import random
+from torch.optim.lr_scheduler import get_linear_schedule_with_warmup
+
 @dataclass
 class TrainingConfig:
     """Configuration for training parameters."""
@@ -208,11 +218,11 @@ class SOVLTrainer:
                     module.p = config.dropout_rate
 
     def register_callback(self, event: str, callback: Callable):
-            """Register a callback for a specific event."""
-            if event in self.callbacks:
-                self.callbacks[event] = callback
-            else:
-                raise ValueError(f"Unknown event: {event}")
+        """Register a callback for a specific event."""
+        if event in self.callbacks:
+            self.callbacks[event] = callback
+        else:
+            raise ValueError(f"Unknown event: {event}")
             
     def on_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
         """Notify completion of training cycle."""
@@ -286,7 +296,7 @@ class SOVLTrainer:
         loss_weight_fn: Optional[Callable] = None,
         dry_run: bool = False,
         memory_check: Optional[Callable] = None
-    ) -> tuple[Optional[float], Optional[float]]:
+    ) -> Tuple[Optional[float], Optional[float]]:
         """Execute a single training step."""
         if memory_check:
             memory_check()
@@ -339,7 +349,7 @@ class SOVLTrainer:
 
         return loss.item(), confidence
 
-    def validate(self, data: Union[List[dict], 'DataLoader'], scaffold_provider: Optional[Callable] = None) -> tuple[float, dict]:
+    def validate(self, data: Union[List[dict], 'DataLoader'], scaffold_provider: Optional[Callable] = None) -> Tuple[float, dict]:
         """Validate model on provided data, returning loss and metrics."""
         self.model.eval()
         total_loss = 0.0
@@ -644,19 +654,17 @@ class SOVLTrainer:
             weight = self.config.dream_memory_weight
             if is_novel:
                 weight += self.config.dream_novelty_boost
-            dream_memory.append((dream_layer, min(weight, 1.5)))
-            self.state.dream_memory = dream_memory
-
-            print(f"Added dream memory (weight: {weight:.2f}), Total memories: {len(dream_memory)}")
+            self.state.append_dream_memory(dream_layer, min(weight, 1.5))  # Updated to use append_dream_memory
+            print(f"Added dream memory (weight: {min(weight, 1.5):.2f}), Total memories: {len(self.state.dream_memory)}")
 
         self.logger({
             "event": "dream_completed",
             "prompt": dream_prompt,
             "novelty": is_novel,
-            "memory_count": len(dream_memory),
+            "memory_count": len(self.state.dream_memory),
             "timestamp": time.time()
         })
-        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.config.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(dream_memory)}")
+        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.config.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(self.state.dream_memory)}")
         print("--- Dream Concluded ---")
 
     def sleep_train(self, log_entries: List[dict]):
