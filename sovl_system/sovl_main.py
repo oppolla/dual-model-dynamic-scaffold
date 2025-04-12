@@ -413,12 +413,19 @@ class SOVLSystem:
             total_mem = torch.cuda.get_device_properties(0).total_memory
             mem_ratio = current_mem / total_mem
             self.mem_usage_history.append(mem_ratio)
+            
+            # Calculate model size (approximate)
+            model_size = sum(p.numel() * p.element_size() for p in self.base_model.parameters())
+            model_size += sum(p.numel() * p.element_size() for scaffold in self.scaffolds for p in scaffold.parameters())
+            
+            # Calculate average memory usage
+            avg_mem_usage = sum(self.mem_usage_history) / len(self.mem_usage_history) if self.mem_usage_history else mem_ratio
     
             dynamic_threshold = min(
                 0.95,
                 max(
                     0.7,
-                    self.dynamic_threshold_base * (1 + model_size * 0.1 - avg_mem_usage * 0.2)
+                    self.dynamic_threshold_base * (1 + (model_size/total_mem) * 0.1 - avg_mem_usage * 0.2)
                 )
             )
     
