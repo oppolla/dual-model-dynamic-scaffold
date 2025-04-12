@@ -11,7 +11,6 @@ import json
 import contextlib
 from collections import deque, defaultdict
 import traceback
-import uuid
 import os
 from threading import Lock
 from sovl_logger import Logger
@@ -29,6 +28,10 @@ from sovl_utils import (
     cosine_similarity_matrix,
     float_lt,
     get_parameter_count,
+    adjust_temperature,
+    calculate_confidence,
+    detect_repetitions,
+    validate_layer_indices,
 )
 
 class InsufficientDataError(Exception):
@@ -1736,13 +1739,12 @@ class SOVLSystem:
             scaffold_inputs = self.tokenize_and_map(prompt)
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
 
-            temp = BASE_TEMPERATURE
-            if ENABLE_TEMPERAMENT and TEMP_MOOD_INFLUENCE > 0:
-                with NumericalGuard():  # Use the new context manager
-                    temp_adjustment = TEMP_MOOD_INFLUENCE * 0.3 * self.state.temperament_score
-                    temp += temp_adjustment
-                    temp = max(0.5, min(1.5, temp))
-                generation_params["adjusted_temperature"] = temp
+            temp = adjust_temperature(
+                BASE_TEMPERATURE,
+                self.state.temperament_score,
+                TEMP_MOOD_INFLUENCE
+            )
+            generation_params["adjusted_temperature"] = temp
 
             # Compute dynamic factor for cross-attention
             dynamic_factor = None
