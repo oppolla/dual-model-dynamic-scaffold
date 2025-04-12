@@ -10,6 +10,7 @@ import bitsandbytes as bnb
 import json
 import contextlib
 from collections import deque, defaultdict
+import traceback
 import uuid
 import os
 from threading import Lock
@@ -36,17 +37,39 @@ def calculate_confidence_score(logits, generated_ids) -> float:
         return 0.5
 
 # Initialize logger for data loading
-logger = Logger("sovl_logs.jsonl")
+logger = Logger(
+    log_file="sovl_logs.jsonl",
+    max_size_mb=50,  # Rotate logs after 50MB
+    compress_old=True  # Compress rotated logs
+)
 
 # Load training data
 try:
-    TRAIN_DATA = load_jsonl("sovl_seed.jsonl", min_entries=0, logger=logger.write)
+    TRAIN_DATA = load_jsonl("sovl_seed.jsonl", min_entries=0)
+    if not TRAIN_DATA:
+        logger.write({
+            "warning": "No data loaded from sovl_seed.jsonl",
+            "timestamp": time.time(),
+            "conversation_id": "init"
+        })
+        print("Warning: No data loaded from sovl_seed.jsonl!")
 except InsufficientDataError as e:
-    logger.write({"error": str(e), "timestamp": time.time(), "conversation_id": "init"})
+    logger.write({
+        "error": str(e),
+        "timestamp": time.time(),
+        "conversation_id": "init",
+        "is_error_prompt": True  # Flag for error listening
+    })
     print(f"Data loading error: {e}")
     TRAIN_DATA = []
 except Exception as e:
-    logger.write({"error": f"Unexpected error during data loading: {e}", "timestamp": time.time(), "conversation_id": "init"})
+    logger.write({
+        "error": f"Unexpected error during data loading: {e}",
+        "timestamp": time.time(),
+        "conversation_id": "init",
+        "is_error_prompt": True,
+        "stack_trace": traceback.format_exc()  # Include full traceback
+    })
     print(f"Unexpected error during data loading: {e}")
     TRAIN_DATA = []
 
@@ -60,15 +83,18 @@ if TRAIN_DATA:
     random.shuffle(TRAIN_DATA)
     split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
     TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
+    logger.write({
+        "event": "data_split",
+        "train_samples": len(TRAIN_DATA),
+        "valid_samples": len(VALID_DATA),
+        "timestamp": time.time()
+    })
 else:
     VALID_DATA = []
-if TRAIN_DATA:
-    random.seed(RANDOM_SEED)
-    random.shuffle(TRAIN_DATA)
-    split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
-    TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
-else:
-    VALID_DATA = []
+    logger.write({
+        "warning": "No training data available",
+        "timestamp": time.time()
+    })
 
 # Initialize ConfigManager
 config_manager = ConfigManager("sovl_config.json")
@@ -182,34 +208,50 @@ CURIOSITY_TOP_K = config_manager.get("controls_config.curiosity_top_k", 30, expe
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
-def _validate_config():
+def _validate_config(self):
     """Validate required configuration keys and layer settings."""
-    # Validate required keys with types
-    config_manager.validate_keys([
-        ("core_config.base_model_name", str),
-        ("training_config.learning_rate", float)
-    ])
-
-    # Validate CROSS_ATTN_LAYERS
-    if not isinstance(CROSS_ATTN_LAYERS, list):
-        logger.write({"error": "CROSS_ATTN_LAYERS must be a list!", "timestamp": time.time(), "conversation_id": "init"})
-        raise ValueError("CROSS_ATTN_LAYERS must be a list!")
-    
-    if not USE_DYNAMIC_LAYERS:
-        base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
-        invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-        if invalid_layers:
-            logger.write({"error": f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.", "timestamp": time.time(), "conversation_id": "init"})
-            raise ValueError(f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.")
-    
-    if LAYER_SELECTION_MODE == "custom":
-        base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
-        invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-        if invalid_custom:
-            logger.write({"error": f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}", "timestamp": time.time(), "conversation_id": "init"})
-            raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
-
-_validate_config()
+    config_snapshot = OrderedDict()
+    try:
+        # Take snapshot of current config
+        config_snapshot = OrderedDict(sorted(self.config_manager.get_all().items()))
+        
+        # Validate required keys with types
+        self.config_manager.validate_keys([
+            ("core_config.base_model_name", str),
+            ("training_config.learning_rate", float)
+        ])
+        # Validate CROSS_ATTN_LAYERS
+        if not isinstance(CROSS_ATTN_LAYERS, list):
+            raise ValueError("CROSS_ATTN_LAYERS must be a list!")
+        
+        if not USE_DYNAMIC_LAYERS:
+            base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+            invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
+            if invalid_layers:
+                raise ValueError(f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.")
+        
+        if LAYER_SELECTION_MODE == "custom":
+            base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+            invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
+            if invalid_custom:
+                raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
+        # Log successful validation
+        self.logger.record({
+            "event": "config_validation",
+            "status": "success",
+            "timestamp": time.time(),
+            "config_snapshot": config_snapshot
+        })
+    except Exception as e:
+        self.error_logger.record({
+            "error": f"Config validation failed: {str(e)}",
+            "type": type(e).__name__,
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc(),
+            "config_snapshot": config_snapshot,
+            "validation_stage": "pre-init" if not hasattr(self, 'logger') else "runtime"
+        })
+        raise
 
 # Split training data
 random.seed(RANDOM_SEED)
@@ -265,7 +307,17 @@ class CuriosityPressure:
 
 class SOVLSystem:
     def __init__(self, config_manager):
-        self.logger = Logger("sovl_logs.jsonl")
+        self.logger = Logger(
+            log_file="sovl_system_logs.jsonl",
+            max_size_mb=20,
+            compress_old=True
+        )
+        self.logger.manage_rotation(max_files=7)  # Keep last 7 log files
+        self.error_logger = Logger(
+            log_file="sovl_errors.jsonl",
+            max_size_mb=10,
+            compress_old=True
+        )
         self.config_manager = config_manager
         self.quantization_mode = config_manager.get("core_config.quantization", "fp16", expected_type=str)
         self.enable_error_listening = config_manager.get("controls_config.enable_error_listening", True, expected_type=bool)
@@ -285,12 +337,35 @@ class SOVLSystem:
         }
 
         print(f"Loading base model: {BASE_MODEL_NAME}")
-        quantization_config = {"load_in_8bit": True} if self.quantization_mode == "int8" else {"load_in_4bit": True} if self.quantization_mode == "int4" else {}
-        self.base_model = AutoModelForCausalLM.from_pretrained(BASE_MODEL_NAME, config=self.base_config, **quantization_config).to(DEVICE)
-        self.base_model.eval()
-        for param in self.base_model.parameters():
-            param.requires_grad = False
-        print(f"Base model '{BASE_MODEL_NAME}' loaded and frozen.")
+        try:
+            quantization_config = {
+                "load_in_8bit": True} if self.quantization_mode == "int8" else {
+                "load_in_4bit": True} if self.quantization_mode == "int4" else {}
+            self.base_model = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL_NAME, 
+                config=self.base_config, 
+                **quantization_config
+            ).to(DEVICE)
+            self.base_model.eval()
+            for param in self.base_model.parameters():
+                param.requires_grad = False
+
+            self.logger.record({
+                "event": "model_loaded",
+                "model_type": "base",
+                "model_name": BASE_MODEL_NAME,
+                "quantization": self.quantization_mode,
+                "timestamp": time.time()
+            })
+            print(f"Base model '{BASE_MODEL_NAME}' loaded and frozen.")
+        except Exception as e:
+            self.error_logger.write({
+                "error": f"Failed to load base model: {str(e)}",
+                "model_name": BASE_MODEL_NAME,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
 
         print(f"Loading scaffold model: {SCAFFOLD_MODEL_NAME}")
         scaffold_model_raw = AutoModelForCausalLM.from_pretrained(SCAFFOLD_MODEL_NAME, config=self.scaffold_config, **quantization_config)
@@ -1216,6 +1291,34 @@ class SOVLSystem:
         finally:
             self._clear_scaffold_cache()
 
+    def log_system_stats(self):
+        """Log system resource statistics"""
+        stats = {
+            "timestamp": time.time(),
+            "event": "system_stats",
+            "gpu_allocated": torch.cuda.memory_allocated() if torch.cuda.is_available() else None,
+            "gpu_reserved": torch.cuda.memory_reserved() if torch.cuda.is_available() else None,
+            "cpu_usage": psutil.cpu_percent(),
+            "ram_usage": psutil.virtual_memory().percent,
+            "temperament": self.state.temperament_score,
+            "confidence_history": list(self.state.confidence_history)
+        }
+        self.logger.write(stats)
+
+    def log_training_metrics(self, metrics):
+        """Batch log training metrics"""
+        entries = []
+        for metric in metrics:
+            entries.append({
+                "timestamp": time.time(),
+                "event": "training_metric",
+                "name": metric["name"],
+                "value": metric["value"],
+                "epoch": metric.get("epoch"),
+                "step": metric.get("step")
+            })
+        self.logger.write_batch(entries)  # Use batch writing for efficiency        
+
     def tokenize_and_map(self, prompts, max_length=MAX_SEQ_LENGTH, padding='max_length'):
         if isinstance(prompts, str):
             prompts = [prompts]
@@ -1243,8 +1346,14 @@ class SOVLSystem:
 
     def _insert_cross_attention(self):
         if not ENABLE_CROSS_ATTENTION:
+            self.logger.record({
+                "event": "cross_attention",
+                "status": "disabled",
+                "timestamp": time.time()
+            })
             print("Cross-attention disabled.")
             return
+
         config = {
             'hidden_size': self.base_config.hidden_size,
             'num_heads': self.base_config.num_attention_heads,
@@ -1265,16 +1374,28 @@ class SOVLSystem:
             'token_map': self.token_map,
             'logger': self.logger.record,
         }
+
         try:
+            start_time = time.time()
             self.base_model = inject_cross_attention(self.base_model, self.scaffolds[0], config)
-            print("Cross-attention injection complete.")
-        except Exception as e:
+            elapsed = time.time() - start_time
+
             self.logger.record({
+                "event": "cross_attention_injected",
+                "status": "success",
+                "layers_injected": config['layers_to_inject'],
+                "time_elapsed": elapsed,
+                "timestamp": time.time()
+            })
+            print(f"Cross-attention injection complete in {elapsed:.2f}s.")
+        except Exception as e:
+            self.error_logger.write({
                 "error": f"Cross-attention injection failed: {str(e)}",
                 "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id
+                "stack_trace": traceback.format_exc(),
+                "config": config
             })
-            print(f"Error during cross-attention injection: {str(e)}")
+            raise
 
     def enable_dry_run(self, max_samples=2, max_length=128, validate_architecture=True, skip_training=True):
         self.dry_run = True
@@ -1417,57 +1538,79 @@ class SOVLSystem:
 
     def train_step(self, batch):
         """Execute a single training step with scaffold context."""
-        if self.dry_run:
-            print("Dry run train step")
-            dry_batch = [
-                {
-                    'prompt': item['prompt'][:self.dry_run_params['max_length']],
-                    'completion': item['completion'][:self.dry_run_params['max_length']]
-                }
-                for item in batch[:self.dry_run_params['max_samples']]
-            ]
+        try:
+            if self.dry_run:
+                print("Dry run train step")
+                dry_batch = [
+                    {
+                        'prompt': item['prompt'][:self.dry_run_params['max_length']],
+                        'completion': item['completion'][:self.dry_run_params['max_length']]
+                    }
+                    for item in batch[:self.dry_run_params['max_samples']]
+                ]
+                formatted_batch = collate_batch(
+                    dry_batch,
+                    self.base_tokenizer.pad_token_id,
+                    self.trainer.config.max_seq_length,
+                    self.base_tokenizer
+                )
+                prompts = formatted_batch['prompt']
+                scaffold_inputs = self.tokenize_and_map(prompts)
+                scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
+                loss, confidence = self.trainer.train_step(
+                    batch=formatted_batch,
+                    scaffold_context=scaffold_hidden_states,
+                    dry_run=True
+                )
+                print(f"Dry run loss: {loss}")
+                return None
+
+            # Prepare scaffold context
+            prompts = [item['prompt'] for item in batch]
+            scaffold_inputs = self.tokenize_and_map(prompts)
+            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
+
+            # Train step via trainer
             formatted_batch = collate_batch(
-                dry_batch,
+                batch,
                 self.base_tokenizer.pad_token_id,
                 self.trainer.config.max_seq_length,
                 self.base_tokenizer
             )
-            prompts = formatted_batch['prompt']
-            scaffold_inputs = self.tokenize_and_map(prompts)
-            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
             loss, confidence = self.trainer.train_step(
                 batch=formatted_batch,
                 scaffold_context=scaffold_hidden_states,
-                dry_run=True
+                grad_clip=True,
+                dry_run=False,
+                memory_check=self.check_memory_health
             )
-            print(f"Dry run loss: {loss}")
-            return None
 
-        # Prepare scaffold context
-        prompts = [item['prompt'] for item in batch]
-        scaffold_inputs = self.tokenize_and_map(prompts)
-        scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
+            # Update token map
+            if loss is not None and self.use_token_map_memory and confidence is not None:
+                self._update_token_map_memory(prompts[0], confidence)
 
-        # Train step via trainer
-        formatted_batch = collate_batch(
-            batch,
-            self.base_tokenizer.pad_token_id,
-            self.trainer.config.max_seq_length,
-            self.base_tokenizer
-        )
-        loss, confidence = self.trainer.train_step(
-            batch=formatted_batch,
-            scaffold_context=scaffold_hidden_states,
-            grad_clip=True,
-            dry_run=False,
-            memory_check=self.check_memory_health
-        )
-
-        # Update token map
-        if loss is not None and self.use_token_map_memory and confidence is not None:
-            self._update_token_map_memory(prompts[0], confidence)
-
-        return loss
+            # Add detailed training log
+            self.logger.record({
+                "event": "training_step",
+                "loss": float(loss) if loss is not None else None,
+                "confidence": float(confidence) if confidence is not None else None,
+                "batch_size": len(batch),
+                "timestamp": time.time(),
+                "memory_usage": torch.cuda.memory_allocated() if torch.cuda.is_available() else None
+            })
+            
+            return loss
+        
+        except Exception as e:
+            self.error_logger.record({
+                "error": str(e),
+                "type": type(e).__name__,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "batch_size": len(batch),
+                "phase": "training"
+            })
+            raise  # Re-raise after logging
 
     def run_training_cycle(self, train_data, valid_data, epochs=TRAIN_EPOCHS, batch_size=BATCH_SIZE):
         if len(train_data) < batch_size or not valid_data:
@@ -1712,36 +1855,56 @@ class SOVLSystem:
                 torch.cuda.empty_cache()
             return response
 
-        except torch.cuda.OutOfMemoryError:
-            error_msg = "Memory error—GPU ran out of space."
-            self.logger.record({
+        except torch.cuda.OutOfMemoryError as oom:
+            error_details = {
                 "error": "CUDA out of memory",
-                "prompt": prompt,
+                "type": "OOM",
+                "prompt": prompt[:200],
                 "timestamp": time.time(),
-                "conversation_id": str(uuid.uuid4()),
-                "is_error_prompt": True,
+                "memory_stats": {
+                    "allocated": torch.cuda.memory_allocated(),
+                    "reserved": torch.cuda.memory_reserved(),
+                    "max_allocated": torch.cuda.max_memory_allocated()
+                } if torch.cuda.is_available() else None,
                 "generation_params": generation_params
-            })
+            }
+            self.error_logger.write(error_details)
+            torch.cuda.empty_cache()
+
             if self.enable_error_listening:
-                error_response = self._handle_error_prompt(error_msg)
-                print(f"Self-reflection: {error_response}")
-            return error_msg
-        except (ValueError, RuntimeError) as e:
-            error_msg = f"Error: Generation failed ({str(e)})."
-            self.logger.record({
+                try:
+                    return self._handle_error_prompt("GPU memory error occurred")
+                except Exception as e:
+                    self.error_logger.write({
+                        "error": f"Failed to handle OOM error: {str(e)}",
+                        "timestamp": time.time(),
+                        "stack_trace": traceback.format_exc()
+                    })
+                    return "System is low on memory - please try a shorter prompt"
+            return "System is low on memory - please try a shorter prompt"
+
+        except Exception as e:
+            error_details = {
                 "error": str(e),
-                "prompt": prompt,
+                "type": type(e).__name__,
+                "prompt": prompt[:200],
                 "timestamp": time.time(),
-                "conversation_id": str(uuid.uuid4()),
-                "is_error_prompt": True,
+                "stack_trace": traceback.format_exc(),
                 "generation_params": generation_params
-            })
+            }
+            self.error_logger.write(error_details)
+
             if self.enable_error_listening:
-                error_response = self._handle_error_prompt(error_msg)
-                print(f"Self-reflection: {error_response}")
-            return "Something broke—check logs!"
-        except Exception:
-            raise
+                try:
+                    return self._handle_error_prompt(f"Generation error: {str(e)}")
+                except Exception as inner_e:
+                    self.error_logger.write({
+                        "error": f"Failed to handle generation error: {str(inner_e)}",
+                        "original_error": str(e),
+                        "timestamp": time.time(),
+                        "stack_trace": traceback.format_exc()
+                    })
+            return "An error occurred during generation"
 
     @torch.no_grad()
     def validate_epoch(self, valid_data):
