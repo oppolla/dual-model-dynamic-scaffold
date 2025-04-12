@@ -190,6 +190,32 @@ def validate_layer_indices(
         print(f"Warning in {context}: Invalid layer indices {invalid} for model with {total_layers} layers")
     return valid
 
+def detect_repetitions(
+    token_ids: List[int],
+    special_ids: Set[int],
+    min_rep_length: int = 3,
+    max_scan: int = 100
+) -> Optional[Tuple[int, int]]:
+    """
+    Detect repeating token sequences
+    Args:
+        token_ids: List of token IDs
+        special_ids: Set of special token IDs to ignore
+        min_rep_length: Minimum sequence length to check
+        max_scan: Maximum number of tokens to scan
+    Returns:
+        (start_idx, end_idx) of first repetition found or None
+    """
+    filtered = [i for i in token_ids if i not in special_ids]
+    scan_range = min(len(filtered), max_scan)
+    
+    for i in range(scan_range - 2*min_rep_length):
+        window = filtered[i:i+min_rep_length]
+        next_window = filtered[i+min_rep_length:i+2*min_rep_length]
+        if window == next_window:
+            return (i, i+min_rep_length)
+    return None
+
 def log_gradient_norms(model: torch.nn.Module, logger=None) -> Dict[str, float]:
     """Log L2 norms of gradients by parameter name"""
     norms = {}
