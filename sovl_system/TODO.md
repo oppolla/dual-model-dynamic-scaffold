@@ -81,5 +81,11 @@ To enhance relevance and efficiency, the SOVL System will implement a dynamic co
 
 
 
+# Modularization Tasts
+- Logger logic needs to be cleaned up and refined between modules
+- Curiousity logic needs to be made into it's own module from its current disparate locations like trainer and state modules
+
+
+
 
 
