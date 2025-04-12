@@ -39,6 +39,7 @@ class SOVLState:
         self.confidence_history_maxlen = config.get("confidence_history_maxlen", 5)
         self.curiosity_queue_maxlen = config.get("curiosity_queue_maxlen", 10)
         self.scaffold_unk_id = 0  # To be set explicitly by main system
+        self.hidden_size = config.get("core_config", {}).get("hidden_size", 768)  # Default to 768 (e.g., GPT-2)
 
         # Conversation state
         self.history = ConversationHistory()
@@ -84,6 +85,20 @@ class SOVLState:
         # Update the defaultdict factory function
         self.token_map = defaultdict(lambda: [self.scaffold_unk_id], self.token_map)
 
+    def append_dream_memory(self, tensor: torch.Tensor, weight: float):
+        """Append a tensor to dream_memory with shape validation"""
+        if not isinstance(tensor, torch.Tensor):
+            print(f"Warning: Invalid dream memory tensor type: {type(tensor)}")
+            return
+        if not isinstance(weight, (int, float)) or weight < 0:
+            print(f"Warning: Invalid dream memory weight: {weight}")
+            return
+        if tensor.shape[-1] != self.hidden_size:
+            print(f"Warning: Dream memory tensor shape {tensor.shape} mismatches hidden_size {self.hidden_size}")
+            return
+        with self.memory_lock:
+            self.dream_memory.append((tensor, weight))
+
     def reset_conversation(self):
         """Start fresh conversation while retaining memory"""
         self.history = ConversationHistory()
@@ -119,7 +134,8 @@ class SOVLState:
             "unanswered_q": list(self.unanswered_q),
             "last_weight": self.last_weight,
             "is_sleeping": self.is_sleeping,
-            "scaffold_unk_id": self.scaffold_unk_id
+            "scaffold_unk_id": self.scaffold_unk_id,
+            "hidden_size": self.hidden_size  # Save hidden_size
         }
 
     def from_dict(self, data: Dict[str, Any], device: torch.device):
@@ -165,46 +181,4 @@ class SOVLState:
         self.last_weight = data.get("last_weight", 0.0)
         self.is_sleeping = data.get("is_sleeping", False)
         self.scaffold_unk_id = data.get("scaffold_unk_id", 0)
-
-    def prune_dream_memory(self, threshold: float = 0.1):
-        """Remove low-weight dream memories"""
-        if not isinstance(threshold, (int, float)) or threshold < 0:
-            raise ValueError("Threshold must be a non-negative number")
-            
-        with self.memory_lock:
-            self.dream_memory = deque(
-                [(t, w) for t, w in self.dream_memory if w >= threshold],
-                maxlen=self.dream_memory_maxlen
-            )
-
-    def update_token_map(self, token_id: int, scaffold_ids: list, weight: float = 1.0):
-        """Update token mapping with new scaffold association"""
-        if not isinstance(token_id, int) or token_id < 0:
-            raise ValueError("Token ID must be a non-negative integer")
-        if not isinstance(scaffold_ids, list) or not all(isinstance(x, int) for x in scaffold_ids):
-            raise ValueError("Scaffold IDs must be a list of integers")
-        if not isinstance(weight, (int, float)) or weight < 0:
-            raise ValueError("Weight must be a non-negative number")
-            
-        with self.memory_lock:
-            self.token_map[token_id] = {"ids": scaffold_ids, "weight": weight}
-
-    def decay_memory_weights(self, decay_rate: float = 0.95):
-        """Gradually forget less important memories"""
-        if not isinstance(decay_rate, (int, float)) or not 0 <= decay_rate <= 1:
-            raise ValueError("Decay rate must be between 0 and 1")
-            
-        with self.memory_lock:
-            # Decay dream memory weights
-            self.dream_memory = deque(
-                [(t, w * decay_rate) for t, w in self.dream_memory],
-                maxlen=self.dream_memory_maxlen
-            )
-            
-            # Decay token map weights
-            for token_id in list(self.token_map.keys()):
-                if isinstance(self.token_map[token_id], dict):
-                    self.token_map[token_id]["weight"] *= decay_rate
-                    # Remove if weight becomes too small
-                    if self.token_map[token_id]["weight"] < 0.01:
-                        del self.token_map[token_id]
+        self.hidden_size = data.get("hidden_size", 768)  # Restore hidden_size
