@@ -380,6 +380,14 @@ class SOVLSystem:
 
         # Initialize state from config
         self.state = SOVLState(config)
+        self.state.set_scaffold_unk_id(self.scaffold_tokenizer.unk_token_id)
+        self.metrics = {
+            "curiosity_eruptions": 0,       
+            "spontaneous_questions": 0,
+            "answered_questions": 0,
+            "avg_novelty": 0.0,
+            "eruption_count": 0
+        }
         
         # Curiosity system
         self.curiosity = TrueCuriosity(self) if ENABLE_CURIOSITY else None
@@ -760,45 +768,70 @@ class SOVLSystem:
         print(f"Lifecycle params: capacity_factor={LIFECYCLE_CAPACITY_FACTOR}, curve={LIFECYCLE_CURVE}")
 
     def save_state(self, path_prefix=None):
+        """Save all system state with proper serialization"""
         if path_prefix is None:
             path_prefix = SAVE_PATH_PREFIX
         try:
+            # Save scaffold and cross-attention
             torch.save(self.scaffolds[0].state_dict(), f"{path_prefix}_scaffold.pth")
-            cross_attn_dict = {k: v for k, v in self.base_model.state_dict().items() if 'cross_attn' in k}
+            cross_attn_dict = {k: v for k, v in self.base_model.state_dict().items() 
+                              if 'cross_attn' in k}
             torch.save(cross_attn_dict, f"{path_prefix}_cross_attn.pth")
+
+            # Save token map
             with open(f"{path_prefix}_token_map.json", "w") as f:
                 json.dump({str(k): v for k, v in self.token_map.items()}, f)
-            
-            # Save state using the state module
-            self.state.save_state(path_prefix)
-            
+
+            # Save state using module's serialization
+            with open(f"{path_prefix}_state.json", "w") as f:
+                json.dump(self.state.to_dict(), f)
+
             print(f"State saved to {path_prefix}_*.pth/json")
         except Exception as e:
             print(f"Save failed: {e}")
+            # Attempt partial save if possible
+            try:
+                with open(f"{path_prefix}_state.json", "w") as f:
+                    json.dump(self.state.to_dict(), f)
+                print("At least saved core state")
+            except:
+                print("Complete save failure!")
 
     def load_state(self, path_prefix=None):
+        """Load all system state with proper device handling"""
         if path_prefix is None:
             path_prefix = SAVE_PATH_PREFIX
         try:
+            # Load scaffold and cross-attention first
             if os.path.exists(f"{path_prefix}_scaffold.pth"):
                 self.scaffolds[0].load_state_dict(torch.load(f"{path_prefix}_scaffold.pth"))
                 print("Scaffold state loaded.")
+
             if os.path.exists(f"{path_prefix}_cross_attn.pth"):
                 state_dict = self.base_model.state_dict()
                 state_dict.update(torch.load(f"{path_prefix}_cross_attn.pth"))
                 self.base_model.load_state_dict(state_dict)
                 print("Cross-attention state loaded.")
+
+            # Load token map and state with device awareness
             if os.path.exists(f"{path_prefix}_token_map.json"):
                 with open(f"{path_prefix}_token_map.json", "r") as f:
                     loaded_map = json.load(f)
-                    self.token_map = defaultdict(lambda: [self.scaffold_unk_id], {int(k): v for k, v in loaded_map.items()})
+                    self.token_map = defaultdict(lambda: [self.scaffold_unk_id], 
+                                               {int(k): v for k, v in loaded_map.items()})
                 print("Token map loaded.")
-            
-            # Load state using the state module
-            self.state.load_state(path_prefix)
-            
+
+            if os.path.exists(f"{path_prefix}_state.json"):
+                with open(f"{path_prefix}_state.json", "r") as f:
+                    state_data = json.load(f)
+                self.state.from_dict(state_data, device=DEVICE)  # Critical device parameter
+                print("System state loaded.")
+
         except Exception as e:
             print(f"Load failed: {e}. Starting fresh.")
+            # Initialize fresh state if load fails
+            self.state = SOVLState(config)
+            self.state.set_scaffold_unk_id(self.scaffold_tokenizer.unk_token_id)
 
     def _clear_scaffold_cache(self):
         with self.memory_lock:
@@ -931,8 +964,18 @@ class SOVLSystem:
         for batch_idx in range(batch_size):
             position = 0
             for base_id in base_input_ids[batch_idx]:
-                mapped_entry = self.special_token_map.get(base_id.item(), self.token_map.get(base_id.item()))
-                mapped_tokens = mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
+                base_id_item = base_id.item()
+                # Check special tokens first
+                if base_id_item in self.special_token_map:
+                    mapped_tokens = [self.special_token_map[base_id_item]]
+                else:
+                    # Use state-managed token map with fallback
+                    try:
+                        mapped_entry = self.state.token_map[base_id_item]
+                        mapped_tokens = mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
+                    except Exception as e:
+                        print(f"Token mapping error for ID {base_id_item}: {e}")
+                        mapped_tokens = [self.scaffold_unk_id]  # Fallback to UNK token
 
                 if position + len(mapped_tokens) > max_expanded_len:
                     truncated = True
@@ -1112,11 +1155,18 @@ class SOVLSystem:
     
         with self.memory_lock:
             for i in range(len(self.state.dream_memory)):
-                tensor, weight = self.state.dream_memory
+                tensor, weight = self.state.dream_memory[i]
                 self.state.dream_memory[i] = (tensor, weight * DREAM_MEMORY_DECAY)
     
             self.state.dream_memory = deque([(t, w) for t, w in self.state.dream_memory if w >= DREAM_PRUNE_THRESHOLD], maxlen=self.state.dream_memory_maxlen)
-            self.state.dream_memory.append((dream_layer, 1.0))
+            self.state.prune_dream_memory(DREAM_PRUNE_THRESHOLD)
+            weight = 1.0
+            if dream_prompt not in self.state.seen_prompts:
+                weight += DREAM_NOVELTY_BOOST
+                with self.state.memory_lock:
+                    self.state.dream_memory.append((dream_layer, min(weight, 1.5)))  # Cap weight at 1.5
+    
+                print(f"Added dream memory (weight: {weight:.2f}), Total memories: {len(self.state.dream_memory)}")
     
         for _ in range(3):
             q = self.generate_curiosity_question()
@@ -1270,7 +1320,7 @@ class SOVLSystem:
         exposure_gain = EXPOSURE_GAIN_EAGER if self.state.temperament_score > 0.5 else EXPOSURE_GAIN_DEFAULT
         for prompt in prompts:
             if prompt not in self.state.seen_prompts:
-                self.state.seen_prompts.add(prompt)
+                self.state.add_seen_prompt(prompt)
                 self.state.data_exposure += exposure_gain
         if self.use_token_map_memory:
             self._update_token_map_memory(prompts[0], calculate_confidence_score(outputs.logits, base_input_ids))
@@ -1424,8 +1474,8 @@ class SOVLSystem:
 
             last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
             if ENABLE_CURIOSITY:
-                self.pressure.update(self.state.temperament_score, last_conf, 0.0)
-                if self.pressure.should_erupt(CURIOSITY_PRESSURE_THRESHOLD):
+                self.state.pressure.update(self.state.temperament_score, last_conf, 0.0)
+                if self.state.pressure.should_erupt(CURIOSITY_PRESSURE_THRESHOLD):
                     q = self.generate_curiosity_question(prompt)
                     if q:
                         response += f" {q}"
@@ -1438,7 +1488,7 @@ class SOVLSystem:
                             "is_system_question": True
                         })
                         self.update_metrics(q, self.curiosity.calculate_metric(q))
-                        self.pressure.value -= CURIOSITY_PRESSURE_DROP
+                        self.state.pressure.value -= CURIOSITY_PRESSURE_DROP
 
             self.logger.write({
                 "prompt": prompt,
@@ -1520,25 +1570,37 @@ class SOVLSystem:
         return total_loss / batches if batches > 0 else 0
 
     def cleanup(self):
-        self.save_state()
-        self._clear_scaffold_cache()
-        for attr in ['base_model', 'scaffolds', 'optimizer', 'scheduler']:
-            try:
-                if attr == 'scaffolds':
-                    for scaffold in self.scaffolds:
-                        del scaffold
-                else:
-                    delattr(self, attr)
-            except Exception as e:
-                print(f"Failed to delete {attr}: {e}")
+        """Comprehensive cleanup with state preservation"""
         try:
-            if self.state.last_prompt_embedding is not None:
-                self.state.last_prompt_embedding = None
+            self._reset_sleep_state()
+            # Save state first
+            self.save_state()
+
+            # Clear scaffold cache if exists
+            if hasattr(self.state, '_temp_scaffold_context'):
+                self.state._temp_scaffold_context = None
+
+            # Release model resources
+            for attr in ['base_model', 'scaffolds']:
+                try:
+                    if attr == 'scaffolds':
+                        for scaffold in getattr(self, attr, []):
+                            del scaffold
+                    else:
+                        delattr(self, attr)
+                except Exception as e:
+                    print(f"Failed to delete {attr}: {e}")
+
+            # Clear CUDA cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            print("Cleanup completed with state preservation")
         except Exception as e:
-            print(f"Failed to clear last_prompt_embedding: {e}")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        print("Cleanup completed.")
+            print(f"Cleanup failed: {e}")
+            # Emergency cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def new_conversation(self):
         old_id = self.history.conversation_id
