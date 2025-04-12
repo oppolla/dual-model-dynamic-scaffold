@@ -1,17 +1,3 @@
-from dataclasses import dataclass
-from typing import Optional, Callable, Union, List, Dict
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import get_linear_schedule_with_warmup
-import threading
-import os
-import math
-import random
-from collections import deque
-import time
-import numpy as np
-
 @dataclass
 class TrainingConfig:
     """Configuration for training parameters."""
@@ -62,6 +48,20 @@ class TrainingConfig:
     dream_temperament_on: bool = True
     confidence_history_maxlen: int = 5
     temperament_history_maxlen: int = 5
+    # Curiosity-specific parameters
+    curiosity_novelty_threshold_spontaneous: float = 0.9
+    curiosity_novelty_threshold_response: float = 0.8
+    curiosity_pressure_threshold: float = 0.7
+    curiosity_pressure_drop: float = 0.3
+    curiosity_silence_threshold: float = 20.0
+    curiosity_question_cooldown: float = 60.0
+    curiosity_queue_maxlen: int = 10
+    curiosity_weight_ignorance: float = 0.7
+    curiosity_weight_novelty: float = 0.3
+    curiosity_max_new_tokens: int = 8
+    curiosity_base_temperature: float = 1.1
+    curiosity_temperament_influence: float = 0.4
+    curiosity_top_k: int = 30
 
     def __post_init__(self):
         if self.metrics_to_track is None:
@@ -83,6 +83,19 @@ class TrainingConfig:
         assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
         assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
         assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
+        assert 0.5 <= self.curiosity_novelty_threshold_spontaneous <= 1.0, "Spontaneous threshold must be in [0.5, 1.0]"
+        assert 0.5 <= self.curiosity_novelty_threshold_response <= 1.0, "Response threshold must be in [0.5, 1.0]"
+        assert 0.5 <= self.curiosity_pressure_threshold <= 0.9, "Pressure threshold must be in [0.5, 0.9]"
+        assert 0.1 <= self.curiosity_pressure_drop <= 0.5, "Pressure drop must be in [0.1, 0.5]"
+        assert 5.0 <= self.curiosity_silence_threshold <= 60.0, "Silence threshold must be in [5.0, 60.0]"
+        assert 30.0 <= self.curiosity_question_cooldown <= 120.0, "Question cooldown must be in [30.0, 120.0]"
+        assert 5 <= self.curiosity_queue_maxlen <= 20, "Queue maxlen must be in [5, 20]"
+        assert 0.0 <= self.curiosity_weight_ignorance <= 1.0, "Ignorance weight must be in [0.0, 1.0]"
+        assert 0.0 <= self.curiosity_weight_novelty <= 1.0, "Novelty weight must be in [0.0, 1.0]"
+        assert 5 <= self.curiosity_max_new_tokens <= 12, "Max new tokens must be in [5, 12]"
+        assert 0.5 <= self.curiosity_base_temperature <= 1.5, "Base temperature must be in [0.5, 1.5]"
+        assert 0.1 <= self.curiosity_temperament_influence <= 0.6, "Temperament influence must be in [0.1, 0.6]"
+        assert 10 <= self.curiosity_top_k <= 50, "Top k must be in [10, 50]"
 
 def collate_batch(batch: List[dict], pad_token_id: int, max_seq_length: int, tokenizer) -> dict:
     """Collate batch of prompt-completion pairs into tensors."""
@@ -157,6 +170,14 @@ class SOVLTrainer:
         self.sleep_total_loss = 0.0
         self.sleep_steps = 0
 
+        # Callback system for curiosity integration
+        self.callbacks = {
+            "on_training_complete": None,
+            "on_gestation_complete": None,
+            "on_dream_complete": None,
+            "on_sleep_train_complete": None
+        }
+
         # Optimizer
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -185,6 +206,37 @@ class SOVLTrainer:
             for module in self.model.modules():
                 if isinstance(module, torch.nn.Dropout):
                     module.p = config.dropout_rate
+
+    def register_callback(self, event: str, callback: Callable):
+            """Register a callback for a specific event."""
+            if event in self.callbacks:
+                self.callbacks[event] = callback
+            else:
+                raise ValueError(f"Unknown event: {event}")
+            
+    def on_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
+        """Notify completion of training cycle."""
+        if self.callbacks["on_training_complete"]:
+            self.callbacks["on_training_complete"](epoch, avg_loss, data_exposure)
+        return {"epoch": epoch, "avg_loss": avg_loss, "data_exposure": data_exposure}
+
+    def on_gestation_complete(self, batch_size: int, avg_loss: float):
+        """Notify completion of gestation."""
+        if self.callbacks["on_gestation_complete"]:
+            self.callbacks["on_gestation_complete"](batch_size, avg_loss)
+        return {"batch_size": batch_size, "avg_loss": avg_loss}
+
+    def on_dream_complete(self, prompt: str, novelty: bool, memory_count: int):
+        """Notify completion of dreaming."""
+        if self.callbacks["on_dream_complete"]:
+            self.callbacks["on_dream_complete"](prompt, novelty, memory_count)
+        return {"prompt": prompt, "novelty": novelty, "memory_count": memory_count}
+
+    def on_sleep_train_complete(self, batch_size: int, data_exposure: float):
+        """Notify completion of sleep training."""
+        if self.callbacks["on_sleep_train_complete"]:
+            self.callbacks["on_sleep_train_complete"](batch_size, data_exposure)
+        return {"batch_size": batch_size, "data_exposure": data_exposure}        
 
     def get_life_curve_weight(self):
         """Calculate lifecycle weight based on data exposure."""
@@ -679,6 +731,24 @@ class SOVLTrainer:
         if resume_checkpoint:
             self.load_checkpoint(resume_checkpoint)
 
+        if getattr(self.state, 'dry_run', False) and self.state.dry_run_params.get('skip_training', False):
+            print("\n=== DRY RUN TRAINING ===")
+            dry_batch = train_data[:self.state.dry_run_params.get('max_samples', self.config.batch_size)]
+            if isinstance(dry_batch, (list, tuple)):
+                dry_batch = collate_batch(dry_batch, self.tokenizer.pad_token_id, self.config.max_seq_length, self.tokenizer)
+            dry_batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in dry_batch.items()}
+            scaffold_context = scaffold_provider(dry_batch) if scaffold_provider else self.scaffold_context
+            if scaffold_context is not None:
+                scaffold_context = scaffold_context.to(self.device)
+            loss, _ = self.train_step(
+                dry_batch,
+                scaffold_context=scaffold_context,
+                dry_run=True,
+                memory_check=self.memory_check
+            )
+            print(f"Dry run training complete: Loss = {loss}")
+            return
+
         if isinstance(train_data, (list, tuple)):
             train_iter = [train_data[i:i + self.config.batch_size] for i in range(0, len(train_data), self.config.batch_size)]
         else:
@@ -751,8 +821,10 @@ class SOVLTrainer:
                             "timestamp": time.time()
                         })
                         print(f"Early stopping at epoch {epoch + 1}, step {self.global_step}")
+                        self.on_training_complete(epoch + 1, valid_loss, self.data_exposure)
                         return
 
+            # Log epoch end
             avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch > 0 else 0.0
             self.logger({
                 "event": "epoch_end",
@@ -762,3 +834,6 @@ class SOVLTrainer:
                 "timestamp": time.time()
             })
             print(f"Epoch {epoch + 1}/{self.config.max_epochs}: Avg Loss = {avg_epoch_loss:.4f}")
+
+        # Trigger callback after training completes
+        self.on_training_complete(self.config.max_epochs, avg_epoch_loss, self.data_exposure)
