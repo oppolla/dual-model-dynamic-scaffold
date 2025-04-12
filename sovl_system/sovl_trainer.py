@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Callable, Union, List
+from typing import Optional, Callable, Union, List, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,9 +10,11 @@ import math
 import random
 from collections import deque
 import time
+import numpy as np
 
 @dataclass
 class TrainingConfig:
+    """Configuration for training parameters."""
     learning_rate: float = 2e-5
     grad_accum_steps: int = 4
     weight_decay: float = 0.01
@@ -45,8 +47,21 @@ class TrainingConfig:
     dream_memory_weight: float = 0.1
     enable_dreaming: bool = True
     repetition_n: int = 3
-    sigmoid_scale: float = 0.5  # Controls steepness of sigmoid curve
-    sigmoid_shift: float = 5.0  # Shifts sigmoid curve along x-axis
+    sigmoid_scale: float = 0.5
+    sigmoid_shift: float = 5.0
+    # Dream-specific parameters
+    dream_noise_scale: float = 0.05
+    dream_prompt_weight: float = 0.5
+    dream_novelty_boost: float = 0.03
+    dream_memory_decay: float = 0.95
+    dream_prune_threshold: float = 0.1
+    temp_melancholy_noise: float = 0.02
+    enable_prompt_driven_dreams: bool = True
+    dream_swing_var: float = 0.1
+    dream_lifecycle_delta: float = 0.1
+    dream_temperament_on: bool = True
+    confidence_history_maxlen: int = 5
+    temperament_history_maxlen: int = 5
 
     def __post_init__(self):
         if self.metrics_to_track is None:
@@ -59,6 +74,15 @@ class TrainingConfig:
         assert self.repetition_n >= 2, "Repetition check length must be at least 2"
         assert self.sigmoid_scale > 0, "Sigmoid scale must be positive"
         assert self.sigmoid_shift >= 0, "Sigmoid shift must be non-negative"
+        assert self.dream_noise_scale >= 0, "Dream noise scale must be non-negative"
+        assert 0 <= self.dream_prompt_weight <= 1, "Dream prompt weight must be in [0, 1]"
+        assert self.dream_novelty_boost >= 0, "Dream novelty boost must be non-negative"
+        assert 0 <= self.dream_memory_decay <= 1, "Dream memory decay must be in [0, 1]"
+        assert 0 <= self.dream_prune_threshold <= 1, "Dream prune threshold must be in [0, 1]"
+        assert self.dream_swing_var >= 0, "Dream swing variance must be non-negative"
+        assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
+        assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
+        assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
 
 def collate_batch(batch: List[dict], pad_token_id: int, max_seq_length: int, tokenizer) -> dict:
     """Collate batch of prompt-completion pairs into tensors."""
@@ -114,7 +138,7 @@ class SOVLTrainer:
         self.logger = logger or (lambda x: None)
         self.memory_lock = memory_lock or threading.Lock()
         self.tokenizer = tokenizer
-        self.state = state  # Shared state for confidence, exposure, etc.
+        self.state = state
         self.global_step = 0
         self.best_valid_loss = float("inf")
         self.patience = 0
@@ -153,7 +177,7 @@ class SOVLTrainer:
                 T_max=config.total_steps - int(config.warmup_steps or config.warmup_ratio * config.total_steps),
                 eta_min=config.cosine_min_lr
             )
-        else:  # constant
+        else:
             self.scheduler = None
 
         # Apply dropout if specified
@@ -167,7 +191,7 @@ class SOVLTrainer:
         x = self.data_exposure / self.lora_capacity if self.lora_capacity > 0 else 0
         if self.config.lifecycle_curve == "sigmoid_linear":
             weight = 1 / (1 + math.exp(-self.config.sigmoid_scale * (x - self.config.sigmoid_shift)))
-        else:  # exponential
+        else:
             weight = 1 - math.exp(-x)
         return min(1.0, weight)
 
@@ -193,8 +217,9 @@ class SOVLTrainer:
                 return True
         return False
 
-    def get_loss_weight(self, batch: dict, log_entries: List[dict]) -> float:
+    def get_loss_weight(self, batch: dict) -> float:
         """Calculate loss weight based on log entries."""
+        log_entries = self.logger.read() if hasattr(self.logger, "read") else []
         prompts = batch['prompt']
         for prompt in prompts:
             if any(e["prompt"] == prompt and e.get("is_system_question", False) and e["response"] for e in log_entries):
@@ -214,6 +239,8 @@ class SOVLTrainer:
         if memory_check:
             memory_check()
 
+        self.scaffold_context = scaffold_context
+
         if dry_run:
             self.model.eval()
             with torch.no_grad():
@@ -226,9 +253,8 @@ class SOVLTrainer:
         with torch.autocast(device_type=self.device.type, dtype=torch.float16 if self.config.use_amp else torch.bfloat16):
             outputs = self.model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
             loss = self.loss_fn(outputs.logits, batch["labels"])
-            if loss_weight_fn:
-                weight = loss_weight_fn(batch)
-                loss *= weight
+            weight = (loss_weight_fn(batch) if loss_weight_fn else self.get_loss_weight(batch))
+            loss *= weight
             if self.config.enable_lifecycle_weighting:
                 lifecycle_weight = self.get_life_curve_weight()
                 loss *= lifecycle_weight
@@ -396,7 +422,6 @@ class SOVLTrainer:
             if self.config.enable_dreaming and self._should_dream():
                 self._dream()
 
-            # Update exposure
             self.data_exposure += sum(
                 len(entry["prompt"]) + len(entry["response"])
                 for entry in log_entries
@@ -452,24 +477,135 @@ class SOVLTrainer:
 
     def _should_dream(self):
         """Determine if dreaming should occur."""
-        if not self.state:
+        if not self.state or not self.config.dream_temperament_on:
             return False
-        swing_dream = len(self.state.confidence_history) >= 5 and torch.var(torch.tensor(list(self.state.confidence_history))).item() > 0.1
-        lifecycle_dream = abs(self.state.temperament_score - self.state.last_temperament_score) > 0.1
+        swing_dream = (
+            len(self.state.confidence_history) >= self.config.confidence_history_maxlen and
+            torch.var(torch.tensor(list(self.state.confidence_history))).item() > self.config.dream_swing_var
+        )
+        lifecycle_dream = (
+            abs(self.state.temperament_score - self.state.last_temperament_score) > self.config.dream_lifecycle_delta
+        )
         history_dream = False
-        if len(self.state.temperament_history) >= 5:
+        if len(self.state.temperament_history) >= self.config.temperament_history_maxlen:
             trend = torch.tensor(list(self.state.temperament_history)).mean().item() - self.state.temperament_history[0]
             history_dream = abs(trend) > 0.3
-        return swing_dream or lifecycle_dream or (True and history_dream)
+        should_dream = swing_dream or lifecycle_dream or history_dream
+        self.logger({
+            "event": "dream_check",
+            "swing_dream": swing_dream,
+            "lifecycle_dream": lifecycle_dream,
+            "history_dream": history_dream,
+            "should_dream": should_dream,
+            "timestamp": time.time()
+        })
+        return should_dream
 
     def _dream(self):
-        """Placeholder for dream integration."""
+        """Generate dream prompts and update dream memory."""
+        print("--- Trainer Dreaming ---")
+        log_entries = self.logger.read() if hasattr(self.logger, "read") else []
+        if not log_entries:
+            print("No memories to dream on.")
+            self.logger({
+                "event": "dream_failed",
+                "reason": "No log entries",
+                "timestamp": time.time()
+            })
+            return
+
+        # Select base prompt
+        last_prompt = (
+            self.state.history.messages[-1]["prompt"]
+            if self.state and hasattr(self.state, "history") and self.state.history.messages
+            else random.choice(log_entries)["prompt"]
+        )
+        prompt_inputs = self.tokenizer(
+            last_prompt,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.config.max_seq_length
+        ).to(self.device)
+        with torch.no_grad():
+            prompt_hidden = self.model(**prompt_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
+
+        with self.memory_lock:
+            if hasattr(self.state, "last_prompt_embedding"):
+                self.state.last_prompt_embedding = prompt_hidden.detach().cpu()
+
+        # Choose dream entry
+        if self.config.enable_prompt_driven_dreams:
+            weights = []
+            for i, entry in enumerate(log_entries):
+                if "prompt" not in entry:
+                    continue
+                log_inputs = self.tokenizer(
+                    entry["prompt"],
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=self.config.max_seq_length
+                ).to(self.device)
+                log_hidden = self.model(**log_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
+                similarity = F.cosine_similarity(prompt_hidden, log_hidden).item()
+                recency = (i + 1) / len(log_entries)
+                weight = self.config.dream_prompt_weight * similarity + (1 - self.config.dream_prompt_weight) * recency
+                weights.append(weight)
+            dream_entry = random.choices(log_entries, weights=weights, k=1)[0] if weights else random.choice(log_entries)
+        else:
+            dream_entry = random.choice(log_entries)
+        dream_prompt = dream_entry["prompt"]
+
+        # Apply noise based on temperament and novelty
+        is_novel = dream_prompt not in getattr(self.state, "seen_prompts", set())
+        noise_scale = (
+            self.config.dream_noise_scale +
+            (self.config.temp_melancholy_noise if getattr(self.state, "temperament_score", 0) <= -0.5 else 0) +
+            (self.config.dream_novelty_boost if is_novel else 0)
+        )
+        noise_scale = min(noise_scale, 0.1)
+
+        with torch.no_grad():
+            inputs = self.tokenizer(
+                dream_prompt,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.config.max_seq_length
+            ).to(self.device)
+            hidden_states = self.model(**inputs, output_hidden_states=True).hidden_states[-1]
+            noise = torch.randn_like(hidden_states) * noise_scale
+            dream_layer = (hidden_states.mean(dim=1) + noise).detach().cpu()
+
+        # Update dream memory
+        with self.memory_lock:
+            dream_memory = getattr(self.state, "dream_memory", deque(maxlen=100))
+            for i in range(len(dream_memory)):
+                tensor, weight = dream_memory[i]
+                dream_memory[i] = (tensor, weight * self.config.dream_memory_decay)
+
+            dream_memory = deque(
+                [(t, w) for t, w in dream_memory if w >= self.config.dream_prune_threshold],
+                maxlen=getattr(self.state, "dream_memory_maxlen", 100)
+            )
+            weight = self.config.dream_memory_weight
+            if is_novel:
+                weight += self.config.dream_novelty_boost
+            dream_memory.append((dream_layer, min(weight, 1.5)))
+            self.state.dream_memory = dream_memory
+
+            print(f"Added dream memory (weight: {weight:.2f}), Total memories: {len(dream_memory)}")
+
         self.logger({
-            "event": "dream_triggered",
-            "timestamp": time.time(),
-            "details": "Dreaming triggered during gestation"
+            "event": "dream_completed",
+            "prompt": dream_prompt,
+            "novelty": is_novel,
+            "memory_count": len(dream_memory),
+            "timestamp": time.time()
         })
-        print("--- Trainer Dreaming (Placeholder) ---")
+        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.config.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(dream_memory)}")
+        print("--- Dream Concluded ---")
 
     def sleep_train(self, log_entries: List[dict]):
         """Perform sleep training on log_entries."""
@@ -501,7 +637,7 @@ class SOVLTrainer:
             for entry in batch
         )
         self._reset_sleep_state()
-        print(f"Sleep Training Loss: Logged via trainer")
+        print("Sleep Training Complete")
 
     def _reset_sleep_state(self):
         """Reset sleep-related state."""
