@@ -68,6 +68,7 @@ class CrossAttentionLayer(nn.Module):
         self.gradient_checkpointing = gradient_checkpointing
         self.quantization_mode = quantization_mode
         self.scale = scale_factor if scale_factor is not None else (self.head_dim ** -0.5 if scale_attention else 1.0)
+        self.logger = None  # Will be set by injector if provided
 
         # Dynamic control parameters
         self.influence_weight = nn.Parameter(torch.tensor(1.0), requires_grad=False)
@@ -164,7 +165,22 @@ class CrossAttentionLayer(nn.Module):
 
         # Blend with memory tensors if provided
         if memory_tensors is not None and memory_weight > 0:
-            cross_states = (1 - memory_weight) * cross_states + memory_weight * memory_tensors
+            try:
+                # Ensure memory_tensors shape matches cross_states
+                if memory_tensors.shape[-1] != cross_states.shape[-1]:
+                    raise ValueError(f"Memory tensors dimension mismatch: {memory_tensors.shape[-1]} vs {cross_states.shape[-1]}")
+                # Blend with clamping to avoid extreme weights
+                memory_weight = max(0.0, min(1.0, memory_weight))
+                cross_states = (1 - memory_weight) * cross_states + memory_weight * memory_tensors
+            except Exception as e:
+                # Log warning via module's logger if available
+                if hasattr(self, 'logger') and callable(self.logger):
+                    self.logger({
+                        "warning": f"Dream memory blending failed: {str(e)}",
+                        "timestamp": time.time()
+                    })
+                # Proceed without blending
+                pass
 
         # Project queries, keys, values
         q = self.q_proj(hidden_states)
@@ -458,6 +474,9 @@ class CrossAttentionInjector:
             )
             for _ in layers_to_inject
         ])
+        # Set logger for each layer
+        for layer in cross_attention_layers:
+            layer.logger = self.logger
 
         # Apply injection
         for i, layer_idx in enumerate(layers_to_inject):
@@ -504,14 +523,7 @@ class CrossAttentionInjector:
                     context = scaffold_context.to(hidden_states.device)
                     if self._parent.scaffold_proj is not None:
                         context = self._parent.scaffold_proj(context)
-                    if hasattr(self._parent.state, 'dream_memory') and self._parent.state.dream_memory:
-                        dream_tensors, dream_weights = zip(*self._parent.state.dream_memory)
-                        dream_tensors = torch.stack(dream_tensors).to(hidden_states.device)
-                        dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=hidden_states.device)
-                        dream_avg = (dream_tensors * dream_weights.unsqueeze(-1)).sum(dim=0) / dream_weights.sum()
-                        memory_weight = getattr(self._parent, 'DREAM_MEMORY_WEIGHT', 0.1)
-                        context = (1 - memory_weight) * context + memory_weight * dream_avg
-                    hidden_states = self.cross_attn(hidden_states, context)
+                    hidden_states = self.cross_attn(hidden_states, context, **kwargs)
                 outputs = self.base_layer(hidden_states, *args, **kwargs)
                 return outputs
 
@@ -542,7 +554,7 @@ class CrossAttentionInjector:
                     context = scaffold_context.to(hidden_states.device)
                     if self._parent.scaffold_proj is not None:
                         context = self._parent.scaffold_proj(context)
-                    cross_output = self.cross_attn(hidden_states, context)
+                    cross_output = self.cross_attn(hidden_states, context, **kwargs)
                     combined = torch.cat([base_output, cross_output], dim=-1)
                     output = self.combine(combined)
                     return (output,) + base_output[1:] if isinstance(base_output, tuple) else output
@@ -574,14 +586,7 @@ class CrossAttentionInjector:
                     context = scaffold_context.to(hidden_states.device)
                     if self._parent.scaffold_proj is not None:
                         context = self._parent.scaffold_proj(context)
-                    if hasattr(self._parent.state, 'dream_memory') and self._parent.state.dream_memory:
-                        dream_tensors, dream_weights = zip(*self._parent.state.dream_memory)
-                        dream_tensors = torch.stack(dream_tensors).to(hidden_states.device)
-                        dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=hidden_states.device)
-                        dream_avg = (dream_tensors * dream_weights.unsqueeze(-1)).sum(dim=0) / dream_weights.sum()
-                        memory_weight = getattr(self._parent, 'DREAM_MEMORY_WEIGHT', 0.1)
-                        context = (1 - memory_weight) * context + memory_weight * dream_avg
-                    hidden_states = self.cross_attn(hidden_states, context)
+                    hidden_states = self.cross_attn(hidden_states, context, **kwargs)
                 return (hidden_states,) + outputs[1:] if isinstance(outputs, tuple) else hidden_states
 
         return SequentialLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
