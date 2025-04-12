@@ -1,5 +1,4 @@
 from typing import Optional
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +8,6 @@ import time
 import random
 import bitsandbytes as bnb
 import json
-import sys
 import contextlib
 from collections import deque, defaultdict
 import uuid
@@ -19,6 +17,8 @@ from sovl_logger import Logger
 from sovl_io import load_config, get_config_value, load_jsonl
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
+from sovl_config import ConfigManager
+from sovl_scaffold import inject_cross_attention, CrossAttentionInjector
 
 class InsufficientDataError(Exception):
     pass
@@ -230,29 +230,6 @@ def get_cross_attention_layers(model):
     else:
         return list(range(total_layers//3, 2*total_layers//3))
 
-class SimpleCrossAttentionFuser(nn.Module):
-    def __init__(self, hidden_dim, num_heads=8):
-        super().__init__()
-        self.cross_attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, batch_first=True)
-        self.gate = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        self.influence_weight = 1.0
-        self.blend_strength = 0.5
-
-    def set_influence_weight(self, weight):
-        self.influence_weight = max(0.0, weight)
-
-    def set_blend_strength(self, strength):
-        self.blend_strength = max(0.0, min(1.0, strength))
-
-    def forward(self, base_hidden_state, scaffold_context):
-        pooled_scaffold_context = scaffold_context.mean(dim=1, keepdim=True)
-        attn_output, _ = self.cross_attention(query=base_hidden_state, key=pooled_scaffold_context, value=pooled_scaffold_context)
-        gate_values = self.gate(base_hidden_state)
-        scaffold_effect = gate_values * (attn_output * self.influence_weight)
-        fused_state = (1 - self.blend_strength) * base_hidden_state + self.blend_strength * scaffold_effect
-        return self.layer_norm(fused_state)
-
 class TrueCuriosity:
     def __init__(self, sovl_system):
         self.sovl = sovl_system
@@ -435,6 +412,14 @@ class SOVLSystem:
         self.pressure = CuriosityPressure() if ENABLE_CURIOSITY else None
         self.last_question_time = time.time()
 
+        self.metrics = {
+            "curiosity_eruptions": 0,
+            "spontaneous_questions": 0,
+            "answered_questions": 0,
+            "avg_novelty": 0.0,
+            "eruption_count": 0
+        }
+
         self.load_state()
 
     def check_memory_health(self):
@@ -473,15 +458,16 @@ class SOVLSystem:
                 torch.cuda.empty_cache()
                 cache_cleared = True
     
-                if hasattr(self, 'dream_memory') and len(self.dream_memory) > 0:
-                    original_len = len(self.dream_memory)
-                    sorted_mem = sorted(self.dream_memory, key=lambda x: x[1], reverse=True)
+                if hasattr(self.state, 'dream_memory') and len(self.state.dream_memory) > 0:
+                    original_len = len(self.state.dream_memory)
+                    sorted_mem = sorted(self.state.dream_memory, key=lambda x: x[1], reverse=True)
                     keep_len = max(1, original_len // 2)
-                    self.dream_memory = deque(
-                        [(t.detach().cpu(), w) for t, w in sorted_mem if w > 0.5][:keep_len],
-                        maxlen=self.state.dream_memory_maxlen
-                    )
-                    if len(self.dream_memory) < original_len:
+                    # Clear current dream_memory and re-append with validation
+                    self.state.dream_memory = deque(maxlen=self.state.dream_memory_maxlen)
+                    for tensor, weight in sorted_mem[:keep_len]:
+                        if weight > 0.5:
+                            self.state.append_dream_memory(tensor.detach().cpu(), weight)
+                    if len(self.state.dream_memory) < original_len:
                         memory_pruned = True
     
                 if not hasattr(self, '_original_batch_size'):
@@ -506,7 +492,8 @@ class SOVLSystem:
                         "batch_size_reduced": batch_size_reduced,
                         "new_batch_size": BATCH_SIZE if batch_size_reduced else None,
                         "dynamic_threshold": dynamic_threshold,
-                        "threshold": MEMORY_THRESHOLD
+                        "threshold": MEMORY_THRESHOLD,
+                        "dream_memory_len": len(self.state.dream_memory)
                     },
                     "timestamp": time.time(),
                     "conversation_id": self.history.conversation_id,
@@ -802,30 +789,68 @@ class SOVLSystem:
         if layer_weights is not None and len(layer_weights) == len(layers):
             for idx, layer_idx in enumerate(layers):
                 if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
-                    base_layers[layer_idx].cross_attn.set_influence_weight(layer_weights[idx])
+                    try:
+                        base_layers[layer_idx].cross_attn.set_influence_weight(layer_weights[idx])
+                    except Exception as e:
+                        self.logger.record({
+                            "error": f"Failed to set influence weight for layer {layer_idx}: {str(e)}",
+                            "timestamp": time.time(),
+                            "conversation_id": self.history.conversation_id
+                        })
             weight_display = "per-layer"
         else:
             for layer_idx in layers:
                 if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
-                    base_layers[layer_idx].cross_attn.set_influence_weight(self.last_weight)
+                    try:
+                        base_layers[layer_idx].cross_attn.set_influence_weight(self.last_weight)
+                    except Exception as e:
+                        self.logger.record({
+                            "error": f"Failed to set influence weight for layer {layer_idx}: {str(e)}",
+                            "timestamp": time.time(),
+                            "conversation_id": self.history.conversation_id
+                        })
             weight_display = f"{self.last_weight:.2f}"
-
+    
         if blend_strength is not None:
             for layer_idx in layers:
                 if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
-                    base_layers[layer_idx].cross_attn.set_blend_strength(blend_strength)
-
+                    try:
+                        base_layers[layer_idx].cross_attn.set_blend_strength(blend_strength)
+                    except Exception as e:
+                        self.logger.record({
+                            "error": f"Failed to set blend strength for layer {layer_idx}: {str(e)}",
+                            "timestamp": time.time(),
+                            "conversation_id": self.history.conversation_id
+                        })
+    
+        if ENABLE_LIFECYCLE_WEIGHTING and weight is not None:
+            for layer_idx in layers:
+                if layer_idx < len(base_layers) and hasattr(base_layers[layer_idx], 'cross_attn'):
+                    try:
+                        base_layers[layer_idx].cross_attn.set_lifecycle_weight(self.last_weight, curve=LIFECYCLE_CURVE)
+                    except Exception as e:
+                        self.logger.record({
+                            "error": f"Failed to set lifecycle weight for layer {layer_idx}: {str(e)}",
+                            "timestamp": time.time(),
+                            "conversation_id": self.history.conversation_id
+                        })
+    
         print(f"Scaffold influence: weight={weight_display}, blend_strength={blend_strength if blend_strength is not None else 'unchanged'}")
 
     def tune_cross_attention(self, weight=None, blend_strength=None, layer_weights=None, dynamic_mode=None):
         if layer_weights is not None:
             layers = get_cross_attention_layers(self.base_model) if USE_DYNAMIC_LAYERS else CROSS_ATTN_LAYERS
             if len(layer_weights) != len(layers):
+                self.logger.record({
+                    "error": f"layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id
+                })
                 print(f"Error: layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})")
                 return
 
         self.set_scaffold_influence(weight, blend_strength, layer_weights)
-        
+
         if dynamic_mode in ['confidence', 'temperament']:
             self.dynamic_cross_attn_mode = dynamic_mode
             print(f"Dynamic cross-attention enabled: {dynamic_mode}")
@@ -833,7 +858,12 @@ class SOVLSystem:
             self.dynamic_cross_attn_mode = None
             print("Dynamic cross-attention disabled")
         elif dynamic_mode is not None:
-            print("Invalid dynamic_mode. Use: 'confidence', 'temperament', or 'off'")    
+            self.logger.record({
+                "error": f"Invalid dynamic_mode: {dynamic_mode}. Use: 'confidence', 'temperament', or 'off'",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
+            print("Invalid dynamic_mode. Use: 'confidence', 'temperament', or 'off'")  
 
     def set_quantization_mode(self, mode):
         if mode in ["fp16", "int8", "int4"] and mode != self.quantization_mode:
@@ -949,11 +979,16 @@ class SOVLSystem:
         if path_prefix is None:
             path_prefix = SAVE_PATH_PREFIX
         try:
-            # Save scaffold and cross-attention
+            # Save scaffold
             torch.save(self.scaffolds[0].state_dict(), f"{path_prefix}_scaffold.pth")
-            cross_attn_dict = {k: v for k, v in self.base_model.state_dict().items() 
-                              if 'cross_attn' in k}
-            torch.save(cross_attn_dict, f"{path_prefix}_cross_attn.pth")
+
+            # Save cross-attention and scaffold projection using module's method
+            cross_attn_injector = CrossAttentionInjector(
+                hidden_size=self.base_config.hidden_size,
+                num_heads=self.base_config.num_attention_heads,
+                logger=self.logger.record
+            )
+            cross_attn_injector.save_state(f"{path_prefix}_cross_attn.pth", self.base_model.state_dict())
 
             # Save token map
             with open(f"{path_prefix}_token_map.json", "w") as f:
@@ -965,8 +1000,13 @@ class SOVLSystem:
 
             print(f"State saved to {path_prefix}_*.pth/json")
         except Exception as e:
+            self.logger.record({
+                "error": f"Save failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
             print(f"Save failed: {e}")
-            # Attempt partial save if possible
+            # Attempt partial save
             try:
                 with open(f"{path_prefix}_state.json", "w") as f:
                     json.dump(self.state.to_dict(), f)
@@ -979,25 +1019,30 @@ class SOVLSystem:
         if path_prefix is None:
             path_prefix = SAVE_PATH_PREFIX
         try:
-            # Load scaffold and cross-attention first
+            # Load scaffold
             if os.path.exists(f"{path_prefix}_scaffold.pth"):
                 self.scaffolds[0].load_state_dict(torch.load(f"{path_prefix}_scaffold.pth"))
                 print("Scaffold state loaded.")
 
+            # Load cross-attention and scaffold projection using module's method
             if os.path.exists(f"{path_prefix}_cross_attn.pth"):
-                state_dict = self.base_model.state_dict()
-                state_dict.update(torch.load(f"{path_prefix}_cross_attn.pth"))
-                self.base_model.load_state_dict(state_dict)
+                cross_attn_injector = CrossAttentionInjector(
+                    hidden_size=self.base_config.hidden_size,
+                    num_heads=self.base_config.num_attention_heads,
+                    logger=self.logger.record
+                )
+                cross_attn_injector.load_state(f"{path_prefix}_cross_attn.pth", self.base_model)
                 print("Cross-attention state loaded.")
 
-            # Load token map and state with device awareness
+            # Load token map
             if os.path.exists(f"{path_prefix}_token_map.json"):
                 with open(f"{path_prefix}_token_map.json", "r") as f:
                     loaded_map = json.load(f)
-                    self.token_map = defaultdict(lambda: [self.scaffold_unk_id], 
-                                               {int(k): v for k, v in loaded_map.items()})
+                self.token_map = defaultdict(lambda: [self.scaffold_unk_id], 
+                                           {int(k): v for k, v in loaded_map.items()})
                 print("Token map loaded.")
 
+            # Load system state
             if os.path.exists(f"{path_prefix}_state.json"):
                 with open(f"{path_prefix}_state.json", "r") as f:
                     state_data = json.load(f)
@@ -1005,6 +1050,11 @@ class SOVLSystem:
                 print("System state loaded.")
 
         except Exception as e:
+            self.logger.record({
+                "error": f"Load failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
             print(f"Load failed: {e}. Starting fresh.")
             self.state = SOVLState(config)
             self.state.set_scaffold_unk_id(self.scaffold_tokenizer.unk_token_id)
@@ -1016,13 +1066,17 @@ class SOVLSystem:
                 del self._temp_scaffold_context
             self._temp_scaffold_context = None
             if self.state.last_prompt_embedding is not None:
-                self.state.last_prompt_embedding = self.state.last_prompt_embedding.detach().cpu()
+                last_emb = self.state.last_prompt_embedding.detach().cpu()
+                del last_emb
                 self.state.last_prompt_embedding = None
-            if hasattr(self.state, 'dream_memory') and self.state.dream_memory:
-                new_memory = deque(maxlen=self.state.dream_memory_maxlen)
-                for tensor, weight in self.state.dream_memory:
-                    new_memory.append((tensor.detach().cpu(), weight))
-                self.state.dream_memory = new_memory
+            if hasattr(self.state, 'dream_memory'):
+                if self.state.dream_memory:
+                    new_memory = deque(maxlen=self.state.dream_memory_maxlen)
+                    for tensor, weight in self.state.dream_memory:
+                        new_memory.append((tensor.detach().cpu(), weight))
+                    self.state.dream_memory = new_memory
+                else:
+                    self.state.dream_memory = deque(maxlen=self.state.dream_memory_maxlen)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -1063,60 +1117,36 @@ class SOVLSystem:
         if not ENABLE_CROSS_ATTENTION:
             print("Cross-attention disabled.")
             return
-        base_layers = self._get_model_layers(self.base_model)
-        num_base_layers = len(base_layers)
-        hidden_dim = self.base_config.hidden_size
-        num_heads = self.base_config.num_attention_heads
-
-        if self.scaffold_config.hidden_size != hidden_dim:
-            print(f"Adding projection: {self.scaffold_config.hidden_size} -> {hidden_dim}")
-            self.scaffold_proj = nn.Linear(self.scaffold_config.hidden_size, hidden_dim).to(DEVICE)
-            self.scaffold_proj.weight.requires_grad_(True)
-            self.scaffold_proj.bias.requires_grad_(True)
-        else:
-            self.scaffold_proj = None
-
-        layers = get_cross_attention_layers(self.base_model) if USE_DYNAMIC_LAYERS else CROSS_ATTN_LAYERS
-        print(f"Using layers: {layers}")
-
-        for layer_idx in layers:
-            if layer_idx >= num_base_layers:
-                print(f"Warning: Layer {layer_idx} out of bounds ({num_base_layers} layers). Skipping.")
-                continue
-            original_layer = base_layers[layer_idx]
-            cross_attn_fuser = SimpleCrossAttentionFuser(hidden_dim=hidden_dim, num_heads=num_heads).to(DEVICE)
-
-            class ModifiedLayer(nn.Module):
-                def __init__(self, orig_layer, cross_attn_module, parent_system):
-                    super().__init__()
-                    self.orig_layer = orig_layer
-                    self.cross_attn = cross_attn_module
-                    self._parent_system = parent_system
-
-                def forward(self, hidden_states, **kwargs):
-                    outputs = self.orig_layer(hidden_states, **kwargs)
-                    base_hidden_state_output = outputs[0] if isinstance(outputs, tuple) else outputs
-                    scaffold_context = self._parent_system._temp_scaffold_context
-                    if scaffold_context is not None:
-                        scaffold_context = scaffold_context.to(base_hidden_state_output.device)
-                        if self._parent_system.scaffold_proj is not None:
-                            scaffold_context = self._parent_system.scaffold_proj(scaffold_context)
-                        if self._parent_system.state.dream_memory and DREAM_MEMORY_WEIGHT > 0:
-                            dream_tensors, dream_weights = zip(*self._parent_system.state.dream_memory)
-                            dream_tensors = torch.stack(dream_tensors).to(base_hidden_state_output.device)
-                            dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=base_hidden_state_output.device)
-                            from sovl_utils import safe_divide
-                            dream_avg = safe_divide(
-                                (dream_tensors * dream_weights.unsqueeze(-1)).sum(dim=0),
-                                dream_weights.sum()
-                            )
-                            scaffold_context = (1 - DREAM_MEMORY_WEIGHT) * scaffold_context + DREAM_MEMORY_WEIGHT * dream_avg
-                        fused_hidden_state = self.cross_attn(base_hidden_state_output, scaffold_context)
-                        return (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
-                    return outputs
-
-            base_layers[layer_idx] = ModifiedLayer(original_layer, cross_attn_fuser, self)
-            print(f"Injected cross-attention into layer {layer_idx}")
+        config = {
+            'hidden_size': self.base_config.hidden_size,
+            'num_heads': self.base_config.num_attention_heads,
+            'layers_to_inject': get_cross_attention_layers(self.base_model) if USE_DYNAMIC_LAYERS else CROSS_ATTN_LAYERS,
+            'injection_strategy': 'sequential',
+            'cross_attention_config': {
+                'use_pooling': True,
+                'use_gating': True,
+                'dropout_rate': LORA_DROPOUT,
+                'use_residual': True,
+                'scale_attention': True,
+                'use_sparse_attention': False,
+                'gradient_checkpointing': DEVICE.type == 'cuda',
+                'quantization_mode': QUANTIZATION_MODE,
+            },
+            'gradient_checkpointing': DEVICE.type == 'cuda',
+            'custom_layers': CUSTOM_LAYERS,
+            'token_map': self.token_map,
+            'logger': self.logger.record,
+        }
+        try:
+            self.base_model = inject_cross_attention(self.base_model, self.scaffolds[0], config)
+            print("Cross-attention injection complete.")
+        except Exception as e:
+            self.logger.record({
+                "error": f"Cross-attention injection failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
+            print(f"Error during cross-attention injection: {str(e)}")
 
     def enable_dry_run(self, max_samples=2, max_length=128, validate_architecture=True, skip_training=True):
         self.dry_run = True
@@ -1383,6 +1413,14 @@ class SOVLSystem:
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         """Generate a response for the given prompt."""
         try:
+            generation_params = {
+                "prompt_length": len(prompt),
+                "max_new_tokens": max_new_tokens,
+                "scaffold_weight": scaffold_weight,
+                "temperature": kwargs.get("temperature", BASE_TEMPERATURE),
+                "top_k": kwargs.get("top_k", None),
+                "do_sample": kwargs.get("do_sample", False)
+            }
             print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")
             self.check_memory_health()
             if self.is_sleeping:
@@ -1404,10 +1442,59 @@ class SOVLSystem:
                 temp_adjustment = TEMP_MOOD_INFLUENCE * 0.3 * self.state.temperament_score
                 temp += temp_adjustment
                 temp = max(0.5, min(1.5, temp))
+                generation_params["adjusted_temperature"] = temp
 
+            # Compute dynamic factor for cross-attention
+            dynamic_factor = None
+            if ENABLE_DYNAMIC_CROSS_ATTENTION and self.dynamic_cross_attn_mode:
+                try:
+                    last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
+                    if self.dynamic_cross_attn_mode == 'confidence' and isinstance(last_conf, (int, float)):
+                        dynamic_factor = torch.tensor(last_conf, device=DEVICE, dtype=torch.float)
+                    elif self.dynamic_cross_attn_mode == 'temperament' and isinstance(self.state.temperament_score, (int, float)):
+                        dynamic_factor = torch.tensor(self.state.temperament_score, device=DEVICE, dtype=torch.float)
+                    else:
+                        self.logger.record({
+                            "warning": f"Invalid dynamic factor for mode {self.dynamic_cross_attn_mode}",
+                            "timestamp": time.time(),
+                            "conversation_id": self.history.conversation_id
+                        })
+                except Exception as e:
+                    self.logger.record({
+                        "warning": f"Failed to compute dynamic factor: {str(e)}",
+                        "timestamp": time.time(),
+                        "conversation_id": self.history.conversation_id
+                    })
+
+            # Prepare scaffold and dream memory context
             self._clear_scaffold_cache()
             generated_ids = []
             chunk_size = 512
+            memory_tensors = None
+            dream_memory_info = {"used": False, "tensor_count": 0, "shapes": []}
+            if self.state.dream_memory and DREAM_MEMORY_WEIGHT > 0:
+                try:
+                    dream_tensors, dream_weights = zip(*self.state.dream_memory)
+                    dream_memory_info["tensor_count"] = len(dream_tensors)
+                    dream_memory_info["shapes"] = [list(t.shape) for t in dream_tensors]
+                    # Validate dream tensors
+                    for tensor in dream_tensors:
+                        if tensor.shape[-1] != self.state.hidden_size:
+                            raise ValueError(f"Dream tensor shape {tensor.shape} mismatches hidden_size {self.state.hidden_size}")
+                    dream_tensors = torch.stack(dream_tensors).to(DEVICE)
+                    dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=DEVICE)
+                    memory_tensors = torch.sum(dream_tensors * dream_weights.unsqueeze(-1), dim=0) / dream_weights.sum()
+                    dream_memory_info["used"] = True
+                except Exception as e:
+                    self.logger.record({
+                        "warning": f"Dream memory preparation failed: {str(e)}",
+                        "timestamp": time.time(),
+                        "conversation_id": self.history.conversation_id,
+                        "dream_memory_len": len(self.state.dream_memory),
+                        "dream_tensor_shapes": [tuple(t.shape) for t, _ in self.state.dream_memory] if self.state.dream_memory else []
+                    })
+                    dream_memory_info["error"] = str(e)
+
             with self._scaffold_context(scaffold_hidden_states):
                 self.set_scaffold_influence(weight=scaffold_weight)
                 for chunk_start in range(0, input_ids.size(1), chunk_size):
@@ -1421,6 +1508,10 @@ class SOVLSystem:
                         temperature=temp,
                         return_dict_in_generate=True,
                         output_scores=True,
+                        scaffold_context=scaffold_hidden_states,
+                        memory_tensors=memory_tensors,
+                        memory_weight=DREAM_MEMORY_WEIGHT,
+                        dynamic_factor=dynamic_factor,
                         **kwargs
                     )
                     generated_ids.extend(outputs.sequences[0][input_length:].tolist())
@@ -1470,14 +1561,17 @@ class SOVLSystem:
                         self.update_metrics(q, self.curiosity.calculate_metric(q))
                         self.pressure.value -= CURIOSITY_PRESSURE_DROP
 
-            self.logger.record({
+            log_entry = {
                 "prompt": prompt,
                 "response": response,
                 "timestamp": start_time,
                 "conversation_id": self.history.conversation_id,
                 "confidence_score": confidence_score,
-                "is_system_question": False
-            })
+                "is_system_question": False,
+                "generation_params": generation_params,
+                "dream_memory_info": dream_memory_info
+            }
+            self.logger.record(log_entry)
             self.history.add_message(prompt, response)
             if self.use_token_map_memory:
                 with self.memory_lock:
@@ -1497,7 +1591,8 @@ class SOVLSystem:
                 "prompt": prompt,
                 "timestamp": time.time(),
                 "conversation_id": str(uuid.uuid4()),
-                "is_error_prompt": True
+                "is_error_prompt": True,
+                "generation_params": generation_params
             })
             if self.enable_error_listening:
                 error_response = self._handle_error_prompt(error_msg)
@@ -1510,7 +1605,8 @@ class SOVLSystem:
                 "prompt": prompt,
                 "timestamp": time.time(),
                 "conversation_id": str(uuid.uuid4()),
-                "is_error_prompt": True
+                "is_error_prompt": True,
+                "generation_params": generation_params
             })
             if self.enable_error_listening:
                 error_response = self._handle_error_prompt(error_msg)
