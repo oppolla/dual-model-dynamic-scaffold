@@ -17,6 +17,7 @@ import os
 from threading import Lock
 from sovl_logger import Logger
 from sovl_io import load_config, get_config_value, load_jsonl
+from sovl_state import SOVLState, ConversationHistory
 
 class InsufficientDataError(Exception):
     pass
@@ -159,7 +160,7 @@ ENABLE_LORA_ADAPTERS = get_config_value(controls_config, "enable_lora_adapters",
 ENABLE_REPETITION_CHECK = get_config_value(controls_config, "enable_repetition_check", True)
 ENABLE_PROMPT_DRIVEN_DREAMS = get_config_value(controls_config, "enable_prompt_driven_dreams", True)
 ENABLE_LIFECYCLE_WEIGHTING = get_config_value(controls_config, "enable_lifecycle_weighting", True)
-ENABLE_ERROR_LISTENING = get_config_value(controls_config, "enable_error_listening", True)  # Added here
+ENABLE_ERROR_LISTENING = get_config_value(controls_config, "enable_error_listening", True)
 # TCQS Controls
 ENABLE_CURIOSITY = get_config_value(controls_config, "enable_curiosity", True)
 CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = get_config_value(controls_config, "curiosity_novelty_threshold_spontaneous", 0.9)
@@ -218,7 +219,6 @@ TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
 print(f"Dataset split: {len(TRAIN_DATA)} train, {len(VALID_DATA)} validation")
 if not TRAIN_DATA or not VALID_DATA:
     print("Warning: TRAIN_DATA or VALID_DATA empty. Training may fail.")
-    # Don't exit here; let the system handle it gracefully
 
 def get_cross_attention_layers(model):
     total_layers = len(model.transformer.h) if hasattr(model, 'transformer') else len(model.layers)
@@ -256,14 +256,6 @@ class SimpleCrossAttentionFuser(nn.Module):
         fused_state = (1 - self.blend_strength) * base_hidden_state + self.blend_strength * scaffold_effect
         return self.layer_norm(fused_state)
 
-class ConversationHistory:
-    def __init__(self, conversation_id=None):
-        self.conversation_id = conversation_id or str(uuid.uuid4())
-        self.messages = deque(maxlen=10)
-
-    def add_message(self, prompt, response):
-        self.messages.append({"prompt": prompt, "response": response})
-
 class TrueCuriosity:
     def __init__(self, sovl_system):
         self.sovl = sovl_system
@@ -299,7 +291,7 @@ class SOVLSystem:
         self.logger = Logger("sovl_logs.jsonl")
         config_defaults = {"quantization_mode": QUANTIZATION_MODE, "enable_error_listening": ENABLE_ERROR_LISTENING}
         config = load_config("sovl_config.json", config_defaults)
-        self.quantization_mode = config.get("quantization_mode", QUANTIZATION_MODE)  # Still works with top-level keys
+        self.quantization_mode = config.get("quantization_mode", QUANTIZATION_MODE)
         self.enable_error_listening = get_config_value(config, "controls_config.enable_error_listening", ENABLE_ERROR_LISTENING)
 
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
@@ -311,7 +303,6 @@ class SOVLSystem:
             'validate_architecture': DRY_RUN_VALIDATE_ARCH,
             'skip_training': DRY_RUN_SKIP_TRAINING
         }
-        self.dream_memory_maxlen = DREAM_MEMORY_MAXLEN
 
         print(f"Loading base model: {BASE_MODEL_NAME}")
         quantization_config = {"load_in_8bit": True} if self.quantization_mode == "int8" else {"load_in_4bit": True} if self.quantization_mode == "int4" else {}
@@ -365,11 +356,9 @@ class SOVLSystem:
         self.optimizer = None
         self.scheduler = None
         self.global_step = 0
-        self.data_exposure = 0
-        self.seen_prompts = set()
         self.best_valid_loss = float('inf')
         self.patience = 0
-        self.memory_lock = Lock()  # Still needed for memory health
+        self.memory_lock = Lock()
         self.mem_usage_history = deque(maxlen=10)
         self.dynamic_threshold_base = MEMORY_THRESHOLD
         self.max_patience = MAX_PATIENCE
@@ -380,10 +369,6 @@ class SOVLSystem:
         self.history = ConversationHistory()
         self.last_trained = 0
         self.dynamic_cross_attn_mode = DYNAMIC_CROSS_ATTN_MODE
-        self.sleep_confidence_sum = 0.0
-        self.sleep_confidence_count = 0
-        self.confidence_history = deque(maxlen=CONFIDENCE_HISTORY_MAXLEN)
-        self.temperament_history = deque(maxlen=TEMPERAMENT_HISTORY_MAXLEN)
         self.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * LIFECYCLE_CAPACITY_FACTOR
         self.last_weight = 0.0
         self.is_sleeping = False
@@ -393,61 +378,12 @@ class SOVLSystem:
         self.sleep_total_loss = 0.0
         self.sleep_steps = 0
 
-        self.temperament_score = 0.0
-        self.last_temperament_score = 0.0
-        self.dream_memory = deque(maxlen=self.dream_memory_maxlen)
-        self.last_prompt_embedding = None
-
-        self.sleep_conf_threshold = SLEEP_CONF_THRESHOLD
-        self.sleep_time_factor = SLEEP_TIME_FACTOR
-        self.sleep_log_min = SLEEP_LOG_MIN
-        self.dream_swing_var = DREAM_SWING_VAR
-        self.dream_lifecycle_delta = DREAM_LIFECYCLE_DELTA
-        self.dream_temperament_on = DREAM_TEMPERAMENT_ON
-        self.dream_noise_scale = DREAM_NOISE_SCALE
-        self.temp_eager_threshold = TEMP_EAGER_THRESHOLD
-        self.temp_sluggish_threshold = TEMP_SLUGGISH_THRESHOLD
-        self.temp_mood_influence = TEMP_MOOD_INFLUENCE
-        self.scaffold_weight_cap = SCAFFOLD_WEIGHT_CAP
-        self.base_temperature = BASE_TEMPERATURE
-        self.save_path_prefix = SAVE_PATH_PREFIX
-        self.dream_memory_weight = DREAM_MEMORY_WEIGHT
-        self.dream_memory_decay = DREAM_MEMORY_DECAY
-        self.dream_prune_threshold = DREAM_PRUNE_THRESHOLD
-        self.dream_prompt_weight = DREAM_PROMPT_WEIGHT
-        self.dream_novelty_boost = DREAM_NOVELTY_BOOST
-        self.temp_curiosity_boost = TEMP_CURIOSITY_BOOST
-        self.temp_restless_drop = TEMP_RESTLESS_DROP
-        self.temp_melancholy_noise = TEMP_MELANCHOLY_NOISE
-        self.conf_feedback_strength = CONF_FEEDBACK_STRENGTH
-        self.temp_smoothing_factor = TEMP_SMOOTHING_FACTOR
-        self.lifecycle_capacity_factor = LIFECYCLE_CAPACITY_FACTOR
-        self.lifecycle_curve = LIFECYCLE_CURVE
-        self.enable_dreaming = ENABLE_DREAMING
-        self.enable_temperament = ENABLE_TEMPERAMENT
-        self.enable_confidence_tracking = ENABLE_CONFIDENCE_TRACKING
-        self.enable_gestation = ENABLE_GESTATION
-        self.enable_sleep_training = ENABLE_SLEEP_TRAINING
-        self.enable_cross_attention = ENABLE_CROSS_ATTENTION
-        self.enable_dynamic_cross_attention = ENABLE_DYNAMIC_CROSS_ATTENTION
-        self.enable_lora_adapters = ENABLE_LORA_ADAPTERS
-        self.enable_repetition_check = ENABLE_REPETITION_CHECK
-        self.enable_prompt_driven_dreams = ENABLE_PROMPT_DRIVEN_DREAMS
-        self.enable_lifecycle_weighting = ENABLE_LIFECYCLE_WEIGHTING
-        self.enable_curiosity = ENABLE_CURIOSITY
-        self.curiosity_novelty_threshold_spontaneous = CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS
-        self.curiosity_novelty_threshold_response = CURIOSITY_NOVELTY_THRESHOLD_RESPONSE
-        self.curiosity_pressure_threshold = CURIOSITY_PRESSURE_THRESHOLD
-        self.curiosity_pressure_drop = CURIOSITY_PRESSURE_DROP
-        self.curiosity_silence_threshold = CURIOSITY_SILENCE_THRESHOLD
-        self.curiosity_question_cooldown = CURIOSITY_QUESTION_COOLDOWN
-        self.curiosity_queue_maxlen = CURIOSITY_QUEUE_MAXLEN
-        self.curiosity_weight_ignorance = CURIOSITY_WEIGHT_IGNORANCE
-        self.curiosity_weight_novelty = CURIOSITY_WEIGHT_NOVELTY
-
-        self.curiosity = TrueCuriosity(self) if self.enable_curiosity else None
-        self.unanswered_q = deque(maxlen=self.curiosity_queue_maxlen) if self.enable_curiosity else deque(maxlen=10)
-        self.pressure = CuriosityPressure() if self.enable_curiosity else None
+        # Initialize state from config
+        self.state = SOVLState(config)
+        
+        # Curiosity system
+        self.curiosity = TrueCuriosity(self) if ENABLE_CURIOSITY else None
+        self.pressure = CuriosityPressure() if ENABLE_CURIOSITY else None
         self.last_question_time = time.time()
         self.metrics = {
             "curiosity_eruptions": 0,
@@ -456,31 +392,24 @@ class SOVLSystem:
             "avg_novelty": 0.0,
             "eruption_count": 0
         }
-        self.curiosity_max_new_tokens = CURIOSITY_MAX_NEW_TOKENS
-        self.curiosity_base_temperature = CURIOSITY_BASE_TEMPERATURE
-        self.curiosity_temperament_influence = CURIOSITY_TEMPERAMENT_INFLUENCE
-        self.curiosity_top_k = CURIOSITY_TOP_K
 
         self.load_state()
 
     def check_memory_health(self):
         """Autonomically reduce GPU memory usage if nearing capacity with dynamic adjustments."""
         if not torch.cuda.is_available():
-            return  # No GPU, no action needed
+            return
     
-        with self.memory_lock:  # Thread-safe adjustments
+        with self.memory_lock:
             current_mem = torch.cuda.memory_allocated()
             total_mem = torch.cuda.get_device_properties(0).total_memory
             mem_ratio = current_mem / total_mem
             self.mem_usage_history.append(mem_ratio)
     
-            # Dynamic threshold: adjust based on model size and historical usage
-            model_size = sum(p.numel() * p.element_size() for p in self.base_model.parameters()) / total_mem
-            avg_mem_usage = sum(self.mem_usage_history) / len(self.mem_usage_history) if self.mem_usage_history else mem_ratio
             dynamic_threshold = min(
-                0.95,  # Upper bound to avoid total saturation
+                0.95,
                 max(
-                    0.7,  # Lower bound for responsiveness
+                    0.7,
                     self.dynamic_threshold_base * (1 + model_size * 0.1 - avg_mem_usage * 0.2)
                 )
             )
@@ -491,24 +420,20 @@ class SOVLSystem:
                 cache_cleared = False
                 batch_size_reduced = False
     
-                # Strategy 1: Clear GPU cache
                 torch.cuda.empty_cache()
                 cache_cleared = True
     
-                # Strategy 2: Priority-based pruning of dream_memory
                 if hasattr(self, 'dream_memory') and len(self.dream_memory) > 0:
                     original_len = len(self.dream_memory)
-                    # Sort by weight, keep high-confidence entries (weight > 0.5)
                     sorted_mem = sorted(self.dream_memory, key=lambda x: x[1], reverse=True)
-                    keep_len = max(1, original_len // 2)  # At least 1 entry
+                    keep_len = max(1, original_len // 2)
                     self.dream_memory = deque(
                         [(t.detach().cpu(), w) for t, w in sorted_mem if w > 0.5][:keep_len],
-                        maxlen=self.dream_memory_maxlen
+                        maxlen=self.state.dream_memory_maxlen
                     )
                     if len(self.dream_memory) < original_len:
                         memory_pruned = True
     
-                # Strategy 3: Reduce batch size temporarily
                 if not hasattr(self, '_original_batch_size'):
                     self._original_batch_size = BATCH_SIZE
                 if BATCH_SIZE > 1:
@@ -516,12 +441,10 @@ class SOVLSystem:
                     BATCH_SIZE = max(1, BATCH_SIZE // 2)
                     batch_size_reduced = True
     
-                # Strategy 4: Switch to lower quantization (flag for restart)
                 if self.quantization_mode != "int8":
                     self.set_quantization_mode("int8")
                     quantization_changed = True
     
-                # Log all actions
                 self.logger.write({
                     "error": "memory_threshold_exceeded",
                     "details": {
@@ -543,8 +466,7 @@ class SOVLSystem:
                       f"Cache Cleared: {cache_cleared}, Pruned: {memory_pruned}, "
                       f"Batch Reduced: {batch_size_reduced}, Quantized: {quantization_changed}")
     
-            # Restore batch size if memory pressure eases
-            elif mem_ratio < dynamic_threshold * 0.8:  # Hysteresis
+            elif mem_ratio < dynamic_threshold * 0.8:
                 if hasattr(self, '_original_batch_size') and BATCH_SIZE < self._original_batch_size:
                     global BATCH_SIZE
                     BATCH_SIZE = self._original_batch_size
@@ -552,27 +474,27 @@ class SOVLSystem:
                     delattr(self, '_original_batch_size')
 
     def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
-        if not self.enable_curiosity:
+        if not ENABLE_CURIOSITY:
             return None
         
-        if not context and self.dream_memory:
-            dream_embs, _ = zip(*self.dream_memory)
+        if not context and self.state.dream_memory:
+            dream_embs, _ = zip(*self.state.dream_memory)
             seed = self.generate("", max_new_tokens=5, temperature=1.3, do_sample=True)
             context = " ".join(seed.split()[:3])
         elif not context:
             context = ""
 
-        temp = self.curiosity_base_temperature + (self.temperament_score * self.curiosity_temperament_influence)
+        temp = CURIOSITY_BASE_TEMPERATURE + (self.state.temperament_score * CURIOSITY_TEMPERAMENT_INFLUENCE)
         temp = max(0.7, min(1.7, temp))
 
-        output = self.generate(context, max_new_tokens=self.curiosity_max_new_tokens, 
-                             temperature=temp, top_k=self.curiosity_top_k, do_sample=True)
+        output = self.generate(context, max_new_tokens=CURIOSITY_MAX_NEW_TOKENS, 
+                             temperature=temp, top_k=CURIOSITY_TOP_K, do_sample=True)
 
         if not output.endswith("?"):
             output += "?"
 
         score = self.curiosity.calculate_metric(output)
-        threshold = self.curiosity_novelty_threshold_spontaneous if spontaneous else self.curiosity_novelty_threshold_response
+        threshold = CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS if spontaneous else CURIOSITY_NOVELTY_THRESHOLD_RESPONSE
         return output if score > threshold else None
     
     def update_metrics(self, question, score, spontaneous=False, answered=False):
@@ -585,11 +507,11 @@ class SOVLSystem:
         self.metrics["eruption_count"] += 1
 
     def check_silence(self, elapsed: float):
-        if not self.enable_curiosity or not self.pressure:
+        if not ENABLE_CURIOSITY or not self.pressure:
             return
-        if (elapsed > self.curiosity_silence_threshold and 
-            self.pressure.value > self.curiosity_pressure_threshold and 
-            (time.time() - self.last_question_time) > self.curiosity_question_cooldown):
+        if (elapsed > CURIOSITY_SILENCE_THRESHOLD and 
+            self.pressure.value > CURIOSITY_PRESSURE_THRESHOLD and 
+            (time.time() - self.last_question_time) > CURIOSITY_QUESTION_COOLDOWN):
             q = self.generate_curiosity_question(spontaneous=True)
             if q:
                 print(f"{q}")
@@ -602,10 +524,10 @@ class SOVLSystem:
                     "is_system_question": True
                 })
                 self.update_metrics(q, self.curiosity.calculate_metric(q), spontaneous=True)
-                self.pressure.value -= self.curiosity_pressure_drop
+                self.pressure.value -= CURIOSITY_PRESSURE_DROP
                 self.last_question_time = time.time()
-            elif self.unanswered_q:
-                q, score = self.unanswered_q.popleft()
+            elif self.state.unanswered_q:
+                q, score = self.state.unanswered_q.popleft()
                 print(f"{q}")
                 self.logger.write({
                     "prompt": q,
@@ -616,7 +538,7 @@ class SOVLSystem:
                     "is_system_question": True
                 })
                 self.update_metrics(q, score, spontaneous=True)
-                self.pressure.value -= self.curiosity_pressure_drop * 0.7
+                self.pressure.value -= CURIOSITY_PRESSURE_DROP * 0.7
                 self.last_question_time = time.time()
 
     def tune_curiosity(self, enable=None, spontaneous_threshold=None, response_threshold=None, pressure_threshold=None, 
@@ -624,47 +546,47 @@ class SOVLSystem:
                        weight_ignorance=None, weight_novelty=None, max_new_tokens=None, base_temperature=None, 
                        temperament_influence=None, top_k=None):
         if enable is not None:
-            self.enable_curiosity = bool(enable)
-            if self.enable_curiosity and not self.curiosity:
+            ENABLE_CURIOSITY = bool(enable)
+            if ENABLE_CURIOSITY and not self.curiosity:
                 self.curiosity = TrueCuriosity(self)
                 self.pressure = CuriosityPressure()
-            elif not self.enable_curiosity:
+            elif not ENABLE_CURIOSITY:
                 self.curiosity = None
                 self.pressure = None
         if spontaneous_threshold is not None and 0.5 <= spontaneous_threshold <= 1.0:
-            self.curiosity_novelty_threshold_spontaneous = spontaneous_threshold
+            CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = spontaneous_threshold
         if response_threshold is not None and 0.5 <= response_threshold <= 1.0:
-            self.curiosity_novelty_threshold_response = response_threshold
+            CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = response_threshold
         if pressure_threshold is not None and 0.5 <= pressure_threshold <= 0.9:
-            self.curiosity_pressure_threshold = pressure_threshold
+            CURIOSITY_PRESSURE_THRESHOLD = pressure_threshold
         if pressure_drop is not None and 0.1 <= pressure_drop <= 0.5:
-            self.curiosity_pressure_drop = pressure_drop
+            CURIOSITY_PRESSURE_DROP = pressure_drop
         if silence_threshold is not None and 5.0 <= silence_threshold <= 60.0:
-            self.curiosity_silence_threshold = silence_threshold
+            CURIOSITY_SILENCE_THRESHOLD = silence_threshold
         if question_cooldown is not None and 30.0 <= question_cooldown <= 120.0:
-            self.curiosity_question_cooldown = question_cooldown
+            CURIOSITY_QUESTION_COOLDOWN = question_cooldown
         if queue_maxlen is not None and 5 <= queue_maxlen <= 20:
-            self.curiosity_queue_maxlen = queue_maxlen
-            self.unanswered_q = deque(self.unanswered_q, maxlen=queue_maxlen)
+            self.state.curiosity_queue_maxlen = queue_maxlen
+            self.state.unanswered_q = deque(self.state.unanswered_q, maxlen=queue_maxlen)
         if weight_ignorance is not None and 0.0 <= weight_ignorance <= 1.0:
-            self.curiosity_weight_ignorance = weight_ignorance
+            CURIOSITY_WEIGHT_IGNORANCE = weight_ignorance
         if weight_novelty is not None and 0.0 <= weight_novelty <= 1.0:
-            self.curiosity_weight_novelty = weight_novelty
+            CURIOSITY_WEIGHT_NOVELTY = weight_novelty
         if max_new_tokens is not None and 5 <= max_new_tokens <= 12:
-            self.curiosity_max_new_tokens = max_new_tokens
+            CURIOSITY_MAX_NEW_TOKENS = max_new_tokens
         if base_temperature is not None and 0.5 <= base_temperature <= 1.5:
-            self.curiosity_base_temperature = base_temperature
+            CURIOSITY_BASE_TEMPERATURE = base_temperature
         if temperament_influence is not None and 0.1 <= temperament_influence <= 0.6:
-            self.curiosity_temperament_influence = temperament_influence
+            CURIOSITY_TEMPERAMENT_INFLUENCE = temperament_influence
         if top_k is not None and 10 <= top_k <= 50:
-            self.curiosity_top_k = top_k
-        print(f"Curiosity params: enable={self.enable_curiosity}, spontaneous_threshold={self.curiosity_novelty_threshold_spontaneous}, "
-              f"response_threshold={self.curiosity_novelty_threshold_response}, pressure_threshold={self.curiosity_pressure_threshold}, "
-              f"pressure_drop={self.curiosity_pressure_drop}, silence_threshold={self.curiosity_silence_threshold}, "
-              f"question_cooldown={self.curiosity_question_cooldown}, queue_maxlen={self.curiosity_queue_maxlen}, "
-              f"weight_ignorance={self.curiosity_weight_ignorance}, weight_novelty={self.curiosity_weight_novelty}, "
-              f"max_new_tokens={self.curiosity_max_new_tokens}, base_temperature={self.curiosity_base_temperature}, "
-              f"temperament_influence={self.curiosity_temperament_influence}, top_k={self.curiosity_top_k}")
+            CURIOSITY_TOP_K = top_k
+        print(f"Curiosity params: enable={ENABLE_CURIOSITY}, spontaneous_threshold={CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS}, "
+              f"response_threshold={CURIOSITY_NOVELTY_THRESHOLD_RESPONSE}, pressure_threshold={CURIOSITY_PRESSURE_THRESHOLD}, "
+              f"pressure_drop={CURIOSITY_PRESSURE_DROP}, silence_threshold={CURIOSITY_SILENCE_THRESHOLD}, "
+              f"question_cooldown={CURIOSITY_QUESTION_COOLDOWN}, queue_maxlen={self.state.curiosity_queue_maxlen}, "
+              f"weight_ignorance={CURIOSITY_WEIGHT_IGNORANCE}, weight_novelty={CURIOSITY_WEIGHT_NOVELTY}, "
+              f"max_new_tokens={CURIOSITY_MAX_NEW_TOKENS}, base_temperature={CURIOSITY_BASE_TEMPERATURE}, "
+              f"temperament_influence={CURIOSITY_TEMPERAMENT_INFLUENCE}, top_k={CURIOSITY_TOP_K}")
 
     def toggle_memory(self, mode):
         modes = {
@@ -692,7 +614,7 @@ class SOVLSystem:
         self.has_woken = True
         print(f"\n{response}")
 
-        q = self.generate_curiosity_question() if not self.unanswered_q else self.unanswered_q.popleft()[0]
+        q = self.generate_curiosity_question() if not self.state.unanswered_q else self.state.unanswered_q.popleft()[0]
         if q:
             print(f"{q}")
             self.logger.write({
@@ -772,119 +694,91 @@ class SOVLSystem:
 
     def set_sleep_params(self, conf_threshold=None, time_factor=None, log_min=None):
         if conf_threshold is not None and 0.5 <= conf_threshold <= 0.9:
-            self.sleep_conf_threshold = conf_threshold
+            SLEEP_CONF_THRESHOLD = conf_threshold
         if time_factor is not None and 0.5 <= time_factor <= 5.0:
-            self.sleep_time_factor = time_factor
+            SLEEP_TIME_FACTOR = time_factor
         if log_min is not None and 5 <= log_min <= 20:
-            self.sleep_log_min = log_min
-        print(f"Sleep params: conf={self.sleep_conf_threshold}, time_factor={self.sleep_time_factor}, log_min={self.sleep_log_min}")
+            SLEEP_LOG_MIN = log_min
+        print(f"Sleep params: conf={SLEEP_CONF_THRESHOLD}, time_factor={SLEEP_TIME_FACTOR}, log_min={SLEEP_LOG_MIN}")
 
     def tune_dream(self, swing_var=None, lifecycle_delta=None, temperament_on=None, noise_scale=None, memory_weight=None, memory_maxlen=None, prompt_weight=None, novelty_boost=None, memory_decay=None, prune_threshold=None):
         if swing_var is not None and 0.05 <= swing_var <= 0.2:
-            self.dream_swing_var = swing_var
+            DREAM_SWING_VAR = swing_var
         if lifecycle_delta is not None and 0.05 <= lifecycle_delta <= 0.2:
-            self.dream_lifecycle_delta = lifecycle_delta
+            DREAM_LIFECYCLE_DELTA = lifecycle_delta
         if temperament_on is not None:
-            self.dream_temperament_on = bool(temperament_on)
+            DREAM_TEMPERAMENT_ON = bool(temperament_on)
         if noise_scale is not None and 0.01 <= noise_scale <= 0.1:
-            self.dream_noise_scale = noise_scale
+            DREAM_NOISE_SCALE = noise_scale
         if memory_weight is not None and 0 <= memory_weight <= 0.5:
-            self.dream_memory_weight = memory_weight
+            DREAM_MEMORY_WEIGHT = memory_weight
         if memory_maxlen is not None and 5 <= memory_maxlen <= 20:
-            self.dream_memory_maxlen = memory_maxlen
-            self.dream_memory = deque(self.dream_memory, maxlen=memory_maxlen)
+            self.state.dream_memory_maxlen = memory_maxlen
+            self.state.dream_memory = deque(self.state.dream_memory, maxlen=memory_maxlen)
         if prompt_weight is not None and 0 <= prompt_weight <= 1:
-            self.dream_prompt_weight = prompt_weight
+            DREAM_PROMPT_WEIGHT = prompt_weight
         if novelty_boost is not None and 0 <= novelty_boost <= 0.05:
-            self.dream_novelty_boost = novelty_boost
+            DREAM_NOVELTY_BOOST = novelty_boost
         if memory_decay is not None and 0 <= memory_decay <= 1:
-            self.dream_memory_decay = memory_decay
+            DREAM_MEMORY_DECAY = memory_decay
         if prune_threshold is not None and 0 <= prune_threshold <= 1:
-            self.dream_prune_threshold = prune_threshold
-        print(f"Dream params: swing_var={self.dream_swing_var}, lifecycle_delta={self.dream_lifecycle_delta}, temperament_on={self.dream_temperament_on}, noise_scale={self.dream_noise_scale}, memory_weight={self.dream_memory_weight}, memory_maxlen={self.dream_memory_maxlen}, prompt_weight={self.dream_prompt_weight}, novelty_boost={self.dream_novelty_boost}, memory_decay={self.dream_memory_decay}, prune_threshold={self.dream_prune_threshold}")
+            DREAM_PRUNE_THRESHOLD = prune_threshold
+        print(f"Dream params: swing_var={DREAM_SWING_VAR}, lifecycle_delta={DREAM_LIFECYCLE_DELTA}, temperament_on={DREAM_TEMPERAMENT_ON}, noise_scale={DREAM_NOISE_SCALE}, memory_weight={DREAM_MEMORY_WEIGHT}, memory_maxlen={self.state.dream_memory_maxlen}, prompt_weight={DREAM_PROMPT_WEIGHT}, novelty_boost={DREAM_NOVELTY_BOOST}, memory_decay={DREAM_MEMORY_DECAY}, prune_threshold={DREAM_PRUNE_THRESHOLD}")
 
     def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None, curiosity_boost=None, restless_drop=None, melancholy_noise=None, conf_feedback_strength=None, temp_smoothing_factor=None):
         if eager_threshold is not None and 0.7 <= eager_threshold <= 0.9:
-            self.temp_eager_threshold = eager_threshold
+            TEMP_EAGER_THRESHOLD = eager_threshold
         if sluggish_threshold is not None and 0.4 <= sluggish_threshold <= 0.6:
-            self.temp_sluggish_threshold = sluggish_threshold
+            TEMP_SLUGGISH_THRESHOLD = sluggish_threshold
         if mood_influence is not None and 0 <= mood_influence <= 1:
-            self.temp_mood_influence = mood_influence
+            TEMP_MOOD_INFLUENCE = mood_influence
         if curiosity_boost is not None and 0 <= curiosity_boost <= 0.5:
-            self.temp_curiosity_boost = curiosity_boost
+            TEMP_CURIOSITY_BOOST = curiosity_boost
         if restless_drop is not None and 0 <= restless_drop <= 0.5:
-            self.temp_restless_drop = restless_drop
+            TEMP_RESTLESS_DROP = restless_drop
         if melancholy_noise is not None and 0 <= melancholy_noise <= 0.05:
-            self.temp_melancholy_noise = melancholy_noise
+            TEMP_MELANCHOLY_NOISE = melancholy_noise
         if conf_feedback_strength is not None and 0 <= conf_feedback_strength <= 1:
-            self.conf_feedback_strength = conf_feedback_strength
+            CONF_FEEDBACK_STRENGTH = conf_feedback_strength
         if temp_smoothing_factor is not None and 0 <= temp_smoothing_factor <= 1:
-            self.temp_smoothing_factor = temp_smoothing_factor
-        print(f"Temperament params: eager={self.temp_eager_threshold}, sluggish={self.temp_sluggish_threshold}, mood_influence={self.temp_mood_influence}, curiosity_boost={self.temp_curiosity_boost}, restless_drop={self.temp_restless_drop}, melancholy_noise={self.temp_melancholy_noise}, conf_feedback_strength={self.conf_feedback_strength}, smoothing_factor={self.temp_smoothing_factor}")
+            TEMP_SMOOTHING_FACTOR = temp_smoothing_factor
+        print(f"Temperament params: eager={TEMP_EAGER_THRESHOLD}, sluggish={TEMP_SLUGGISH_THRESHOLD}, mood_influence={TEMP_MOOD_INFLUENCE}, curiosity_boost={TEMP_CURIOSITY_BOOST}, restless_drop={TEMP_RESTLESS_DROP}, melancholy_noise={TEMP_MELANCHOLY_NOISE}, conf_feedback_strength={CONF_FEEDBACK_STRENGTH}, smoothing_factor={TEMP_SMOOTHING_FACTOR}")
 
     def set_global_blend(self, weight_cap=None, base_temp=None):
         if weight_cap is not None and 0.5 <= weight_cap <= 1.0:
-            self.scaffold_weight_cap = weight_cap
+            SCAFFOLD_WEIGHT_CAP = weight_cap
         if base_temp is not None and 0.5 <= base_temp <= 1.5:
-            self.base_temperature = base_temp
-        print(f"Global blend: weight_cap={self.scaffold_weight_cap}, base_temp={self.base_temperature}")
+            BASE_TEMPERATURE = base_temp
+        print(f"Global blend: weight_cap={SCAFFOLD_WEIGHT_CAP}, base_temp={BASE_TEMPERATURE}")
 
     def tune_lifecycle(self, capacity_factor=None, curve=None):
         if capacity_factor is not None and 0.001 <= capacity_factor <= 0.1:
-            self.lifecycle_capacity_factor = capacity_factor
-            self.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * self.lifecycle_capacity_factor
+            LIFECYCLE_CAPACITY_FACTOR = capacity_factor
+            self.lora_capacity = sum(p.numel() for p in self.scaffolds[0].parameters() if p.requires_grad) * LIFECYCLE_CAPACITY_FACTOR
         if curve in ["sigmoid_linear", "exponential"]:
-            self.lifecycle_curve = curve
-        print(f"Lifecycle params: capacity_factor={self.lifecycle_capacity_factor}, curve={self.lifecycle_curve}")
+            LIFECYCLE_CURVE = curve
+        print(f"Lifecycle params: capacity_factor={LIFECYCLE_CAPACITY_FACTOR}, curve={LIFECYCLE_CURVE}")
 
     def save_state(self, path_prefix=None):
         if path_prefix is None:
-            path_prefix = self.save_path_prefix
+            path_prefix = SAVE_PATH_PREFIX
         try:
             torch.save(self.scaffolds[0].state_dict(), f"{path_prefix}_scaffold.pth")
             cross_attn_dict = {k: v for k, v in self.base_model.state_dict().items() if 'cross_attn' in k}
             torch.save(cross_attn_dict, f"{path_prefix}_cross_attn.pth")
             with open(f"{path_prefix}_token_map.json", "w") as f:
                 json.dump({str(k): v for k, v in self.token_map.items()}, f)
-            metadata = {
-                "quantization_mode": self.quantization_mode,  # Added for consistency
-                "enable_error_listening": self.enable_error_listening,  # Save the toggle
-                "data_exposure": self.data_exposure,
-                "last_trained": self.last_trained,
-                "temperament_score": self.temperament_score,
-                "last_temperament_score": self.last_temperament_score,
-                "temperament_history": list(self.temperament_history),
-                "dream_memory": [(m.tolist(), w) for m, w in self.dream_memory],
-                "seen_prompts": list(self.seen_prompts),
-                "confidence_history": list(self.confidence_history),
-                "last_weight": self.last_weight,
-                "enable_curiosity": self.enable_curiosity,
-                "curiosity_novelty_threshold_spontaneous": self.curiosity_novelty_threshold_spontaneous,
-                "curiosity_novelty_threshold_response": self.curiosity_novelty_threshold_response,
-                "curiosity_pressure_threshold": self.curiosity_pressure_threshold,
-                "curiosity_pressure_drop": self.curiosity_pressure_drop,
-                "curiosity_silence_threshold": self.curiosity_silence_threshold,
-                "curiosity_question_cooldown": self.curiosity_question_cooldown,
-                "curiosity_queue_maxlen": self.curiosity_queue_maxlen,
-                "curiosity_weight_ignorance": self.curiosity_weight_ignorance,
-                "curiosity_weight_novelty": self.curiosity_weight_novelty,
-                "curiosity_max_new_tokens": self.curiosity_max_new_tokens,
-                "curiosity_base_temperature": self.curiosity_base_temperature,
-                "curiosity_temperament_influence": self.curiosity_temperament_influence,
-                "curiosity_top_k": self.curiosity_top_k,
-                "pressure_value": self.pressure.value if self.pressure else 0.0,
-                "metrics": self.metrics,
-                "unanswered_q": [(q, s) for q, s in self.unanswered_q]
-            }
-            with open(f"{path_prefix}_meta.json", "w") as f:
-                json.dump(metadata, f)
+            
+            # Save state using the state module
+            self.state.save_state(path_prefix)
+            
             print(f"State saved to {path_prefix}_*.pth/json")
         except Exception as e:
             print(f"Save failed: {e}")
 
     def load_state(self, path_prefix=None):
         if path_prefix is None:
-            path_prefix = self.save_path_prefix
+            path_prefix = SAVE_PATH_PREFIX
         try:
             if os.path.exists(f"{path_prefix}_scaffold.pth"):
                 self.scaffolds[0].load_state_dict(torch.load(f"{path_prefix}_scaffold.pth"))
@@ -899,40 +793,10 @@ class SOVLSystem:
                     loaded_map = json.load(f)
                     self.token_map = defaultdict(lambda: [self.scaffold_unk_id], {int(k): v for k, v in loaded_map.items()})
                 print("Token map loaded.")
-            if os.path.exists(f"{path_prefix}_meta.json"):
-                with open(f"{path_prefix}_meta.json", "r") as f:
-                    meta = json.load(f)
-                    self.quantization_mode = meta.get("quantization_mode", QUANTIZATION_MODE)  # Load quantization
-                    self.enable_error_listening = meta.get("enable_error_listening", True)  # Load toggle
-                    self.data_exposure = meta.get("data_exposure", 0)
-                    self.last_trained = meta.get("last_trained", 0)
-                    self.temperament_score = meta.get("temperament_score", 0.0)
-                    self.last_temperament_score = meta.get("last_temperament_score", 0.0)
-                    self.temperament_history = deque(meta.get("temperament_history", []), maxlen=TEMPERAMENT_HISTORY_MAXLEN)
-                    self.dream_memory = deque([(torch.tensor(m, dtype=torch.float32).to(DEVICE), w) for m, w in meta.get("dream_memory", [])], maxlen=self.dream_memory_maxlen)
-                    self.seen_prompts = set(meta.get("seen_prompts", []))
-                    self.confidence_history = deque(meta.get("confidence_history", []), maxlen=CONFIDENCE_HISTORY_MAXLEN)
-                    self.last_weight = meta.get("last_weight", 0.0)
-                    self.enable_curiosity = meta.get("enable_curiosity", ENABLE_CURIOSITY)
-                    self.curiosity_novelty_threshold_spontaneous = meta.get("curiosity_novelty_threshold_spontaneous", CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS)
-                    self.curiosity_novelty_threshold_response = meta.get("curiosity_novelty_threshold_response", CURIOSITY_NOVELTY_THRESHOLD_RESPONSE)
-                    self.curiosity_pressure_threshold = meta.get("curiosity_pressure_threshold", CURIOSITY_PRESSURE_THRESHOLD)
-                    self.curiosity_pressure_drop = meta.get("curiosity_pressure_drop", CURIOSITY_PRESSURE_DROP)
-                    self.curiosity_silence_threshold = meta.get("curiosity_silence_threshold", CURIOSITY_SILENCE_THRESHOLD)
-                    self.curiosity_question_cooldown = meta.get("curiosity_question_cooldown", CURIOSITY_QUESTION_COOLDOWN)
-                    self.curiosity_queue_maxlen = meta.get("curiosity_queue_maxlen", CURIOSITY_QUEUE_MAXLEN)
-                    self.curiosity_weight_ignorance = meta.get("curiosity_weight_ignorance", CURIOSITY_WEIGHT_IGNORANCE)
-                    self.curiosity_weight_novelty = meta.get("curiosity_weight_novelty", CURIOSITY_WEIGHT_NOVELTY)
-                    self.curiosity_max_new_tokens = meta.get("curiosity_max_new_tokens", CURIOSITY_MAX_NEW_TOKENS)
-                    self.curiosity_base_temperature = meta.get("curiosity_base_temperature", CURIOSITY_BASE_TEMPERATURE)
-                    self.curiosity_temperament_influence = meta.get("curiosity_temperament_influence", CURIOSITY_TEMPERAMENT_INFLUENCE)
-                    self.curiosity_top_k = meta.get("curiosity_top_k", CURIOSITY_TOP_K)
-                    if self.enable_curiosity:
-                        self.pressure = CuriosityPressure()
-                        self.pressure.value = meta.get("pressure_value", 0.0)
-                        self.metrics = meta.get("metrics", self.metrics)
-                        self.unanswered_q = deque(meta.get("unanswered_q", []), maxlen=self.curiosity_queue_maxlen)
-                print("Metadata loaded.")
+            
+            # Load state using the state module
+            self.state.load_state(path_prefix)
+            
         except Exception as e:
             print(f"Load failed: {e}. Starting fresh.")
 
@@ -942,9 +806,9 @@ class SOVLSystem:
                 self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
                 del self._temp_scaffold_context
             self._temp_scaffold_context = None
-            if self.last_prompt_embedding is not None:
-                self.last_prompt_embedding = self.last_prompt_embedding.detach().cpu()
-                self.last_prompt_embedding = None
+            if self.state.last_prompt_embedding is not None:
+                self.state.last_prompt_embedding = self.state.last_prompt_embedding.detach().cpu()
+                self.state.last_prompt_embedding = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -982,7 +846,7 @@ class SOVLSystem:
         raise ValueError(f"Cannot determine layer structure for {actual_model.__class__.__name__}")
 
     def _insert_cross_attention(self):
-        if not self.enable_cross_attention:
+        if not ENABLE_CROSS_ATTENTION:
             print("Cross-attention disabled.")
             return
         base_layers = self._get_model_layers(self.base_model)
@@ -1023,12 +887,12 @@ class SOVLSystem:
                         scaffold_context = scaffold_context.to(base_hidden_state_output.device)
                         if self._parent_system.scaffold_proj is not None:
                             scaffold_context = self._parent_system.scaffold_proj(scaffold_context)
-                        if self._parent_system.dream_memory and self._parent_system.dream_memory_weight > 0:
-                            dream_tensors, dream_weights = zip(*self._parent_system.dream_memory)
+                        if self._parent_system.state.dream_memory and DREAM_MEMORY_WEIGHT > 0:
+                            dream_tensors, dream_weights = zip(*self._parent_system.state.dream_memory)
                             dream_tensors = torch.stack(dream_tensors).to(base_hidden_state_output.device)
                             dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=base_hidden_state_output.device)
                             dream_avg = (dream_tensors * dream_weights.unsqueeze(-1)).sum(dim=0) / dream_weights.sum()
-                            scaffold_context = (1 - self._parent_system.dream_memory_weight) * scaffold_context + self._parent_system.dream_memory_weight * dream_avg
+                            scaffold_context = (1 - DREAM_MEMORY_WEIGHT) * scaffold_context + DREAM_MEMORY_WEIGHT * dream_avg
                         fused_hidden_state = self.cross_attn(base_hidden_state_output, scaffold_context)
                         return (fused_hidden_state,) + outputs[1:] if isinstance(outputs, tuple) else fused_hidden_state
                     return outputs
@@ -1043,18 +907,17 @@ class SOVLSystem:
 
     def setup_optimizer(self, num_training_steps):
         trainable_params = list(self.scaffolds[0].parameters()) + (list(self.scaffold_proj.parameters()) if self.scaffold_proj else [])
-        print(f"Optimizer Setup: {len(trainable_params)} trainable parameters with learning rate {LEARNING_RATE}.")  # Added log
+        print(f"Optimizer Setup: {len(trainable_params)} trainable parameters with learning rate {LEARNING_RATE}.")
         self.optimizer = AdamW(trainable_params, lr=LEARNING_RATE)
         self.scheduler = get_linear_schedule_with_warmup(self.optimizer, num_warmup_steps=0, num_training_steps=num_training_steps)
-        print("Optimizer and scheduler successfully initialized.")  # Added confirmation log
+        print("Optimizer and scheduler successfully initialized.")
 
     def map_sequence(self, base_input_ids):
         batch_size = base_input_ids.size(0)
         seq_len = base_input_ids.size(1)
 
-        # Adjust max_expanded_len dynamically based on available memory or other constraints
         available_memory_limit = torch.cuda.max_memory_allocated(device=DEVICE) - torch.cuda.memory_allocated(device=DEVICE)
-        token_size = 4  # Assuming 4 bytes per token in FP32, adjust for other precisions like FP16 or INT8
+        token_size = 4
         max_expanded_len = min(seq_len * 3, MAX_SEQ_LENGTH, available_memory_limit // token_size)
 
         mapped_ids = torch.full(
@@ -1097,7 +960,6 @@ class SOVLSystem:
                 }
             )
 
-        # Return only the portion that fits within MAX_SEQ_LENGTH
         return mapped_ids[:, :min(max_expanded_len, MAX_SEQ_LENGTH)]
 
     def _update_token_map_memory(self, prompt, confidence):
@@ -1109,20 +971,20 @@ class SOVLSystem:
                 if token_id in self.token_map:
                     self.token_map[token_id]['weight'] = min(self.token_map[token_id]['weight'] + confidence * 0.1, 2.0)
             for token_id in self.token_map:
-                self.token_map[token_id]['weight'] *= self.memory_decay_rate
+                self.token_map[token_id]['weight'] *= MEMORY_DECAY_RATE
 
     def _should_gestate(self):
         log_entries = self.logger.read()
-        if len(log_entries) < self.sleep_log_min:
-            print(f"Gestation check: Log size {len(log_entries)} < {self.sleep_log_min}. No gestation.")
+        if len(log_entries) < SLEEP_LOG_MIN:
+            print(f"Gestation check: Log size {len(log_entries)} < {SLEEP_LOG_MIN}. No gestation.")
             return False
-        avg_confidence = self.sleep_confidence_sum / self.sleep_confidence_count if self.sleep_confidence_count > 0 else 0.5
-        should_gestate = (len(log_entries) >= self.sleep_log_min) and (self.sleep_confidence_count == 0 or avg_confidence > self.sleep_conf_threshold)
-        print(f"Gestation check: Confidence {avg_confidence:.2f} > {self.sleep_conf_threshold} (or no data), Log {len(log_entries)} >= {self.sleep_log_min}, Gestate: {should_gestate}")
+        avg_confidence = self.state.sleep_confidence_sum / self.state.sleep_confidence_count if self.state.sleep_confidence_count > 0 else 0.5
+        should_gestate = (len(log_entries) >= SLEEP_LOG_MIN) and (self.state.sleep_confidence_count == 0 or avg_confidence > SLEEP_CONF_THRESHOLD)
+        print(f"Gestation check: Confidence {avg_confidence:.2f} > {SLEEP_CONF_THRESHOLD} (or no data), Log {len(log_entries)} >= {SLEEP_LOG_MIN}, Gestate: {should_gestate}")
         return should_gestate
     
     def get_life_curve_weight(self):
-        x = self.data_exposure / self.lora_capacity
+        x = self.state.data_exposure / self.lora_capacity
         weight = 1 - math.exp(-2.0 * x)
         return min(1.0, weight)
     
@@ -1146,14 +1008,14 @@ class SOVLSystem:
             self.sleep_batch = [(self.base_tokenizer(entry["prompt"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE),
                                 self.base_tokenizer(entry["response"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).input_ids.to(DEVICE))
                                 for entry in log_entries if "prompt" in entry and "response" in entry]
-            lr = LEARNING_RATE * 0.5 * math.exp(-self.data_exposure / self.lora_capacity)
+            lr = LEARNING_RATE * 0.5 * math.exp(-self.state.data_exposure / self.lora_capacity)
             self.sleep_optimizer = AdamW(self.scaffolds[0].parameters(), lr=lr)
             self.sleep_total_loss = 0.0
             self.sleep_steps = 0
             print("\nSystem Gestating...")
-            if self.enable_dreaming and self._should_dream():
+            if ENABLE_DREAMING and self._should_dream():
                 self._dream()
-            self.data_exposure += sum(len(entry["prompt"]) + len(entry["response"]) for entry in log_entries)
+            self.state.data_exposure += sum(len(entry["prompt"]) + len(entry["response"]) for entry in log_entries)
 
         if self.sleep_progress < len(self.sleep_batch):
             inputs, labels = self.sleep_batch[self.sleep_progress]
@@ -1181,9 +1043,9 @@ class SOVLSystem:
         self.logger.clear()
         self.last_weight = self.get_life_curve_weight()
         self.set_scaffold_influence(self.last_weight)
-        print(f"Growth stage: {self.last_weight:.2f}, Exposure: {self.data_exposure}")
+        print(f"Growth stage: {self.last_weight:.2f}, Exposure: {self.state.data_exposure}")
 
-        q = self.generate_curiosity_question() if not self.unanswered_q else self.unanswered_q.popleft()[0]
+        q = self.generate_curiosity_question() if not self.state.unanswered_q else self.state.unanswered_q.popleft()[0]
         if q:
             print(f"{q}")
             self.logger.write({
@@ -1200,13 +1062,13 @@ class SOVLSystem:
         return False
 
     def _should_dream(self):
-        swing_dream = len(self.confidence_history) >= 5 and torch.var(torch.tensor(list(self.confidence_history))).item() > self.dream_swing_var
-        lifecycle_dream = abs(self.temperament_score - self.last_temperament_score) > self.dream_lifecycle_delta
+        swing_dream = len(self.state.confidence_history) >= 5 and torch.var(torch.tensor(list(self.state.confidence_history))).item() > DREAM_SWING_VAR
+        lifecycle_dream = abs(self.state.temperament_score - self.state.last_temperament_score) > DREAM_LIFECYCLE_DELTA
         history_dream = False
-        if len(self.temperament_history) >= 5:
-            trend = torch.tensor(list(self.temperament_history)).mean().item() - self.temperament_history[0]
+        if len(self.state.temperament_history) >= 5:
+            trend = torch.tensor(list(self.state.temperament_history)).mean().item() - self.state.temperament_history[0]
             history_dream = abs(trend) > 0.3
-        return swing_dream or lifecycle_dream or (self.dream_temperament_on and history_dream)
+        return swing_dream or lifecycle_dream or (DREAM_TEMPERAMENT_ON and history_dream)
 
     def _dream(self):
         print("--- Dreaming ---")
@@ -1220,9 +1082,9 @@ class SOVLSystem:
         with torch.no_grad():
             prompt_hidden = self.scaffolds[0](**prompt_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
         with self.memory_lock:
-            self.last_prompt_embedding = prompt_hidden
+            self.state.last_prompt_embedding = prompt_hidden
     
-        if self.enable_prompt_driven_dreams:
+        if ENABLE_PROMPT_DRIVEN_DREAMS:
             weights = []
             for i, entry in enumerate(log_entries):
                 if "prompt" not in entry:
@@ -1231,15 +1093,15 @@ class SOVLSystem:
                 log_hidden = self.scaffolds[0](**log_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
                 similarity = F.cosine_similarity(prompt_hidden, log_hidden).item()
                 recency = (i + 1) / len(log_entries)
-                weight = self.dream_prompt_weight * similarity + (1 - self.dream_prompt_weight) * recency
+                weight = DREAM_PROMPT_WEIGHT * similarity + (1 - DREAM_PROMPT_WEIGHT) * recency
                 weights.append(weight)
             dream_entry = random.choices(log_entries, weights=weights, k=1)[0] if weights else random.choice(log_entries)
         else:
             dream_entry = random.choice(log_entries)
         dream_prompt = dream_entry["prompt"]
     
-        is_novel = dream_prompt not in self.seen_prompts
-        noise_scale = self.dream_noise_scale + (self.temp_melancholy_noise if self.temperament_score <= -0.5 else 0) + (self.dream_novelty_boost if is_novel else 0)
+        is_novel = dream_prompt not in self.state.seen_prompts
+        noise_scale = DREAM_NOISE_SCALE + (TEMP_MELANCHOLY_NOISE if self.state.temperament_score <= -0.5 else 0) + (DREAM_NOVELTY_BOOST if is_novel else 0)
         noise_scale = min(noise_scale, 0.1)
     
         with torch.no_grad():
@@ -1249,24 +1111,24 @@ class SOVLSystem:
             dream_layer = (hidden_states.mean(dim=1) + noise).detach().cpu()
     
         with self.memory_lock:
-            for i in range(len(self.dream_memory)):
-                tensor, weight = self.dream_memory
-                self.dream_memory[i] = (tensor, weight * self.dream_memory_decay)
+            for i in range(len(self.state.dream_memory)):
+                tensor, weight = self.state.dream_memory
+                self.state.dream_memory[i] = (tensor, weight * DREAM_MEMORY_DECAY)
     
-            self.dream_memory = deque([(t, w) for t, w in self.dream_memory if w >= self.dream_prune_threshold], maxlen=self.dream_memory_maxlen)
-            self.dream_memory.append((dream_layer, 1.0))
+            self.state.dream_memory = deque([(t, w) for t, w in self.state.dream_memory if w >= DREAM_PRUNE_THRESHOLD], maxlen=self.state.dream_memory_maxlen)
+            self.state.dream_memory.append((dream_layer, 1.0))
     
         for _ in range(3):
             q = self.generate_curiosity_question()
             if q:
                 with self.memory_lock:
-                    self.unanswered_q.append((q, self.curiosity.calculate_metric(q)))
+                    self.state.unanswered_q.append((q, self.curiosity.calculate_metric(q)))
     
-        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {self.dream_novelty_boost if is_novel else 0:.3f}, dream count: {len(self.dream_memory)}, questions queued: {len(self.unanswered_q)}")
+        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {DREAM_NOVELTY_BOOST if is_novel else 0:.3f}, dream count: {len(self.state.dream_memory)}, questions queued: {len(self.state.unanswered_q)}")
         print("--- Dream Concluded ---")
 
     def _sleep_train(self):
-        if not self.enable_sleep_training or not self._should_gestate():
+        if not ENABLE_SLEEP_TRAINING or not self._should_gestate():
             return
         print("\n--- Sleep Training Initiated ---")
         log_entries = self.logger.read()
@@ -1274,7 +1136,7 @@ class SOVLSystem:
             print("No log data to train on.")
             return
 
-        if self.enable_dreaming and self._should_dream():
+        if ENABLE_DREAMING and self._should_dream():
             self._dream()
 
         self.scaffolds[0].train()
@@ -1304,36 +1166,36 @@ class SOVLSystem:
         self.last_trained = time.time()
         self.logger.clear()
         self.last_weight = self.get_life_curve_weight()
-        if self.enable_temperament:
+        if ENABLE_TEMPERAMENT:
             self._update_temperament()
-            self.last_temperament_score = self.temperament_score
+            self.state.last_temperament_score = self.state.temperament_score
         print("--- Sleep Training Complete ---")
 
     def _update_temperament(self):
-        avg_confidence = self.sleep_confidence_sum / self.sleep_confidence_count if self.sleep_confidence_count > 0 else 0.5
-        lifecycle_stage = self.data_exposure / self.lora_capacity
+        avg_confidence = self.state.sleep_confidence_sum / self.state.sleep_confidence_count if self.state.sleep_confidence_count > 0 else 0.5
+        lifecycle_stage = self.state.data_exposure / self.lora_capacity
         base_score = 2.0 * (avg_confidence - 0.5)
     
         if lifecycle_stage < 0.25:
-            bias = self.temp_curiosity_boost * (1 - lifecycle_stage / 0.25)
+            bias = TEMP_CURIOSITY_BOOST * (1 - lifecycle_stage / 0.25)
         elif lifecycle_stage < 0.75:
             bias = 0.0
-            if len(self.temperament_history) >= 5:
-                variance = torch.var(torch.tensor(list(self.temperament_history))).item()
+            if len(self.state.temperament_history) >= 5:
+                variance = torch.var(torch.tensor(list(self.state.temperament_history))).item()
                 bias -= 0.2 * variance
         else:
-            bias = -self.temp_curiosity_boost * (lifecycle_stage - 0.75) / 0.25
+            bias = -TEMP_CURIOSITY_BOOST * (lifecycle_stage - 0.75) / 0.25
     
-        target_score = base_score + bias + (self.conf_feedback_strength * (avg_confidence - 0.5))
+        target_score = base_score + bias + (CONF_FEEDBACK_STRENGTH * (avg_confidence - 0.5))
         target_score = max(-1.0, min(1.0, target_score))
-        alpha = 0.1 * (1 - self.temp_smoothing_factor)
-        self.temperament_score = (1 - alpha) * self.temperament_score + alpha * target_score
-        self.temperament_score = max(-1.0, min(1.0, self.temperament_score))
-        self.temperament_history = deque(self.temperament_history, maxlen=TEMPERAMENT_HISTORY_MAXLEN)
-        self.temperament_history.append(self.temperament_score)
+        alpha = 0.1 * (1 - TEMP_SMOOTHING_FACTOR)
+        self.state.temperament_score = (1 - alpha) * self.state.temperament_score + alpha * target_score
+        self.state.temperament_score = max(-1.0, min(1.0, self.state.temperament_score))
+        self.state.temperament_history = deque(self.state.temperament_history, maxlen=TEMPERAMENT_HISTORY_MAXLEN)
+        self.state.temperament_history.append(self.state.temperament_score)
     
-        label = "melancholic" if self.temperament_score <= -0.5 else "restless" if self.temperament_score <= 0.0 else "calm" if self.temperament_score <= 0.5 else "curious"
-        print(f"Temperament score: {self.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
+        label = "melancholic" if self.state.temperament_score <= -0.5 else "restless" if self.state.temperament_score <= 0.0 else "calm" if self.state.temperament_score <= 0.5 else "curious"
+        print(f"Temperament score: {self.state.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
 
     def train_step(self, batch):
         if self.dry_run:
@@ -1378,7 +1240,6 @@ class SOVLSystem:
             scaffold_hidden_states = scaffold_outputs.hidden_states[-1]
             with self._scaffold_context(scaffold_hidden_states):
                 outputs = self.base_model(input_ids=base_input_ids, attention_mask=base_attention_mask)
-                # Boost weight for answered system questions
                 log_entries = self.logger.read()
                 weight = 1.2 if any(e["prompt"] in prompts and e.get("is_system_question", False) and e["response"] for e in log_entries) else 1.0
                 loss = F.cross_entropy(outputs.logits.view(-1, outputs.logits.size(-1)), labels.view(-1)) * weight
@@ -1399,19 +1260,18 @@ class SOVLSystem:
                if confidence > 0.7:
                    for param in self.scaffolds[0].parameters():
                        if param.grad is not None:
-                           # Apply gradient clipping before boosting
-                           torch.nn.utils.clip_grad_norm_(param, max_norm=1.0)  # Clip gradients to a maximum norm of 1.0
-                           param.data += param.grad * 0.01  # Boost parameter using scaled gradient
+                           torch.nn.utils.clip_grad_norm_(param, max_norm=1.0)
+                           param.data += param.grad * 0.01
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
         self.global_step += 1
 
-        exposure_gain = EXPOSURE_GAIN_EAGER if self.temperament_score > 0.5 else EXPOSURE_GAIN_DEFAULT
+        exposure_gain = EXPOSURE_GAIN_EAGER if self.state.temperament_score > 0.5 else EXPOSURE_GAIN_DEFAULT
         for prompt in prompts:
-            if prompt not in self.seen_prompts:
-                self.seen_prompts.add(prompt)
-                self.data_exposure += exposure_gain
+            if prompt not in self.state.seen_prompts:
+                self.state.seen_prompts.add(prompt)
+                self.state.data_exposure += exposure_gain
         if self.use_token_map_memory:
             self._update_token_map_memory(prompts[0], calculate_confidence_score(outputs.logits, base_input_ids))
 
@@ -1423,12 +1283,12 @@ class SOVLSystem:
             print("Not enough data or epochs for training.")
             return
 
-        if self.enable_lifecycle_weighting:
+        if ENABLE_LIFECYCLE_WEIGHTING:
             influence_weight = self.get_life_curve_weight()
         else:
             influence_weight = self.last_weight
         self.set_scaffold_influence(influence_weight)
-        print(f"Data exposure: {self.data_exposure} | Scaffold influence: {influence_weight:.3f}")
+        print(f"Data exposure: {self.state.data_exposure} | Scaffold influence: {influence_weight:.3f}")
 
         if not self.dry_run or not self.dry_run_params['skip_training']:
             self.setup_optimizer(num_training_steps)
@@ -1476,13 +1336,12 @@ class SOVLSystem:
         return False
     
     def _handle_error_prompt(self, error_msg):
-        # Temporarily swap history to isolate error context
         temp_history = self.history
-        self.history = ConversationHistory()  # New history for error
+        self.history = ConversationHistory()
         response = self.generate(
             f"System error detected: {error_msg} What happened?",
             max_new_tokens=60,
-            temperature=self.base_temperature + 0.2,  # Slightly more creative
+            temperature=BASE_TEMPERATURE + 0.2,
             top_k=50,
             do_sample=True
         )
@@ -1492,16 +1351,16 @@ class SOVLSystem:
             "timestamp": time.time(),
             "conversation_id": self.history.conversation_id,
             "is_error_prompt": True,
-            "confidence_score": 0.5  # Default for error reflection
+            "confidence_score": 0.5
         })
-        self.history = temp_history  # Restore user history
+        self.history = temp_history
         return response
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         try:
             print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")
-            self.check_memory_health()  # Check GPU memory before generating
+            self.check_memory_health()
             if self.is_sleeping:
                 print("\rGestation Interrupted", end="", flush=True)
                 time.sleep(0.5)
@@ -1516,16 +1375,15 @@ class SOVLSystem:
             scaffold_inputs = self.tokenize_and_map(prompt)
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
 
-            temp = self.base_temperature
-            if self.enable_temperament and self.temp_mood_influence > 0:
-                temp_adjustment = self.temp_mood_influence * 0.3 * self.temperament_score
+            temp = BASE_TEMPERATURE
+            if ENABLE_TEMPERAMENT and TEMP_MOOD_INFLUENCE > 0:
+                temp_adjustment = TEMP_MOOD_INFLUENCE * 0.3 * self.state.temperament_score
                 temp += temp_adjustment
                 temp = max(0.5, min(1.5, temp))
 
-            # Clear scaffold cache and handle chunked input to avoid memory overflow
             self._clear_scaffold_cache()
             generated_ids = []
-            chunk_size = 512  # Adjust chunk size based on GPU memory
+            chunk_size = 512
             with self._scaffold_context(scaffold_hidden_states):
                 self.set_scaffold_influence(weight=scaffold_weight)
                 for chunk_start in range(0, input_ids.size(1), chunk_size):
@@ -1545,14 +1403,14 @@ class SOVLSystem:
 
             print(f"Generation completed in {time.time() - start_time:.2f}s.")
             confidence_score = 0.5
-            if self.enable_confidence_tracking:
+            if ENABLE_CONFIDENCE_TRACKING:
                 confidence_score = calculate_confidence_score(outputs.scores, generated_ids)
                 with self.memory_lock:
-                    self.sleep_confidence_sum += confidence_score
-                    self.sleep_confidence_count += 1
-                    self.confidence_history.append(confidence_score)
+                    self.state.sleep_confidence_sum += confidence_score
+                    self.state.sleep_confidence_count += 1
+                    self.state.confidence_history.append(confidence_score)
 
-            if self.enable_repetition_check and self.has_repetition(generated_ids, n=3):
+            if ENABLE_REPETITION_CHECK and self.has_repetition(generated_ids, n=3):
                 print("Warning: Repetition detected. Truncating.")
                 original_text = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
                 for i in range(len(generated_ids) - 6):
@@ -1564,11 +1422,10 @@ class SOVLSystem:
                                    "conversation_id": self.history.conversation_id})
             response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-            # Add curiosity question if pressure builds
-            last_conf = self.confidence_history[-1] if self.confidence_history else 0.5
-            if self.enable_curiosity:
-                self.pressure.update(self.temperament_score, last_conf, 0.0)
-                if self.pressure.should_erupt(self.curiosity_pressure_threshold):
+            last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
+            if ENABLE_CURIOSITY:
+                self.pressure.update(self.state.temperament_score, last_conf, 0.0)
+                if self.pressure.should_erupt(CURIOSITY_PRESSURE_THRESHOLD):
                     q = self.generate_curiosity_question(prompt)
                     if q:
                         response += f" {q}"
@@ -1581,9 +1438,8 @@ class SOVLSystem:
                             "is_system_question": True
                         })
                         self.update_metrics(q, self.curiosity.calculate_metric(q))
-                        self.pressure.value -= self.curiosity_pressure_drop
+                        self.pressure.value -= CURIOSITY_PRESSURE_DROP
 
-            # Log the full response
             self.logger.write({
                 "prompt": prompt,
                 "response": response,
@@ -1597,7 +1453,7 @@ class SOVLSystem:
                 with self.memory_lock:
                     self._update_token_map_memory(prompt, confidence_score)
 
-            if self.enable_gestation and self._should_gestate():
+            if ENABLE_GESTATION and self._should_gestate():
                 self._gestate()
             print(f"Generation took {time.time() - start_time:.2f} seconds.")
             if DEVICE.type == 'cuda':
@@ -1613,7 +1469,7 @@ class SOVLSystem:
                 "conversation_id": str(uuid.uuid4()),
                 "is_error_prompt": True
             })
-            if self.enable_error_listening:  # Only reflect if toggle is on
+            if self.enable_error_listening:
                 error_response = self._handle_error_prompt(error_msg)
                 print(f"Self-reflection: {error_response}")
             return error_msg
@@ -1626,7 +1482,7 @@ class SOVLSystem:
                 "conversation_id": str(uuid.uuid4()),
                 "is_error_prompt": True
             })
-            if self.enable_error_listening:  # Only reflect if toggle is on
+            if self.enable_error_listening:
                 error_response = self._handle_error_prompt(error_msg)
                 print(f"Self-reflection: {error_response}")
             return "Something broke—check logs!"
@@ -1676,8 +1532,8 @@ class SOVLSystem:
             except Exception as e:
                 print(f"Failed to delete {attr}: {e}")
         try:
-            if self.last_prompt_embedding is not None:
-                self.last_prompt_embedding = None
+            if self.state.last_prompt_embedding is not None:
+                self.state.last_prompt_embedding = None
         except Exception as e:
             print(f"Failed to clear last_prompt_embedding: {e}")
         if torch.cuda.is_available():
