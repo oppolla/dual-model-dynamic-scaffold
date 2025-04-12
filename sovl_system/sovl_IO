@@ -1,28 +1,64 @@
 import json
 import os
+import sys
 
-def load_jsonl(file_path):
+def load_jsonl(file_path, min_entries=10):
     """
-    Load a JSONL file into a list of dictionaries.
+    Load a JSONL file into a list of dictionaries with validation.
     
     Args:
         file_path (str): Path to the JSONL file.
+        min_entries (int): Minimum number of valid entries required.
     
     Returns:
-        list: List of dictionaries parsed from each line.
+        list: List of dictionaries with 'prompt' and 'completion' keys.
+    
+    Raises:
+        InsufficientDataError: If fewer than min_entries valid entries are loaded.
+        SystemExit: If file is not found or other critical errors occur.
     """
     data = []
+    error_log = []
+
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
+        # Attempt to open and read the file
+        with open(file_path, 'r', encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
                 try:
-                    data.append(json.loads(line.strip()))
+                    entry = json.loads(line.strip())
+                    # Validate the structure of each entry
+                    if not isinstance(entry.get("prompt"), str) or not isinstance(entry.get("response"), str):
+                        error_log.append(f"Line {line_number}: Missing or invalid 'prompt' or 'response'. Skipping.")
+                        continue
+                    # Append valid entry
+                    data.append({"prompt": entry["prompt"], "completion": entry["response"]})
                 except json.JSONDecodeError as e:
-                    print(f"Warning: Skipping invalid JSON line in {file_path}: {e}")
+                    error_log.append(f"Line {line_number}: JSON decode error: {e}. Skipping.")
+        
+        # Print warnings if any
+        if error_log:
+            print("Warnings encountered during data loading:")
+            for error in error_log:
+                print(f"WARNING: {error}")
+            # Optionally, write errors to a file
+            with open("data_load_errors.log", "w", encoding="utf-8") as log_file:
+                log_file.write("\n".join(error_log))
+        
+        # Check if the minimum threshold is met
+        if len(data) < min_entries:
+            print(f"ERROR: Loaded only {len(data)} valid entries from {file_path}. Minimum required: {min_entries}.")
+            raise InsufficientDataError(f"Aborting: Insufficient valid data entries. Check 'data_load_errors.log' for details.")
+    
     except FileNotFoundError:
-        print(f"Warning: {file_path} not found, returning empty list.")
+        print(f"CRITICAL: File not found: {file_path}. Aborting process.")
+        sys.exit(1)  # Exit the process cleanly with a failure status
+    
     except Exception as e:
-        print(f"Warning: Failed to load {file_path}: {e}")
+        print(f"CRITICAL: Unexpected error: {e}. Aborting process.")
+        sys.exit(1)  # Exit the process cleanly with a failure status
+
+    # Return validated data
+    print(f"INFO: Data Validation: {len(data)} entries loaded successfully.")
     return data
 
 def load_config(config_file="sovl_config.json", defaults=None):
@@ -78,9 +114,9 @@ if __name__ == "__main__":
     # Quick test
     # Test load_jsonl
     with open("test.jsonl", "w", encoding="utf-8") as f:
-        f.write('{"a": 1}\n')
-        f.write('{"b": 2}\n')
-    print("JSONL:", load_jsonl("test.jsonl"))
+        f.write('{"prompt": "test1", "response": "resp1"}\n')
+        f.write('{"prompt": "test2", "response": "resp2"}\n')
+    print("JSONL:", load_jsonl("test.jsonl", min_entries=1))
     os.remove("test.jsonl")
 
     # Test load_config
