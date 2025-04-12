@@ -429,25 +429,11 @@ class SOVLSystem:
         self.state = SOVLState(config)
         self.state.set_scaffold_unk_id(self.scaffold_tokenizer.unk_token_id)
         self.trainer.state = self.state  # Share state with trainer
-        self.metrics = {
-            "curiosity_eruptions": 0,
-            "spontaneous_questions": 0,
-            "answered_questions": 0,
-            "avg_novelty": 0.0,
-            "eruption_count": 0
-        }
-
+       
         # Curiosity system
         self.curiosity = TrueCuriosity(self) if ENABLE_CURIOSITY else None
         self.pressure = CuriosityPressure() if ENABLE_CURIOSITY else None
         self.last_question_time = time.time()
-        self.metrics = {
-            "curiosity_eruptions": 0,
-            "spontaneous_questions": 0,
-            "answered_questions": 0,
-            "avg_novelty": 0.0,
-            "eruption_count": 0
-        }
 
         self.load_state()
 
@@ -580,6 +566,7 @@ class SOVLSystem:
             })
             self.update_metrics(q, score, spontaneous=False)
             self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            print(f"Pressure after training question: {self.pressure.value:.2f}")
             self.last_question_time = time.time()
             print(f"Curiosity question after training: {q}")
 
@@ -602,6 +589,7 @@ class SOVLSystem:
             })
             self.update_metrics(q, score, spontaneous=False)
             self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            print(f"Pressure after gestation question: {self.pressure.value:.2f}")
             self.last_question_time = time.time()
             print(f"Curiosity question after gestation: {q}")
 
@@ -624,6 +612,7 @@ class SOVLSystem:
             })
             self.update_metrics(q, score, spontaneous=False)
             self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            print(f"Pressure after dream question: {self.pressure.value:.2f}")
             self.last_question_time = time.time()
             print(f"Curiosity question after dreaming: {q}")
 
@@ -646,6 +635,7 @@ class SOVLSystem:
             })
             self.update_metrics(q, score, spontaneous=False)
             self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            print(f"Pressure after sleep training question: {self.pressure.value:.2f}")
             self.last_question_time = time.time()
             print(f"Curiosity question after sleep training: {q}")
     
@@ -1231,16 +1221,6 @@ class SOVLSystem:
             self.last_weight = self.trainer.get_life_curve_weight()
             print("--- Sleep Training Complete ---")
 
-        # Delegate to trainer
-        self.trainer.sleep_train(log_entries)
-        self.last_trained = time.time()
-        self.logger.clear()
-        self.last_weight = self.trainer.get_life_curve_weight()
-        if ENABLE_TEMPERAMENT:
-            self._update_temperament()
-            self.state.last_temperament_score = self.state.temperament_score
-        print("--- Sleep Training Complete ---")
-
     def _update_temperament(self):
         avg_confidence = self.state.sleep_confidence_sum / self.state.sleep_confidence_count if self.state.sleep_confidence_count > 0 else 0.5
         lifecycle_stage = self.trainer.data_exposure / self.trainer.lora_capacity if self.trainer.lora_capacity > 0 else 0.0
@@ -1563,6 +1543,14 @@ class SOVLSystem:
             print(f"System cleanup failed: {e}")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+    def _should_gestate(self):
+        """Check if gestation should occur based on log size and time."""
+        if not ENABLE_GESTATION:
+            return False
+        log_entries = self.logger.read()
+        time_since_last = time.time() - self.last_trained
+        return len(log_entries) >= SLEEP_LOG_MIN and time_since_last > 60.0           
 
     def new_conversation(self):
         """Start a new conversation."""
