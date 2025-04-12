@@ -6,9 +6,6 @@ import torch
 import uuid
 from threading import Lock
 
-# Assuming curiosity.py is in the same directory or appropriate module path
-from curiosity import CuriosityManager
-
 @dataclass
 class ConversationHistory:
     conversation_id: str
@@ -22,18 +19,16 @@ class ConversationHistory:
         self.messages.append({"prompt": prompt, "response": response})
 
 class SOVLState:
-    def __init__(self, config: Dict[str, Any], curiosity_manager: CuriosityManager):
+    def __init__(self, config: Dict[str, Any]):
         """
-        Initialize SOVLState with configuration and curiosity manager.
+        Initialize SOVLState with configuration.
 
         Args:
             config (Dict[str, Any]): Configuration dictionary.
-            curiosity_manager (CuriosityManager): Instance of CuriosityManager for pressure management.
         """
         self.dream_memory_maxlen = config.get("dream_memory_maxlen", 10)
         self.temperament_history_maxlen = config.get("temperament_history_maxlen", 5)
         self.confidence_history_maxlen = config.get("confidence_history_maxlen", 5)
-        self.curiosity_queue_maxlen = config.get("curiosity_queue_maxlen", 10)
         self.scaffold_unk_id = 0  # To be set explicitly by main system
         self.hidden_size = config.get("core_config", {}).get("hidden_size", 768)  # Default to 768 (e.g., GPT-2)
 
@@ -58,9 +53,6 @@ class SOVLState:
         self.confidence_history: Deque[float] = deque(maxlen=self.confidence_history_maxlen)
         self.sleep_confidence_sum = 0.0
         self.sleep_confidence_count = 0
-
-        self.pressure = curiosity_manager.pressure  # Reference CuriosityManager's pressure instance
-        self.unanswered_q: Deque[Tuple[str, float]] = deque(maxlen=self.curiosity_queue_maxlen)
 
         self.last_weight = 0.0
         self.is_sleeping = False
@@ -124,12 +116,10 @@ class SOVLState:
             "confidence_history": list(self.confidence_history),
             "sleep_confidence_sum": self.sleep_confidence_sum,
             "sleep_confidence_count": self.sleep_confidence_count,
-            "pressure_value": self.pressure.value,  # Use pressure.value directly
-            "unanswered_q": list(self.unanswered_q),
             "last_weight": self.last_weight,
             "is_sleeping": self.is_sleeping,
             "scaffold_unk_id": self.scaffold_unk_id,
-            "hidden_size": self.hidden_size  # Save hidden_size
+            "hidden_size": self.hidden_size
         }
 
     def from_dict(self, data: Dict[str, Any], device: torch.device):
@@ -170,13 +160,8 @@ class SOVLState:
         self.sleep_confidence_sum = data.get("sleep_confidence_sum", 0.0)
         self.sleep_confidence_count = data.get("sleep_confidence_count", 0)
 
-        # Curiosity system
-        self.pressure.value = data.get("pressure_value", 0.0)  # Update pressure value directly
-        self.unanswered_q = deque(data.get("unanswered_q", []),
-                                 maxlen=self.curiosity_queue_maxlen)
-
         # Dynamic controls
         self.last_weight = data.get("last_weight", 0.0)
         self.is_sleeping = data.get("is_sleeping", False)
         self.scaffold_unk_id = data.get("scaffold_unk_id", 0)
-        self.hidden_size = data.get("hidden_size", 768)  # Restore hidden_size
+        self.hidden_size = data.get("hidden_size", 768)
