@@ -382,8 +382,13 @@ class SOVLSystem:
             tokenizer=self.base_tokenizer,
             state=None  # Set after state initialization
         )
-        self.trainer.loss_weight_fn = self.get_loss_weight
         self.trainer.memory_check = self.check_memory_health
+
+        # Register callbacks for curiosity
+        self.trainer.register_callback("on_training_complete", self.handle_training_complete)
+        self.trainer.register_callback("on_gestation_complete", self.handle_gestation_complete)
+        self.trainer.register_callback("on_dream_complete", self.handle_dream_complete)
+        self.trainer.register_callback("on_sleep_train_complete", self.handle_sleep_train_complete)
 
         def build_token_map(base_tokenizer, scaffold_tokenizer):
             token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
@@ -555,6 +560,94 @@ class SOVLSystem:
         score = self.curiosity.calculate_metric(output)
         threshold = CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS if spontaneous else CURIOSITY_NOVELTY_THRESHOLD_RESPONSE
         return output if score > threshold else None
+    
+    def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
+        """Handle training completion callback."""
+        if not ENABLE_CURIOSITY or not self.curiosity:
+            return
+        context = f"Training completed at epoch {epoch} with loss {avg_loss:.4f}"
+        q = self.generate_curiosity_question(context, spontaneous=False)
+        if q:
+            score = self.curiosity.calculate_metric(q)
+            self.state.unanswered_q.append((q, score))
+            self.logger.record({
+                "prompt": q,
+                "response": "",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": 0.0,
+                "is_system_question": True
+            })
+            self.update_metrics(q, score, spontaneous=False)
+            self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            self.last_question_time = time.time()
+            print(f"Curiosity question after training: {q}")
+
+    def handle_gestation_complete(self, batch_size: int, avg_loss: float):
+        """Handle gestation completion callback."""
+        if not ENABLE_CURIOSITY or not self.curiosity:
+            return
+        context = f"Gestation processed {batch_size} entries with loss {avg_loss:.4f}"
+        q = self.generate_curiosity_question(context, spontaneous=False)
+        if q:
+            score = self.curiosity.calculate_metric(q)
+            self.state.unanswered_q.append((q, score))
+            self.logger.record({
+                "prompt": q,
+                "response": "",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": 0.0,
+                "is_system_question": True
+            })
+            self.update_metrics(q, score, spontaneous=False)
+            self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            self.last_question_time = time.time()
+            print(f"Curiosity question after gestation: {q}")
+
+    def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
+        """Handle dream completion callback."""
+        if not ENABLE_CURIOSITY or not self.curiosity:
+            return
+        context = f"Dreamed about '{dream_prompt[:30]}...' (novel: {is_novel}, memories: {memory_count})"
+        q = self.generate_curiosity_question(context, spontaneous=False)
+        if q:
+            score = self.curiosity.calculate_metric(q)
+            self.state.unanswered_q.append((q, score))
+            self.logger.record({
+                "prompt": q,
+                "response": "",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": 0.0,
+                "is_system_question": True
+            })
+            self.update_metrics(q, score, spontaneous=False)
+            self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            self.last_question_time = time.time()
+            print(f"Curiosity question after dreaming: {q}")
+
+    def handle_sleep_train_complete(self, batch_size: int, data_exposure: float):
+        """Handle sleep training completion callback."""
+        if not ENABLE_CURIOSITY or not self.curiosity:
+            return
+        context = f"Sleep training processed {batch_size} entries, exposure {data_exposure}"
+        q = self.generate_curiosity_question(context, spontaneous=False)
+        if q:
+            score = self.curiosity.calculate_metric(q)
+            self.state.unanswered_q.append((q, score))
+            self.logger.record({
+                "prompt": q,
+                "response": "",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": 0.0,
+                "is_system_question": True
+            })
+            self.update_metrics(q, score, spontaneous=False)
+            self.pressure.value -= CURIOSITY_PRESSURE_DROP
+            self.last_question_time = time.time()
+            print(f"Curiosity question after sleep training: {q}")
     
     def update_metrics(self, question, score, spontaneous=False, answered=False):
         self.metrics["curiosity_eruptions"] += 1
@@ -1103,30 +1196,12 @@ class SOVLSystem:
             for token_id in self.token_map:
                 self.token_map[token_id]['weight'] *= MEMORY_DECAY_RATE
 
-    def _should_gestate(self):
-        log_entries = self.logger.read()
-        if len(log_entries) < SLEEP_LOG_MIN:
-            print(f"Gestation check: Log size {len(log_entries)} < {SLEEP_LOG_MIN}. No gestation.")
-            return False
-        avg_confidence = self.state.sleep_confidence_sum / self.state.sleep_confidence_count if self.state.sleep_confidence_count > 0 else 0.5
-        should_gestate = (len(log_entries) >= SLEEP_LOG_MIN) and (self.state.sleep_confidence_count == 0 or avg_confidence > SLEEP_CONF_THRESHOLD)
-        print(f"Gestation check: Confidence {avg_confidence:.2f} > {SLEEP_CONF_THRESHOLD}, Log {len(log_entries)} >= {SLEEP_LOG_MIN}, Gestate: {should_gestate}")
-        return should_gestate
-
     def _gestate(self, resume=False):
+        """Perform gestation by delegating to the trainer."""
         log_entries = self.logger.read()
         if not log_entries:
             print("No log data to gestate.")
             return False
-
-        # Prepare scaffold context for trainer
-        prompts = [entry["prompt"] for entry in log_entries if "prompt" in entry]
-        if prompts:
-            scaffold_inputs = self.tokenize_and_map(prompts)
-            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-            self.trainer.scaffold_context = scaffold_hidden_states
-        else:
-            self.trainer.scaffold_context = None
 
         # Delegate to trainer
         result = self.trainer.gestate(log_entries, resume)
@@ -1136,97 +1211,11 @@ class SOVLSystem:
             self.last_weight = self.trainer.get_life_curve_weight()
             self.set_scaffold_influence(self.last_weight)
             print(f"Growth stage: {self.last_weight:.2f}, Exposure: {self.trainer.data_exposure}")
-
-            q = self.generate_curiosity_question() if not self.state.unanswered_q else self.state.unanswered_q.popleft()[0]
-            if q:
-                print(f"{q}")
-                self.logger.record({
-                    "prompt": q,
-                    "response": "",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "confidence_score": 0.0,
-                    "is_system_question": True
-                })
-                self.update_metrics(q, self.curiosity.calculate_metric(q))
-
         return result
 
-    def _should_dream(self):
-        swing_dream = len(self.state.confidence_history) >= 5 and torch.var(torch.tensor(list(self.state.confidence_history))).item() > DREAM_SWING_VAR
-        lifecycle_dream = abs(self.state.temperament_score - self.state.last_temperament_score) > DREAM_LIFECYCLE_DELTA
-        history_dream = False
-        if len(self.state.temperament_history) >= 5:
-            trend = torch.tensor(list(self.state.temperament_history)).mean().item() - self.state.temperament_history[0]
-            history_dream = abs(trend) > 0.3
-        return swing_dream or lifecycle_dream or (DREAM_TEMPERAMENT_ON and history_dream)
-
-    def _dream(self):
-        print("--- Dreaming ---")
-        log_entries = self.logger.read()
-        if not log_entries:
-            print("No memories to dream on.")
-            return
-    
-        last_prompt = self.history.messages[-1]["prompt"] if self.history.messages else random.choice(log_entries)["prompt"]
-        prompt_inputs = self.base_tokenizer(last_prompt, return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
-        with torch.no_grad():
-            prompt_hidden = self.scaffolds[0](**prompt_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
-        with self.memory_lock:
-            self.state.last_prompt_embedding = prompt_hidden
-    
-        if ENABLE_PROMPT_DRIVEN_DREAMS:
-            weights = []
-            for i, entry in enumerate(log_entries):
-                if "prompt" not in entry:
-                    continue
-                log_inputs = self.base_tokenizer(entry["prompt"], return_tensors='pt', padding=True, truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
-                log_hidden = self.scaffolds[0](**log_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
-                similarity = F.cosine_similarity(prompt_hidden, log_hidden).item()
-                recency = (i + 1) / len(log_entries)
-                weight = DREAM_PROMPT_WEIGHT * similarity + (1 - DREAM_PROMPT_WEIGHT) * recency
-                weights.append(weight)
-            dream_entry = random.choices(log_entries, weights=weights, k=1)[0] if weights else random.choice(log_entries)
-        else:
-            dream_entry = random.choice(log_entries)
-        dream_prompt = dream_entry["prompt"]
-    
-        is_novel = dream_prompt not in self.state.seen_prompts
-        noise_scale = DREAM_NOISE_SCALE + (TEMP_MELANCHOLY_NOISE if self.state.temperament_score <= -0.5 else 0) + (DREAM_NOVELTY_BOOST if is_novel else 0)
-        noise_scale = min(noise_scale, 0.1)
-    
-        with torch.no_grad():
-            inputs = self.tokenize_and_map(dream_prompt)
-            hidden_states = self.get_scaffold_hidden_states(inputs)
-            noise = torch.randn_like(hidden_states) * noise_scale
-            dream_layer = (hidden_states.mean(dim=1) + noise).detach().cpu()
-    
-        with self.memory_lock:
-            for i in range(len(self.state.dream_memory)):
-                tensor, weight = self.state.dream_memory[i]
-                self.state.dream_memory[i] = (tensor, weight * DREAM_MEMORY_DECAY)
-    
-            self.state.dream_memory = deque([(t, w) for t, w in self.state.dream_memory if w >= DREAM_PRUNE_THRESHOLD], maxlen=self.state.dream_memory_maxlen)
-            self.state.prune_dream_memory(DREAM_PRUNE_THRESHOLD)
-            weight = 1.0
-            if dream_prompt not in self.state.seen_prompts:
-                weight += DREAM_NOVELTY_BOOST
-                with self.state.memory_lock:
-                    self.state.dream_memory.append((dream_layer, min(weight, 1.5)))
-    
-                print(f"Added dream memory (weight: {weight:.2f}), Total memories: {len(self.state.dream_memory)}")
-    
-        for _ in range(3):
-            q = self.generate_curiosity_question()
-            if q:
-                with self.memory_lock:
-                    self.state.unanswered_q.append((q, self.curiosity.calculate_metric(q)))
-    
-        print(f"Dreaming from prompt similarity: {max(weights) if weights else 0:.2f}, novelty boost: {DREAM_NOVELTY_BOOST if is_novel else 0:.3f}, dream count: {len(self.state.dream_memory)}, questions queued: {len(self.state.unanswered_q)}")
-        print("--- Dream Concluded ---")
-
     def _sleep_train(self):
-        if not ENABLE_SLEEP_TRAINING or not self._should_gestate():
+        """Perform sleep training by delegating to the trainer."""
+        if not ENABLE_SLEEP_TRAINING:
             return
         print("\n--- Sleep Training Initiated ---")
         log_entries = self.logger.read()
@@ -1234,17 +1223,13 @@ class SOVLSystem:
             print("No log data to train on.")
             return
 
-        if ENABLE_DREAMING and self._should_dream():
-            self._dream()
-
-        # Prepare scaffold context for trainer
-        prompts = [entry["prompt"] for entry in log_entries if "prompt" in entry]
-        if prompts:
-            scaffold_inputs = self.tokenize_and_map(prompts)
-            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-            self.trainer.scaffold_context = scaffold_hidden_states
-        else:
-            self.trainer.scaffold_context = None
+        # Delegate to trainer
+        success = self.trainer.sleep_train(log_entries)
+        if success:
+            self.last_trained = time.time()
+            self.logger.clear()
+            self.last_weight = self.trainer.get_life_curve_weight()
+            print("--- Sleep Training Complete ---")
 
         # Delegate to trainer
         self.trainer.sleep_train(log_entries)
@@ -1284,6 +1269,7 @@ class SOVLSystem:
         print(f"Temperament score: {self.state.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
 
     def train_step(self, batch):
+        """Execute a single training step with scaffold context."""
         if self.dry_run:
             print("Dry run train step")
             dry_batch = [
@@ -1326,7 +1312,6 @@ class SOVLSystem:
             batch=formatted_batch,
             scaffold_context=scaffold_hidden_states,
             grad_clip=True,
-            loss_weight_fn=self.get_loss_weight,
             dry_run=False,
             memory_check=self.check_memory_health
         )
@@ -1404,14 +1389,6 @@ class SOVLSystem:
         })
         self.history = temp_history
         return response
-    
-    def get_loss_weight(self, batch):
-        log_entries = self.logger.read()
-        prompts = batch['prompt']
-        for prompt in prompts:
-            if any(e["prompt"] == prompt and e.get("is_system_question", False) and e["response"] for e in log_entries):
-                return 1.2
-        return 1.0
 
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
