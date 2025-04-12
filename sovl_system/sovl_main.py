@@ -21,6 +21,26 @@ from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
 from sovl_config import ConfigManager
 from sovl_scaffold import inject_cross_attention, CrossAttentionInjector
 from sovl_processor import LogitsProcessor
+from sovl_utils import (
+    NumericalGuard,
+    safe_compare,
+    safe_divide,
+    memory_usage,
+    log_memory_usage,
+    dynamic_batch_size,
+    cosine_similarity_matrix,
+    normalize_scores,
+    weighted_sample,
+    decay_weights,
+    float_lt,
+    float_gt,
+    float_eq,
+    get_parameter_count,
+    set_seed,
+    tensor_size_bytes,
+    validate_layer_indices,
+    log_gradient_norms
+)
 
 class InsufficientDataError(Exception):
     pass
@@ -284,15 +304,20 @@ class TrueCuriosity:
         q_inputs = self.sovl.base_tokenizer(question, return_tensors='pt', truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
         with torch.no_grad():
             q_emb = self.sovl.scaffolds[0](**q_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
+        
         base_conf = calculate_confidence_score(self.sovl.base_model(**q_inputs).logits, q_inputs.input_ids)
         scaf_conf = calculate_confidence_score(self.sovl.scaffolds[0](**q_inputs).logits, q_inputs.input_ids)
-        mem_sim = 0
+        
+        mem_sim = 0.0
         if self.sovl.dream_memory:
             dream_embs, _ = zip(*self.sovl.dream_memory)
-            mem_sim = max([F.cosine_similarity(q_emb, emb).item() for emb in dream_embs], default=0)
+            sim_matrix = cosine_similarity_matrix(q_emb, torch.stack(dream_embs).to(DEVICE))
+            mem_sim = sim_matrix.max().item()
+        
         ignorance = 1 - max(base_conf, scaf_conf)
         novelty = 1 - mem_sim
-        return ignorance * self.sovl.curiosity_weight_ignorance + novelty * self.sovl.curiosity_weight_novelty
+        return (ignorance * self.sovl.curiosity_weight_ignorance + 
+                novelty * self.sovl.curiosity_weight_novelty)
 
 class CuriosityPressure:
     def __init__(self):
@@ -507,50 +532,54 @@ class SOVLSystem:
         """Autonomically reduce GPU memory usage if nearing capacity with dynamic adjustments."""
         if not torch.cuda.is_available():
             return
-    
+
         with self.memory_lock:
-            current_mem = torch.cuda.memory_allocated()
+            # Use the new memory_usage utility
+            mem_stats = memory_usage(DEVICE)
+            if not mem_stats:
+                return
+
+            current_mem = mem_stats['allocated'] * (1024 ** 3)  # Convert back to bytes
             total_mem = torch.cuda.get_device_properties(0).total_memory
             mem_ratio = current_mem / total_mem
             self.mem_usage_history.append(mem_ratio)
-            
-            # Calculate model size (approximate)
-            model_size = sum(p.numel() * p.element_size() for p in self.base_model.parameters())
-            model_size += sum(p.numel() * p.element_size() for scaffold in self.scaffolds for p in scaffold.parameters())
-            
+
+            # Calculate model size using new utility
+            model_size = get_parameter_count(self.base_model) * 4  # Approximate bytes (float32)
+            model_size += get_parameter_count(self.scaffolds[0]) * 4
+
             # Calculate average memory usage
             avg_mem_usage = sum(self.mem_usage_history) / len(self.mem_usage_history) if self.mem_usage_history else mem_ratio
-    
+
             dynamic_threshold = min(
                 0.95,
                 max(
                     0.7,
-                    self.dynamic_threshold_base * (1 + (model_size/total_mem) * 0.1 - avg_mem_usage * 0.2)
-                )
+                    self.dynamic_threshold_base * (1 + (model_size / total_mem) * 0.1 - avg_mem_usage * 0.2)
+                )  # Corrected: Added closing parenthesis here
             )
             lifecycle_stage = self.trainer.data_exposure / self.trainer.lora_capacity if self.trainer.lora_capacity > 0 else 0.0
-            from sovl_utils import float_lt
+
             if float_lt(lifecycle_stage, 0.25):
                 memory_pruned = False
                 quantization_changed = False
                 cache_cleared = False
                 batch_size_reduced = False
-    
+
                 torch.cuda.empty_cache()
                 cache_cleared = True
-    
+
                 if hasattr(self.state, 'dream_memory') and len(self.state.dream_memory) > 0:
                     original_len = len(self.state.dream_memory)
                     sorted_mem = sorted(self.state.dream_memory, key=lambda x: x[1], reverse=True)
                     keep_len = max(1, original_len // 2)
-                    # Clear current dream_memory and re-append with validation
                     self.state.dream_memory = deque(maxlen=self.state.dream_memory_maxlen)
                     for tensor, weight in sorted_mem[:keep_len]:
                         if weight > 0.5:
                             self.state.append_dream_memory(tensor.detach().cpu(), weight)
                     if len(self.state.dream_memory) < original_len:
                         memory_pruned = True
-    
+
                 if not hasattr(self, '_original_batch_size'):
                     self._original_batch_size = BATCH_SIZE
                 if BATCH_SIZE > 1:
@@ -558,11 +587,11 @@ class SOVLSystem:
                     BATCH_SIZE = max(1, BATCH_SIZE // 2)
                     config_manager.update("training_config.batch_size", BATCH_SIZE)
                     batch_size_reduced = True
-    
+
                 if self.quantization_mode != "int8":
                     self.set_quantization_mode("int8")
                     quantization_changed = True
-    
+
                 self.logger.write({
                     "error": "memory_threshold_exceeded",
                     "details": {
@@ -584,7 +613,7 @@ class SOVLSystem:
                 print(f"Attention: Memory adjusted (GPU: {mem_ratio:.0%}, Threshold: {dynamic_threshold:.2f}) - "
                       f"Cache Cleared: {cache_cleared}, Pruned: {memory_pruned}, "
                       f"Batch Reduced: {batch_size_reduced}, Quantized: {quantization_changed}")
-    
+
             elif mem_ratio < dynamic_threshold * 0.8:
                 if hasattr(self, '_original_batch_size') and BATCH_SIZE < self._original_batch_size:
                     global BATCH_SIZE
@@ -1507,21 +1536,29 @@ class SOVLSystem:
             print("--- Sleep Training Complete ---")
 
     def _update_temperament(self):
-        avg_confidence = self.state.sleep_confidence_sum / self.state.sleep_confidence_count if self.state.sleep_confidence_count > 0 else 0.5
-        lifecycle_stage = self.trainer.data_exposure / self.trainer.lora_capacity if self.trainer.lora_capacity > 0 else 0.0
-    
+        avg_confidence = safe_divide(
+            self.state.sleep_confidence_sum,
+            self.state.sleep_confidence_count,
+            default=0.5
+        )
+        lifecycle_stage = safe_divide(
+            self.trainer.data_exposure,
+            self.trainer.lora_capacity,
+            default=0.0
+        )
+
         base_score = 2.0 * (avg_confidence - 0.5)
-    
-        if lifecycle_stage < 0.25:
+
+        if float_lt(lifecycle_stage, 0.25):
             bias = TEMP_CURIOSITY_BOOST * (1 - lifecycle_stage / 0.25)
-        elif lifecycle_stage < 0.75:
+        elif float_lt(lifecycle_stage, 0.75):
             bias = 0.0
             if len(self.state.temperament_history) >= 5:
                 variance = torch.var(torch.tensor(list(self.state.temperament_history))).item()
                 bias -= 0.2 * variance
         else:
             bias = -TEMP_CURIOSITY_BOOST * (lifecycle_stage - 0.75) / 0.25
-    
+
         target_score = base_score + bias + (CONF_FEEDBACK_STRENGTH * (avg_confidence - 0.5))
         target_score = max(-1.0, min(1.0, target_score))
         alpha = 0.1 * (1 - TEMP_SMOOTHING_FACTOR)
@@ -1529,11 +1566,13 @@ class SOVLSystem:
         self.state.temperament_score = max(-1.0, min(1.0, self.state.temperament_score))
         self.state.temperament_history = deque(self.state.temperament_history, maxlen=TEMPERAMENT_HISTORY_MAXLEN)
         self.state.temperament_history.append(self.state.temperament_score)
-    
+
         if ENABLE_CURIOSITY and self.pressure:
             self.pressure.update(self.state.temperament_score, avg_confidence, 0.0)
-    
-        label = "melancholic" if self.state.temperament_score <= -0.5 else "restless" if self.state.temperament_score <= 0.0 else "calm" if self.state.temperament_score <= 0.5 else "curious"
+
+        label = "melancholic" if float_lt(self.state.temperament_score, -0.5) else \
+                "restless" if float_lt(self.state.temperament_score, 0.0) else \
+                "calm" if float_lt(self.state.temperament_score, 0.5) else "curious"
         print(f"Temperament score: {self.state.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
 
     def train_step(self, batch):
@@ -1710,9 +1749,10 @@ class SOVLSystem:
 
             temp = BASE_TEMPERATURE
             if ENABLE_TEMPERAMENT and TEMP_MOOD_INFLUENCE > 0:
-                temp_adjustment = TEMP_MOOD_INFLUENCE * 0.3 * self.state.temperament_score
-                temp += temp_adjustment
-                temp = max(0.5, min(1.5, temp))
+                with NumericalGuard():  # Use the new context manager
+                    temp_adjustment = TEMP_MOOD_INFLUENCE * 0.3 * self.state.temperament_score
+                    temp += temp_adjustment
+                    temp = max(0.5, min(1.5, temp))
                 generation_params["adjusted_temperature"] = temp
 
             # Compute dynamic factor for cross-attention
@@ -1925,6 +1965,8 @@ class SOVLSystem:
     def cleanup(self):
         """Comprehensive cleanup with state preservation."""
         try:
+            log_memory_usage("Pre-cleanup", DEVICE, self.logger.record)
+
             self.trainer.cleanup()
             self.save_state()
 
@@ -1934,8 +1976,15 @@ class SOVLSystem:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+            log_memory_usage("Post-cleanup", DEVICE, self.logger.record)
+
             print("System cleanup completed with state preservation")
         except Exception as e:
+            self.error_logger.write({
+                "error": f"Cleanup failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
             print(f"System cleanup failed: {e}")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
