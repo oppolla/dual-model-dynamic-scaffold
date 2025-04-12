@@ -2,6 +2,7 @@ import json
 import os
 import gzip
 import uuid
+import time
 from datetime import datetime
 from threading import Lock
 from typing import List, Dict, Union, Optional, Callable
@@ -13,7 +14,7 @@ class Logger:
     REQUIRED_FIELDS = ['timestamp', 'conversation_id']
     OPTIONAL_FIELDS = ['prompt', 'response', 'confidence_score', 'error', 'warning']
     FIELD_VALIDATORS = {
-        'timestamp': lambda x: isinstance(x, str),
+        'timestamp': lambda x: isinstance(x, (str, float, int)),
         'conversation_id': lambda x: isinstance(x, str),
         'confidence_score': lambda x: isinstance(x, (int, float)),
         'is_error_prompt': lambda x: isinstance(x, bool)
@@ -42,7 +43,7 @@ class Logger:
             
         temp_logs = []
         try:
-            with self.lock, open(self.log_file, 'r', encoding='utf-8') as f:
+            with self._safe_file_op(open, self.log_file, 'r', encoding='utf-8') as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
@@ -71,6 +72,29 @@ class Logger:
                 print(f"Failed to preserve corrupted log file")
             self.logs = []
 
+    def _safe_file_op(self, operation: Callable, *args, **kwargs):
+        """Wrapper for file operations with retry logic."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return operation(*args, **kwargs)
+            except (IOError, OSError) as e:
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+
+    def _atomic_write(self, filename: str, content: str):
+        """Atomic file write using temp file pattern."""
+        temp_file = f"{filename}.tmp"
+        try:
+            with self._safe_file_op(open, temp_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+            self._safe_file_op(os.replace, temp_file, filename)
+        except Exception as e:
+            if os.path.exists(temp_file):
+                self._safe_file_op(os.remove, temp_file)
+            raise
+
     def _rotate_if_needed(self) -> None:
         """Rotate log file if it exceeds max size."""
         if self.max_size <= 0 or not os.path.exists(self.log_file):
@@ -86,11 +110,11 @@ class Logger:
             
             if self.compress_old:
                 rotated_file += ".gz"
-                with open(self.log_file, 'rb') as f_in:
-                    with gzip.open(rotated_file, 'wb') as f_out:
+                with self._safe_file_op(open, self.log_file, 'rb') as f_in:
+                    with self._safe_file_op(gzip.open, rotated_file, 'wb') as f_out:
                         f_out.writelines(f_in)
             else:
-                os.rename(self.log_file, rotated_file)
+                self._safe_file_op(os.rename, self.log_file, rotated_file)
                 
             self.logs = []  # Clear in-memory logs after rotation
             self.manage_rotation()  # Clean up old rotated files
@@ -120,6 +144,10 @@ class Logger:
         except Exception:
             return False
 
+    def record(self, entry: Dict) -> None:
+        """Alias for write() to maintain backward compatibility."""
+        self.write(entry)
+
     def write(self, entry: Dict) -> None:
         """
         Write a validated log entry.
@@ -139,11 +167,11 @@ class Logger:
             self._rotate_if_needed()
             
             try:
-                mode = 'a' if os.path.exists(self.log_file) else 'w'
-                with open(self.log_file, mode, encoding='utf-8') as f:
-                    f.write(json.dumps(entry) + '\n')
+                self._atomic_write(self.log_file, json.dumps(entry) + '\n')
             except Exception as e:
                 print(f"Warning: Failed to write to {self.log_file}: {str(e)}")
+                # Store in memory only if file write fails
+                self.logs[-1]['_write_failed'] = True
 
     def write_batch(self, entries: List[Dict]) -> None:
         """Optimized batch writing with validation and atomic write."""
@@ -166,25 +194,38 @@ class Logger:
             self._rotate_if_needed()
             
             try:
-                # Atomic write using temp file pattern
-                temp_file = f"{self.log_file}.tmp"
-                mode = 'a' if os.path.exists(self.log_file) else 'w'
-                
-                with open(temp_file, mode, encoding='utf-8') as f:
-                    f.write('\n'.join(json.dumps(e) for e in valid_entries) + '\n')
-                    
-                # Atomic replace
-                if os.path.exists(self.log_file):
-                    os.replace(temp_file, self.log_file)
-                else:
-                    os.rename(temp_file, self.log_file)
+                content = '\n'.join(json.dumps(e) for e in valid_entries) + '\n'
+                self._atomic_write(self.log_file, content)
             except Exception as e:
                 print(f"Error writing batch: {str(e)}")
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except:
-                        pass
+                # Mark all batch entries as failed
+                for entry in valid_entries:
+                    entry['_write_failed'] = True
+
+    def recover_failed_writes(self) -> int:
+        """Attempt to recover any log entries that failed to write to disk."""
+        with self.lock:
+            failed_entries = [i for i, entry in enumerate(self.logs) 
+                            if entry.get('_write_failed')]
+            if not failed_entries:
+                return 0
+                
+            try:
+                # Write all failed entries at once
+                entries_to_write = [self.logs[i] for i in failed_entries]
+                content = '\n'.join(json.dumps(e) for e in entries_to_write) + '\n'
+                
+                self._atomic_write(self.log_file, content)
+                
+                # Clear failure flags
+                for i in failed_entries:
+                    if '_write_failed' in self.logs[i]:
+                        del self.logs[i]['_write_failed']
+                        
+                return len(failed_entries)
+            except Exception as e:
+                print(f"Failed to recover log entries: {str(e)}")
+                return 0
 
     def query(self, conditions: Dict[str, Union[str, List, Callable]], 
              sort_by: str = None, 
@@ -244,7 +285,7 @@ class Logger:
             self.logs = []
             try:
                 if os.path.exists(self.log_file):
-                    os.remove(self.log_file)
+                    self._safe_file_op(os.remove, self.log_file)
             except Exception as e:
                 print(f"Warning: Failed to clear {self.log_file}: {str(e)}")
 
@@ -265,7 +306,8 @@ class Logger:
                 "last_entry": self.logs[-1].get("timestamp"),
                 "error_count": sum(1 for log in self.logs if "error" in log),
                 "warning_count": sum(1 for log in self.logs if "warning" in log),
-                "file_size": os.path.getsize(self.log_file) if os.path.exists(self.log_file) else 0
+                "file_size": os.path.getsize(self.log_file) if os.path.exists(self.log_file) else 0,
+                "failed_writes": sum(1 for log in self.logs if log.get('_write_failed'))
             }
 
     def compress_logs(self, keep_original: bool = False) -> Optional[str]:
@@ -278,12 +320,12 @@ class Logger:
             
         compressed_file = f"{self.log_file}.{datetime.now().strftime('%Y%m%d')}.gz"
         try:
-            with open(self.log_file, 'rb') as f_in:
-                with gzip.open(compressed_file, 'wb') as f_out:
+            with self._safe_file_op(open, self.log_file, 'rb') as f_in:
+                with self._safe_file_op(gzip.open, compressed_file, 'wb') as f_out:
                     f_out.writelines(f_in)
                     
             if not keep_original:
-                os.remove(self.log_file)
+                self._safe_file_op(os.remove, self.log_file)
                 
             return compressed_file
         except Exception as e:
@@ -329,7 +371,7 @@ class Logger:
             # Remove oldest files beyond max_files limit
             for old_file in rotated_files[max_files:]:
                 try:
-                    os.remove(old_file)
+                    self._safe_file_op(os.remove, old_file)
                 except OSError:
                     print(f"Failed to remove old log file {old_file}")
         except Exception as e:
