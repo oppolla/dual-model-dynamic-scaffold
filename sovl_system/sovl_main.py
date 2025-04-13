@@ -444,7 +444,13 @@ class SOVLSystem:
             self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
         }
         self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", self.scaffold_tokenizer.unk_token_id)
-
+     
+        # Initialize cross-attention injector
+        self.cross_attention_injector = CrossAttentionInjector(
+            hidden_size=self.base_config.hidden_size,
+            num_heads=self.base_config.num_attention_heads,
+            logger=self.logger.record
+        )
         # Inject cross-attention
         print("Injecting cross-attention layers...")
         self._insert_cross_attention()
@@ -533,18 +539,54 @@ class SOVLSystem:
             raise
 
     def _insert_cross_attention(self):
-        """Inject cross-attention layers with updated config."""
+        """Inject cross-attention layers by delegating to CrossAttentionInjector."""
+        if not self.cross_attn_config.get("enable_cross_attention", True):
+            self.logger.record({
+                "event": "cross_attention",
+                "status": "disabled",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "state_hash": self.state.state_hash()
+            })
+            print("Cross-attention disabled.")
+            return
+
         injector = CrossAttentionInjector(
-            hidden_size=self.core_config.get("hidden_size", self.base_config.hidden_size),
+            hidden_size=self.base_config.hidden_size,
             num_heads=self.base_config.num_attention_heads,
             logger=self.logger.record
         )
-        injector.inject_cross_attention(
-            model=self.base_model,
-            layers=self.core_config.get("cross_attn_layers", [5, 7]),
-            memory_weight=self.cross_attn_config.get("memory_weight", 0.5),
-            dynamic_scale=self.cross_attn_config.get("dynamic_scale", 0.3)
-        )
+
+        try:
+            start_time = time.time()
+            injector.inject_cross_attention(
+                model=self.base_model,
+                scaffold_model=self.scaffolds[0],
+                core_config=self.core_config,
+                cross_attn_config=self.cross_attn_config,
+                lora_config=self.lora_config,
+                token_map=self.token_map,
+                device=DEVICE
+            )
+            elapsed = time.time() - start_time
+            self.logger.record({
+                "event": "cross_attention_injected",
+                "status": "success",
+                "time_elapsed": elapsed,
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "state_hash": self.state.state_hash()
+            })
+            print(f"Cross-attention injection complete in {elapsed:.2f}s.")
+        except Exception as e:
+            self.error_logger.record({
+                "error": f"Cross-attention injection failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": self.history.conversation_id,
+                "state_hash": self.state.state_hash()
+            })
+            raise
 
     def check_memory_health(self):
         """Autonomically reduce GPU memory usage if nearing capacity."""
@@ -939,30 +981,39 @@ class SOVLSystem:
             })
 
     def set_scaffold_influence(self, weight=None, blend_strength=None, layer_weights=None):
+        """Set the influence of scaffold model on cross-attention layers."""
         if weight is not None:
             self.last_weight = weight
 
-        injector = CrossAttentionInjector(
-            hidden_size=self.core_config.get("hidden_size", self.base_config.hidden_size),
-            num_heads=self.base_config.num_attention_heads,
-            logger=self.logger.record
-        )
-
-        layers = injector.get_cross_attention_layers(
-            self.base_model,
-            mode=self.core_config.get("layer_selection_mode", "balanced")
-        ) if self.core_config.get("use_dynamic_layers", False) else self.core_config.get("cross_attn_layers", [5, 7])
+        # Validate layer_weights if provided
+        if layer_weights is not None:
+            layers = (
+                self.cross_attention_injector.get_cross_attention_layers(
+                    self.base_model,
+                    mode=self.core_config.get("layer_selection_mode", "balanced")
+                ) if self.core_config.get("use_dynamic_layers", False)
+                else self.core_config.get("cross_attn_layers", [5, 7])
+            )
+            if len(layer_weights) != len(layers):
+                self.error_logger.record({
+                    "error": f"layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id,
+                    "state_hash": self.state.state_hash()
+                })
+                print(f"Error: layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})")
+                return
 
         try:
-            injector.set_scaffold_influence(
+            self.cross_attention_injector.set_influence(
                 model=self.base_model,
-                layers=layers,
-                weight=self.last_weight if weight is not None else None,
+                core_config=self.core_config,
+                cross_attn_config=self.cross_attn_config,
+                training_config=self.training_config,
+                controls_config=self.controls_config,
+                weight=weight,
                 blend_strength=blend_strength,
-                layer_weights=layer_weights,
-                lifecycle_curve=self.training_config.get("lifecycle_curve", "sigmoid_linear") if self.controls_config.get("enable_lifecycle_weighting", True) else None,
-                memory_weight=self.cross_attn_config.get("memory_weight", 0.5),
-                dynamic_scale=self.cross_attn_config.get("dynamic_scale", 0.3)
+                layer_weights=layer_weights
             )
             weight_display = f"[{', '.join(f'{w:.2f}' for w in layer_weights)}]" if layer_weights else f"{self.last_weight:.2f}"
             print(f"Scaffold influence: weight={weight_display}, blend_strength={blend_strength if blend_strength is not None else 'unchanged'}")
@@ -985,48 +1036,35 @@ class SOVLSystem:
             print(f"Error setting scaffold influence: {str(e)}")
 
     def tune_cross_attention(self, weight=None, blend_strength=None, layer_weights=None, dynamic_mode=None):
-        if layer_weights is not None:
-            layers = (
-                CrossAttentionInjector(
-                    hidden_size=self.core_config.get("hidden_size", self.base_config.hidden_size),
-                    num_heads=self.base_config.num_attention_heads,
-                    logger=self.logger.record
-                ).get_cross_attention_layers(self.base_model, mode=self.core_config.get("layer_selection_mode", "balanced"))
-                if self.core_config.get("use_dynamic_layers", False)
-                else self.core_config.get("cross_attn_layers", [5, 7])
-            )
-            if len(layer_weights) != len(layers):
-                self.error_logger.record({
-                    "error": f"layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})",
+        """Tune cross-attention settings, updating dynamic mode and delegating weight adjustments."""
+        # Update weights via set_scaffold_influence
+        if any(param is not None for param in [weight, blend_strength, layer_weights]):
+            self.set_scaffold_influence(weight, blend_strength, layer_weights)
+
+        # Handle dynamic mode
+        if dynamic_mode is not None:
+            valid_modes = ['confidence', 'temperament', 'off']
+            if dynamic_mode in valid_modes:
+                self.dynamic_cross_attn_mode = dynamic_mode if dynamic_mode != 'off' else None
+                self.config_manager.update("controls_config.dynamic_cross_attn_mode", self.dynamic_cross_attn_mode)
+                self.controls_config["dynamic_cross_attn_mode"] = self.dynamic_cross_attn_mode
+                print(f"Dynamic cross-attention set to: {dynamic_mode}")
+                self.logger.record({
+                    "event": "tune_cross_attention",
+                    "dynamic_mode": dynamic_mode,
                     "timestamp": time.time(),
                     "conversation_id": self.history.conversation_id,
                     "state_hash": self.state.state_hash()
                 })
-                print(f"Error: layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})")
-                return
-
-        self.set_scaffold_influence(weight, blend_strength, layer_weights)
-
-        if dynamic_mode in ['confidence', 'temperament', 'off']:
-            self.dynamic_cross_attn_mode = dynamic_mode if dynamic_mode != 'off' else None
-            self.config_manager.update("controls_config.dynamic_cross_attn_mode", self.dynamic_cross_attn_mode)
-            self.controls_config["dynamic_cross_attn_mode"] = self.dynamic_cross_attn_mode
-            print(f"Dynamic cross-attention set to: {dynamic_mode}")
-            self.logger.record({
-                "event": "tune_cross_attention",
-                "dynamic_mode": dynamic_mode,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-        elif dynamic_mode is not None:
-            self.error_logger.record({
-                "error": f"Invalid dynamic_mode: {dynamic_mode}. Use: 'confidence', 'temperament', or 'off'",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print("Invalid dynamic_mode. Use: 'confidence', 'temperament', or 'off'")
+            else:
+                error_msg = f"Invalid dynamic_mode: {dynamic_mode}. Use: {', '.join(valid_modes)}"
+                self.error_logger.record({
+                    "error": error_msg,
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id,
+                    "state_hash": self.state.state_hash()
+                })
+                print(error_msg)
 
     def set_quantization_mode(self, mode):
         if mode in ["fp16", "int8", "int4"] and mode != self.quantization_mode:
@@ -1247,12 +1285,7 @@ class SOVLSystem:
                 torch.save(self.scaffolds[0].state_dict(), f"{path_prefix}_scaffold.pth")
 
                 # Save cross-attention
-                injector = CrossAttentionInjector(
-                    hidden_size=self.core_config.get("hidden_size", self.base_config.hidden_size),
-                    num_heads=self.base_config.num_attention_heads,
-                    logger=self.logger.record
-                )
-                injector.save_state(f"{path_prefix}_cross_attn.pth", self.base_model.state_dict())
+                self.cross_attention_injector.save_state(f"{path_prefix}_cross_attn.pth", self.base_model)
 
                 # Save token map
                 with open(f"{path_prefix}_token_map.json", "w") as f:
@@ -1307,13 +1340,18 @@ class SOVLSystem:
                     print("Scaffold state loaded.")
 
                 if os.path.exists(f"{path_prefix}_cross_attn.pth"):
-                    injector = CrossAttentionInjector(
-                        hidden_size=self.core_config.get("hidden_size", self.base_config.hidden_size),
-                        num_heads=self.base_config.num_attention_heads,
-                        logger=self.logger.record
-                    )
-                    injector.load_state(f"{path_prefix}_cross_attn.pth", self.base_model)
-                    print("Cross-attention state loaded.")
+                    try:
+                        self.cross_attention_injector.load_state(f"{path_prefix}_cross_attn.pth", self.base_model)
+                        print("Cross-attention state loaded.")
+                    except Exception as e:
+                        self.error_logger.record({
+                            "error": f"Failed to load cross-attention state: {str(e)}",
+                            "timestamp": time.time(),
+                            "stack_trace": traceback.format_exc(),
+                            "conversation_id": self.history.conversation_id,
+                            "state_hash": self.state.state_hash()
+                        })
+                        print(f"Warning: Cross-attention state load failed: {e}. Continuing without it.")
 
                 if os.path.exists(f"{path_prefix}_token_map.json"):
                     with open(f"{path_prefix}_token_map.json", "r") as f:
