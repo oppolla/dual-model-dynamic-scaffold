@@ -11,6 +11,135 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
 
+def create_sparse_mask(
+    seq_len: int,
+    sparse_pattern: str,
+    window_size: int,
+    device: str = 'cpu',
+    logger: Logger = None
+) -> torch.Tensor:
+    """
+    Create a sparse attention mask based on the specified pattern.
+    """
+    try:
+        with NumericalGuard():
+            if sparse_pattern == 'window':
+                mask = torch.zeros(seq_len, seq_len, device=device)
+                for i in range(seq_len):
+                    start = max(0, i - window_size // 2)
+                    end = min(seq_len, i + window_size // 2 + 1)
+                    mask[i, start:end] = 1.0
+                return mask.bool()
+            elif sparse_pattern == 'block':
+                mask = torch.zeros(seq_len, seq_len, device=device)
+                for i in range(0, seq_len, window_size):
+                    mask[i:i + window_size, i:i + window_size] = 1.0
+                return mask.bool()
+            else:
+                raise ValueError(f"Unknown sparse pattern: {sparse_pattern}")
+    except Exception as e:
+        if logger:
+            logger.record({
+                "error": f"Sparse mask creation failed: {str(e)}",
+                "sparse_pattern": sparse_pattern,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+        raise
+
+def prepare_attention_mask(
+    attention_mask: torch.Tensor,
+    batch_size: int,
+    num_heads: int,
+    seq_len: int,
+    device: torch.device,
+    logger: Logger = None
+) -> torch.Tensor:
+    """
+    Prepare attention mask in additive format for multi-head attention.
+
+    """
+    try:
+        with NumericalGuard():
+            if attention_mask is None:
+                return None
+            if attention_mask.dim() < 2 or attention_mask.dim() > 4:
+                raise ValueError(f"Invalid attention mask dimensions: {attention_mask.shape}")
+            if attention_mask.dtype == torch.bool:
+                attention_mask = attention_mask.float().masked_fill(~attention_mask, float('-inf'))
+            elif attention_mask.dtype != torch.float:
+                attention_mask = attention_mask.float()
+            if attention_mask.dim() == 2:
+                attention_mask = attention_mask.unsqueeze(0).unsqueeze(1)
+            elif attention_mask.dim() == 3:
+                attention_mask = attention_mask.unsqueeze(1)
+            if attention_mask.shape != (batch_size, num_heads, seq_len, seq_len):
+                attention_mask = attention_mask.expand(batch_size, num_heads, seq_len, seq_len)
+            return attention_mask.to(device)
+    except Exception as e:
+        if logger:
+            logger.record({
+                "error": f"Attention mask preparation failed: {str(e)}",
+                "mask_shape": list(attention_mask.shape) if attention_mask is not None else None,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+        raise
+
+class LayerDiscoveryStrategy:
+    """
+    Strategy for discovering transformer layers in a model.
+    """
+    def __init__(self, logger: Logger):
+        self.logger = logger
+        self.patterns = [
+            'h.{i}',
+            'layer.{i}',
+            'layers.{i}',
+            'transformer.h.{i}',
+            'decoder.layers.{i}',
+        ]
+
+    def find_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
+        """
+        Find layers suitable for cross-attention injection.
+        """
+        try:
+            candidates = []
+            names = []
+
+            # Try specific patterns first
+            for name, module in model.named_modules():
+                if any(pattern.split('.')[0] in name for pattern in self.patterns):
+                    if isinstance(module, nn.ModuleList):
+                        candidates.extend(module)
+                        names.extend([f"{name}.{i}" for i in range(len(module))])
+
+            # Fallback to any ModuleList
+            if not candidates:
+                for name, module in model.named_modules():
+                    if isinstance(module, nn.ModuleList):
+                        candidates.extend(module)
+                        names.extend([f"{name}.{i}" for i in range(len(module))])
+
+            # Last resort: collect modules with 'layer' in name
+            if not candidates:
+                for name, module in model.named_modules():
+                    if 'layer' in name.lower() and isinstance(module, nn.Module):
+                        candidates.append(module)
+                        names.append(name)
+
+            if not candidates:
+                raise ValueError("No suitable layers found for cross-attention injection")
+
+            return candidates, names
+        except Exception as e:
+            self.logger.record({
+                "error": f"Layer discovery failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
 
 class CrossAttentionLayer(nn.Module):
     """
@@ -21,7 +150,8 @@ class CrossAttentionLayer(nn.Module):
         config_manager: ConfigManager,
         logger: Logger,
         hidden_size: Optional[int] = None,
-        num_heads: Optional[int] = None
+        num_heads: Optional[int] = None,
+        device: str = 'cpu'  # New parameter
     ):
         """
         Initialize the cross-attention layer.
@@ -31,64 +161,34 @@ class CrossAttentionLayer(nn.Module):
             logger: Logger instance for recording events
             hidden_size: Size of input embeddings (overrides config)
             num_heads: Number of attention heads (overrides config)
+            device: Device to initialize tensors on
         """
         super().__init__()
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
+        self.device = device
 
-        # Load config parameters
-        self.hidden_size = hidden_size or config_manager.get("core_config.hidden_size", 768)
-        self.num_heads = num_heads or config_manager.get("core_config.num_heads", 12)
-        self.dropout_rate = config_manager.get("controls_config.dropout_rate", 0.1)
-        self.use_gating = config_manager.get("controls_config.use_gating", True)
-        self.scale_attention = config_manager.get("controls_config.scale_attention", True)
-        self.use_residual = config_manager.get("controls_config.use_residual", True)
-        self.use_pooling = config_manager.get("controls_config.use_pooling", False)
-        self.use_sparse_attention = config_manager.get("controls_config.use_sparse_attention", False)
-        self.gradient_checkpointing = config_manager.get("core_config.gradient_checkpointing", False)
-        self.quantization_mode = config_manager.get("core_config.quantization", "fp16")
-        self.sparse_pattern = config_manager.get("controls_config.sparse_pattern", "window")
-        self.sparse_window_size = config_manager.get("controls_config.sparse_window_size", 128)
-        self.max_seq_len = config_manager.get("training_config.max_seq_length", 512)
+        # Load configuration
+        self.load_config(hidden_size, num_heads)
 
+        # Validate configuration
         assert self.hidden_size % self.num_heads == 0, "hidden_size must be divisible by num_heads"
         self.head_dim = self.hidden_size // self.num_heads
         self.scale = self.head_dim ** -0.5 if self.scale_attention else 1.0
 
         # Dynamic control parameters
         self.influence_weight = nn.Parameter(
-            torch.tensor(config_manager.get("controls_config.scaffold_weight_cap", 1.0)),
+            torch.tensor(self.config_manager.get("controls_config.scaffold_weight_cap", 1.0)),
             requires_grad=False
         )
         self.blend_strength = nn.Parameter(
-            torch.tensor(config_manager.get("controls_config.dream_prompt_weight", 0.5)),
+            torch.tensor(self.config_manager.get("controls_config.dream_prompt_weight", 0.5)),
             requires_grad=False
         )
 
         # Attention projections
-        try:
-            if self.quantization_mode in ['int8', 'int4']:
-                from bitsandbytes.nn import Linear8bitLt, Linear4bit
-                LinearCls = Linear8bitLt if self.quantization_mode == 'int8' else Linear4bit
-                self.q_proj = LinearCls(self.hidden_size, self.hidden_size)
-                self.k_proj = LinearCls(self.hidden_size, self.hidden_size)
-                self.v_proj = LinearCls(self.hidden_size, self.hidden_size)
-                self.out_proj = LinearCls(self.hidden_size, self.hidden_size)
-            else:
-                self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
-                self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
-                self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
-                self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
-        except ImportError:
-            self.logger.record({
-                "warning": f"bitsandbytes not installed, falling back to {self.quantization_mode}",
-                "timestamp": time.time()
-            })
-            self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
-            self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
-            self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
-            self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self._init_projections()
 
         # Gating mechanism
         if self.use_gating:
@@ -111,6 +211,54 @@ class CrossAttentionLayer(nn.Module):
         # Initialize weights
         self._init_weights()
 
+    def load_config(self, hidden_size: Optional[int], num_heads: Optional[int]):
+        """Load and validate configuration parameters."""
+        self.hidden_size = hidden_size or self.config_manager.get("core_config.hidden_size", 768)
+        self.num_heads = num_heads or self.config_manager.get("core_config.num_heads", 12)
+        self.dropout_rate = self.config_manager.get("controls_config.dropout_rate", 0.1)
+        self.use_gating = self.config_manager.get("controls_config.use_gating", True)
+        self.scale_attention = self.config_manager.get("controls_config.scale_attention", True)
+        self.use_residual = self.config_manager.get("controls_config.use_residual", True)
+        self.use_pooling = self.config_manager.get("controls_config.use_pooling", False)
+        self.use_sparse_attention = self.config_manager.get("controls_config.use_sparse_attention", False)
+        self.gradient_checkpointing = self.config_manager.get("core_config.gradient_checkpointing", False)
+        self.quantization_mode = self.config_manager.get("core_config.quantization", "fp16")
+        self.sparse_pattern = self.config_manager.get("controls_config.sparse_pattern", "window")
+        self.sparse_window_size = self.config_manager.get("controls_config.sparse_window_size", 128)
+        self.max_seq_len = self.config_manager.get("training_config.max_seq_length", 512)
+
+    def _init_projections(self):
+        """Initialize attention projection layers with quantization support."""
+        try:
+            if self.quantization_mode in ['int8', 'int4']:
+                try:
+                    from bitsandbytes.nn import Linear8bitLt, Linear4bit
+                    LinearCls = Linear8bitLt if self.quantization_mode == 'int8' else Linear4bit
+                    self.q_proj = LinearCls(self.hidden_size, self.hidden_size)
+                    self.k_proj = LinearCls(self.hidden_size, self.hidden_size)
+                    self.v_proj = LinearCls(self.hidden_size, self.hidden_size)
+                    self.out_proj = LinearCls(self.hidden_size, self.hidden_size)
+                    return  # Exit early if successful
+                except ImportError:
+                    self.logger.record({
+                        "warning": f"bitsandbytes not installed, falling back to fp16",
+                        "timestamp": time.time()
+                    })
+                    self.quantization_mode = 'fp16'  # Update mode to avoid downstream issues
+
+            # Default to standard linear layers
+            self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
+            self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
+            self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
+            self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        except Exception as e:
+            self.logger.record({
+                "error": f"Projection initialization failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
+
     def _init_weights(self):
         """Initialize weights with model-specific scaling."""
         gain = self.config_manager.get("core_config.initializer_range", 0.02)
@@ -123,32 +271,14 @@ class CrossAttentionLayer(nn.Module):
             nn.init.constant_(self.gate[0].bias, 0.0)
 
     def _init_sparse_mask(self) -> torch.Tensor:
-        """Initialize sparse attention mask based on pattern."""
-        try:
-            with NumericalGuard():
-                if self.sparse_pattern == 'window':
-                    mask = torch.zeros(self.max_seq_len, self.max_seq_len)
-                    for i in range(self.max_seq_len):
-                        start = max(0, i - self.sparse_window_size // 2)
-                        end = min(self.max_seq_len, i + self.sparse_window_size // 2 + 1)
-                        mask[i, start:end] = 1.0
-                    return mask.bool()
-                elif self.sparse_pattern == 'block':
-                    block_size = self.sparse_window_size
-                    mask = torch.zeros(self.max_seq_len, self.max_seq_len)
-                    for i in range(0, self.max_seq_len, block_size):
-                        mask[i:i + block_size, i:i + block_size] = 1.0
-                    return mask.bool()
-                else:
-                    raise ValueError(f"Unknown sparse pattern: {self.sparse_pattern}")
-        except Exception as e:
-            self.logger.record({
-                "error": f"Sparse mask initialization failed: {str(e)}",
-                "sparse_pattern": self.sparse_pattern,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+        """Initialize sparse attention mask using utility function."""
+        return create_sparse_mask(
+            seq_len=self.max_seq_len,
+            sparse_pattern=self.sparse_pattern,
+            window_size=self.sparse_window_size,
+            device=self.device,  # Use layer's device
+            logger=self.logger
+        )
 
     def _prepare_attention_mask(
         self,
@@ -157,30 +287,15 @@ class CrossAttentionLayer(nn.Module):
         seq_len: int,
         device: torch.device
     ) -> Optional[torch.Tensor]:
-        """Prepare attention mask in additive format."""
-        try:
-            if attention_mask is None:
-                return None
-            with NumericalGuard():
-                if attention_mask.dtype == torch.bool:
-                    attention_mask = attention_mask.float().masked_fill(~attention_mask, float('-inf'))
-                elif attention_mask.dtype != torch.float:
-                    attention_mask = attention_mask.float()
-                if attention_mask.dim() == 2:
-                    attention_mask = attention_mask.unsqueeze(0).unsqueeze(1)
-                elif attention_mask.dim() == 3:
-                    attention_mask = attention_mask.unsqueeze(1)
-                if attention_mask.shape != (batch_size, self.num_heads, seq_len, seq_len):
-                    attention_mask = attention_mask.expand(batch_size, self.num_heads, seq_len, seq_len)
-                return attention_mask.to(device)
-        except Exception as e:
-            self.logger.record({
-                "error": f"Attention mask preparation failed: {str(e)}",
-                "mask_shape": list(attention_mask.shape) if attention_mask is not None else None,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            return None
+        """Prepare attention mask using utility function."""
+        return prepare_attention_mask(
+            attention_mask=attention_mask,
+            batch_size=batch_size,
+            num_heads=self.num_heads,
+            seq_len=seq_len,
+            device=device,
+            logger=self.logger
+        )
 
     def reset_cache(self):
         """Reset key-value cache for inference."""
@@ -521,43 +636,8 @@ class CrossAttentionInjector:
             raise
 
     def find_model_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
-        """
-        Identify layers suitable for cross-attention injection.
-        """
-        try:
-            candidates = []
-            names = []
-            search_patterns = [
-                'h.{i}',
-                'layer.{i}',
-                'layers.{i}',
-                'transformer.h.{i}',
-                'decoder.layers.{i}',
-            ]
-
-            for name, module in model.named_modules():
-                if any(pattern.split('.')[0] in name for pattern in search_patterns):
-                    if isinstance(module, nn.ModuleList):
-                        candidates.extend(module)
-                        names.extend([f"{name}.{i}" for i in range(len(module))])
-
-            if not candidates:
-                for name, module in model.named_modules():
-                    if isinstance(module, nn.ModuleList):
-                        candidates.extend(module)
-                        names.extend([f"{name}.{i}" for i in range(len(module))])
-
-            if not candidates:
-                raise ValueError("No suitable layers found for cross-attention injection")
-
-            return candidates, names
-        except Exception as e:
-            self.logger.record({
-                "error": f"Layer finding failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+        strategy = LayerDiscoveryStrategy(self.logger)
+        return strategy.find_layers(model)
 
     def inject(
         self,
@@ -573,6 +653,7 @@ class CrossAttentionInjector:
         try:
             with self.lock:
                 injection_strategy = injection_strategy or self.config_manager.get("controls_config.injection_strategy", "sequential")
+                allow_empty_layers = self.config_manager.get("controls_config.allow_empty_layers", False)
                 if isinstance(scaffold_model, nn.Module):
                     scaffold_models = [scaffold_model]
                 else:
@@ -592,7 +673,9 @@ class CrossAttentionInjector:
 
                 # Determine layers to inject
                 layers_to_inject = self.get_cross_attention_layers(base_model, layers_to_inject)
-                if not layers_to_inject:
+                if not layers_to_inject and not allow_empty_layers:
+                    raise ValueError("No layers selected for cross-attention injection")
+                elif not layers_to_inject:
                     self.logger.record({
                         "warning": "No layers selected for cross-attention injection",
                         "timestamp": time.time()
@@ -662,7 +745,15 @@ class CrossAttentionInjector:
                 super().__init__()
                 self.cross_attn = cross_attn
                 self.scaffolds = scaffolds
-                self.token_map = token_map or defaultdict(lambda: [parent.scaffold_unk_id])
+                if token_map is None:
+                    parent.logger.record({
+                        "warning": "Token map is None, using default scaffold_unk_id",
+                        "scaffold_unk_id": parent.scaffold_unk_id,
+                        "timestamp": time.time()
+                    })
+                    self.token_map = defaultdict(lambda: [parent.scaffold_unk_id])
+                else:
+                    self.token_map = token_map
                 self._parent = parent
 
             def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
@@ -699,7 +790,15 @@ class CrossAttentionInjector:
                 self.base_layer = base_layer
                 self.cross_attn = cross_attn
                 self.scaffolds = scaffolds
-                self.token_map = token_map or defaultdict(lambda: [parent.scaffold_unk_id])
+                if token_map is None:
+                    parent.logger.record({
+                        "warning": "Token map is None, using default scaffold_unk_id",
+                        "scaffold_unk_id": parent.scaffold_unk_id,
+                        "timestamp": time.time()
+                    })
+                    self.token_map = defaultdict(lambda: [parent.scaffold_unk_id])
+                else:
+                    self.token_map = token_map
                 self._parent = parent
 
             def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
@@ -737,7 +836,15 @@ class CrossAttentionInjector:
                 self.base_layer = base_layer
                 self.cross_attn = cross_attn
                 self.scaffolds = scaffolds
-                self.token_map = token_map or defaultdict(lambda: [parent.scaffold_unk_id])
+                if token_map is None:
+                    parent.logger.record({
+                        "warning": "Token map is None, using default scaffold_unk_id",
+                        "scaffold_unk_id": parent.scaffold_unk_id,
+                        "timestamp": time.time()
+                    })
+                    self.token_map = defaultdict(lambda: [parent.scaffold_unk_id])
+                else:
+                    self.token_map = token_map
                 self.combine = nn.Linear(cross_attn.hidden_size * 2, cross_attn.hidden_size)
                 self._parent = parent
 
