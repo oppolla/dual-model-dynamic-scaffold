@@ -2,40 +2,18 @@
   "core_config": {
     "base_model_name": "gpt2",
     "scaffold_model_name": "gpt2",
-    "cross_attn_layers": [5, 7],
+    "cross_attn_layers": [],  // Empty for dynamic fallback
     "use_dynamic_layers": false,
     "layer_selection_mode": "balanced",
     "custom_layers": null,
     "valid_split_ratio": 0.2,
     "random_seed": 42,
-    "quantization": "fp16"
-  },
-  "lora_config": {
-    "lora_rank": 8,
-    "lora_alpha": 16,
-    "lora_dropout": 0.1,
-    "lora_target_modules": ["c_attn", "c_proj", "c_fc"]
-  },
-  "training_config": {
-    "learning_rate": 0.0003,
-    "train_epochs": 3,
-    "batch_size": 1,
-    "max_seq_length": 128,
-    "sigmoid_scale": 0.5,
-    "sigmoid_shift": 5.0,
-    "lifecycle_capacity_factor": 0.01,
-    "lifecycle_curve": "sigmoid_linear",
-    "accumulation_steps": 4,
-    "exposure_gain_eager": 3,
-    "exposure_gain_default": 2,
-    "max_patience": 2,
-    "dry_run": false,
-    "dry_run_params": {
-      "max_samples": 2,
-      "max_length": 128,
-      "validate_architecture": true,
-      "skip_training": true
-    }
+    "quantization": "fp16",
+    "hidden_size": 768,
+    "num_heads": 12,
+    "gradient_checkpointing": true,
+    "initializer_range": 0.02,
+    "migration_mode": true
   },
   "controls_config": {
     "sleep_conf_threshold": 0.7,
@@ -96,6 +74,37 @@
     "curiosity_base_temperature": 1.1,
     "curiosity_temperament_influence": 0.4,
     "curiosity_top_k": 30,
-    "enable_error_listening": true
+    "enable_error_listening": true,
+    "dropout_rate": 0.1,
+    "use_gating": true,
+    "scale_attention": true,
+    "use_residual": true,
+    "use_pooling": false,
+    "use_sparse_attention": false,
+    "sparse_pattern": "window",
+    "sparse_window_size": 128,
+    "injection_strategy": "sequential",
+    "token_map": null
+  },
+  "training_config": {
+    "learning_rate": 0.0003,
+    "train_epochs": 3,
+    "batch_size": 1,
+    "max_seq_length": 512,  // Increased for flexibility
+    "sigmoid_scale": 0.5,
+    "sigmoid_shift": 5.0,
+    "lifecycle_capacity_factor": 0.01,
+    "lifecycle_curve": "sigmoid_linear",
+    "accumulation_steps": 4,
+    "exposure_gain_eager": 3,
+    "exposure_gain_default": 2,
+    "max_patience": 2,
+    "dry_run": false,
+    "dry_run_params": {
+      "max_samples": 2,
+      "max_length": 128,
+      "validate_architecture": true,
+      "skip_training": true
+    }
   }
 }
