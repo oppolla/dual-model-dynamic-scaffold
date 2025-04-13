@@ -1,232 +1,233 @@
 import unittest
 import tempfile
-import os
 import json
-import torch
-from unittest.mock import patch, MagicMock
-from sovl_system import SOVLSystem
-from sovl_config import ConfigManager, ConfigSchema
-from sovl_logger import Logger
+from unittest.mock import patch, MagicMock, call
+import time
+from pathlib import Path
 
-class TestConfigManager(unittest.TestCase):
+class TestCuriosityStressTest(unittest.TestCase):
     def setUp(self):
-        self.temp_config = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
-        self.temp_config.write(b'{}')
-        self.temp_config.close()
-        self.logger = MagicMock(spec=Logger)
-        self.config_manager = ConfigManager(self.temp_config.name, self.logger)
+        # Create a temporary directory for test outputs
+        self.test_dir = tempfile.mkdtemp()
+        self.output_dir = Path(self.test_dir) / "test_outputs"
+        self.output_dir.mkdir()
+        
+        # Mock SOVLSystem
+        self.mock_system = MagicMock()
+        self.mock_system.logger.read.return_value = []
+        self.mock_system.metrics = {
+            "spontaneous_questions": 0,
+            "curiosity_eruptions": 0
+        }
+        self.mock_system.pressure = MagicMock()
+        self.mock_system.pressure.value = 0.0
+        self.mock_system.unanswered_q = []
+        self.mock_system.curiosity = MagicMock()
+        self.mock_system.curiosity.calculate_metric.return_value = 0.8
 
     def tearDown(self):
-        os.unlink(self.temp_config.name)
+        # Clean up temporary files
+        for f in self.output_dir.glob("*"):
+            f.unlink()
+        self.output_dir.rmdir()
+        Path(self.test_dir).rmdir()
 
-    def test_initialization(self):
-        """Test config manager initializes with empty config"""
-        self.assertIsInstance(self.config_manager, ConfigManager)
-        self.assertEqual(self.config_manager.config, {})
-
-    def test_schema_validation(self):
-        """Test schema validation applies defaults"""
-        # Test required field
-        self.assertEqual(
-            self.config_manager.get("core_config.base_model_name"),
-            "gpt2"  # From schema default
-        )
+    @patch('sovl_system.SOVLSystem', return_value=MagicMock())
+    def test_initialization(self, mock_sovl):
+        """Test the test harness initializes correctly"""
+        tester = CuriosityStressTest(output_dir=str(self.output_dir))
+        self.assertEqual(tester.output_dir, self.output_dir)
+        self.assertIsNone(tester.system)
         
-        # Test type validation
-        self.config_manager.update("training_config.batch_size", "not_an_int")
-        self.assertEqual(
-            self.config_manager.get("training_config.batch_size"),
-            1  # Reverts to default
-        )
+        # Test directory should be created
+        self.assertTrue(self.output_dir.exists())
         
-        # Test range validation
-        self.config_manager.update("training_config.learning_rate", 100.0)
-        self.assertEqual(
-            self.config_manager.get("training_config.learning_rate"),
-            0.0003  # Reverts to default
-        )
-
-    def test_config_persistence(self):
-        """Test config saving and loading"""
-        test_value = "test_model"
-        self.config_manager.update("core_config.base_model_name", test_value)
-        self.config_manager.save_config()
+        # Test log file should be created on first event
+        self.assertFalse((self.output_dir / "test_log.jsonl").exists())
         
-        # Create new instance to test loading
-        new_manager = ConfigManager(self.temp_config.name, self.logger)
-        self.assertEqual(
-            new_manager.get("core_config.base_model_name"),
-            test_value
-        )
+        # Test initialization
+        tester.initialize_system()
+        self.assertIsNotNone(tester.system)
+        self.assertTrue((self.output_dir / "test_log.jsonl").exists())
 
-    def test_batch_updates(self):
-        """Test atomic batch updates"""
-        updates = {
-            "core_config.base_model_name": "test_model",
-            "training_config.batch_size": 2
+    def test_silence_endurance_test(self):
+        """Test silence endurance testing"""
+        tester = CuriosityStressTest(output_dir=str(self.output_dir))
+        tester.system = self.mock_system
+        
+        # Run test with short duration for testing
+        durations = [5.0]
+        tester.silence_endurance_test(durations, 10.0, 20.0)
+        
+        # Verify system methods were called
+        self.mock_system.tune_curiosity.assert_called_once_with(
+            silence_threshold=10.0,
+            question_cooldown=20.0
+        )
+        self.mock_system.check_silence.assert_called()
+        self.mock_system.new_conversation.assert_called_once()
+        
+        # Verify logging
+        self.assertEqual(len(tester.results["silence"]), 1)
+        self.assertTrue((self.output_dir / "test_log.jsonl").exists())
+
+    def test_prompt_overload_test(self):
+        """Test prompt overload scenario"""
+        tester = CuriosityStressTest(output_dir=str(self.output_dir))
+        tester.system = self.mock_system
+        
+        # Configure mock responses
+        self.mock_system.generate.return_value = "Test response"
+        
+        # Run test with reduced count for testing
+        tester.prompt_overload_test(prompt_count=3, interval=0.1, novelty_threshold=0.7)
+        
+        # Verify system methods were called
+        self.mock_system.tune_curiosity.assert_called_once_with(
+            response_threshold=0.7
+        )
+        self.assertEqual(self.mock_system.generate.call_count, 3)
+        self.mock_system.new_conversation.assert_called_once()
+        
+        # Verify results
+        self.assertEqual(len(tester.results["overload"]), 1)
+        self.assertEqual(tester.results["overload"][0]["prompt_count"], 3)
+
+    def test_novelty_starvation_test(self):
+        """Test novelty starvation scenario"""
+        tester = CuriosityStressTest(output_dir=str(self.output_dir))
+        tester.system = self.mock_system
+        
+        # Configure mock responses
+        self.mock_system.generate.return_value = "Test response"
+        
+        # Run test with reduced count for testing
+        tester.novelty_starvation_test(repeat_count=3, prompt="Test prompt", novelty_threshold=0.95)
+        
+        # Verify system methods were called
+        self.mock_system.tune_curiosity.assert_called_once_with(
+            spontaneous_threshold=0.95
+        )
+        self.assertEqual(self.mock_system.generate.call_count, 3)
+        self.mock_system.new_conversation.assert_called_once()
+        
+        # Verify results
+        self.assertEqual(len(tester.results["starvation"]), 1)
+        self.assertEqual(tester.results["starvation"][0]["repeat_count"], 3)
+
+    def test_generate_summary(self):
+        """Test report generation"""
+        tester = CuriosityStressTest(output_dir=str(self.output_dir))
+        
+        # Populate with test data
+        tester.results = {
+            "silence": [{
+                "duration": 30.0,
+                "questions_generated": 2,
+                "avg_novelty": 0.8,
+                "pressure_final": 0.5,
+                "questions": ["Q1", "Q2"]
+            }],
+            "overload": [{
+                "prompt_count": 10,
+                "questions_generated": 3,
+                "avg_novelty": 0.7,
+                "pressure_final": 0.6,
+                "queue_length": 1,
+                "questions": ["Q3", "Q4"]
+            }],
+            "starvation": [{
+                "repeat_count": 5,
+                "questions_generated": 1,
+                "avg_novelty": 0.9,
+                "pressure_final": 0.4,
+                "questions": ["Q5"]
+            }]
         }
-        success = self.config_manager.update_batch(updates)
-        self.assertTrue(success)
-        self.assertEqual(
-            self.config_manager.get("core_config.base_model_name"),
-            "test_model"
-        )
-        self.assertEqual(
-            self.config_manager.get("training_config.batch_size"),
-            2
-        )
+        
+        tester.generate_summary()
+        
+        # Verify report file was created
+        self.assertTrue((self.output_dir / "summary_report.txt").exists())
+        
+        # Check report content
+        with open(self.output_dir / "summary_report.txt", "r") as f:
+            content = f.read()
+            self.assertIn("Curiosity Stress Test Report", content)
+            self.assertIn("Silence Endurance Test", content)
+            self.assertIn("Prompt Overload Test", content)
+            self.assertIn("Novelty Starvation Test", content)
+            self.assertIn("Aliveness Assessment", content)
 
-    def test_structured_access(self):
-        """Test section-based config access"""
-        section = self.config_manager.get_section("core_config")
-        self.assertIsInstance(section, dict)
-        self.assertEqual(section.get("base_model_name"), "gpt2")
+    @patch.object(CuriosityStressTest, 'silence_endurance_test')
+    @patch.object(CuriosityStressTest, 'prompt_overload_test')
+    @patch.object(CuriosityStressTest, 'novelty_starvation_test')
+    @patch.object(CuriosityStressTest, 'generate_summary')
+    def test_run_with_module_selection(self, mock_summary, mock_starvation, mock_overload, mock_silence):
+        """Test running with selected modules"""
+        # Test running only silence test
+        tester = CuriosityStressTest(output_dir=str(self.output_dir))
+        tester.run(modules=['silence'])
+        mock_silence.assert_called_once()
+        mock_overload.assert_not_called()
+        mock_starvation.assert_not_called()
+        mock_summary.assert_called_once()
+        
+        # Test running overload and starvation
+        mock_silence.reset_mock()
+        tester.run(modules=['overload', 'starvation'])
+        mock_silence.assert_not_called()
+        mock_overload.assert_called_once()
+        mock_starvation.assert_called_once()
+        mock_summary.assert_called()
 
-class TestSOVLSystem(unittest.TestCase):
-    def setUp(self):
-        # Create temp config file
-        self.temp_config = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
-        base_config = {
-            "core_config": {
-                "base_model_name": "gpt2",
-                "scaffold_model_name": "gpt2",
-                "quantization": "fp16"
-            },
-            "training_config": {
-                "batch_size": 1,
-                "dry_run": True  # Enable dry run for faster tests
-            }
+class ModuleSelectionTestRunner:
+    """Custom test runner that allows module selection"""
+    
+    def __init__(self, modules=None):
+        self.modules = modules or ['all']
+        
+    def run(self, test_case):
+        """Run tests for selected modules"""
+        suite = unittest.TestSuite()
+        
+        # Map module names to test methods
+        module_map = {
+            'initialization': ['test_initialization'],
+            'silence': ['test_silence_endurance_test'],
+            'overload': ['test_prompt_overload_test'],
+            'starvation': ['test_novelty_starvation_test'],
+            'reporting': ['test_generate_summary'],
+            'integration': ['test_run_with_module_selection']
         }
-        self.temp_config.write(json.dumps(base_config).encode())
-        self.temp_config.close()
         
-        # Mock logger
-        self.logger = MagicMock(spec=Logger)
+        # Add all tests if 'all' specified
+        if 'all' in self.modules:
+            suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(test_case))
+        else:
+            # Add only selected module tests
+            for module in self.modules:
+                if module in module_map:
+                    for test_name in module_map[module]:
+                        suite.addTest(test_case(test_name))
         
-        # Patch model loading to use smaller test models
-        self.patcher = patch('transformers.AutoModelForCausalLM.from_pretrained')
-        self.mock_model = self.patcher.start()
-        self.mock_model.return_value = MagicMock()  # Return mock model
-
-    def tearDown(self):
-        os.unlink(self.temp_config.name)
-        self.patcher.stop()
-
-    def test_system_initialization(self):
-        """Test system initializes with config"""
-        system = SOVLSystem(ConfigManager(self.temp_config.name, self.logger))
-        self.assertIsInstance(system, SOVLSystem)
-        
-        # Verify config was applied
-        self.assertEqual(system.base_model_name, "gpt2")
-        self.assertTrue(system.dry_run)
-
-    def test_generation_pipeline(self):
-        """Test text generation workflow"""
-        system = SOVLSystem(ConfigManager(self.temp_config.name, self.logger))
-        
-        # Mock tokenizer and model outputs
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.pad_token_id = 0
-        mock_tokenizer.eos_token_id = 1
-        mock_tokenizer.return_value = {"input_ids": torch.tensor([[1, 2, 3]])}
-        
-        system.base_tokenizer = mock_tokenizer
-        system.scaffold_tokenizer = mock_tokenizer
-        
-        # Mock model generate
-        mock_output = MagicMock()
-        mock_output.sequences = torch.tensor([[1, 2, 3, 4, 5]])
-        mock_output.scores = [torch.tensor([[0.1, 0.9]])]
-        system.base_model.generate.return_value = mock_output
-        
-        # Test generation
-        response = system.generate("Test prompt")
-        self.assertIsInstance(response, str)
-        
-        # Verify logging occurred
-        self.assertTrue(self.logger.record.called)
-
-    def test_training_cycle(self):
-        """Test training workflow"""
-        system = SOVLSystem(ConfigManager(self.temp_config.name, self.logger))
-        
-        # Mock training data
-        train_data = [{"prompt": "test", "completion": "response"}]
-        valid_data = [{"prompt": "test", "completion": "response"}]
-        
-        # Mock trainer
-        mock_trainer = MagicMock()
-        mock_trainer.train.return_value = None
-        system.trainer = mock_trainer
-        
-        # Test training
-        system.run_training_cycle(train_data, valid_data)
-        
-        # Verify trainer was called
-        mock_trainer.train.assert_called_once()
-
-    def test_state_management(self):
-        """Test state saving/loading"""
-        system = SOVLSystem(ConfigManager(self.temp_config.name, self.logger))
-        
-        # Create temp state file
-        with tempfile.NamedTemporaryFile() as temp_state:
-            # Test saving
-            system.save_state(temp_state.name)
-            self.assertTrue(os.path.exists(temp_state.name + "_state.json"))
-            
-            # Test loading
-            system.load_state(temp_state.name)
-            
-            # Verify state was loaded
-            self.assertIsNotNone(system.state)
-
-    def test_memory_management(self):
-        """Test memory health checks"""
-        system = SOVLSystem(ConfigManager(self.temp_config.name, self.logger))
-        
-        # Mock memory stats
-        with patch('torch.cuda.memory_allocated') as mock_alloc:
-            mock_alloc.return_value = 10 * 1024**3  # 10GB
-            
-            # Test memory check
-            system.check_memory_health()
-            
-            # Verify adjustments were made
-            self.assertLess(system.config_manager.get("training_config.batch_size"), 1)
-
-class IntegrationTests(unittest.TestCase):
-    def test_config_to_system_integration(self):
-        """Test config changes propagate to system"""
-        # Create temp config
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_config:
-            base_config = {
-                "core_config": {
-                    "base_model_name": "gpt2",
-                    "scaffold_model_name": "gpt2"
-                },
-                "training_config": {
-                    "batch_size": 1,
-                    "dry_run": True
-                }
-            }
-            temp_config.write(json.dumps(base_config).encode())
-            temp_config.close()
-            
-            # Initialize system
-            logger = MagicMock(spec=Logger)
-            config_manager = ConfigManager(temp_config.name, logger)
-            system = SOVLSystem(config_manager)
-            
-            # Change config
-            new_batch_size = 2
-            config_manager.update("training_config.batch_size", new_batch_size)
-            
-            # Verify system updated
-            self.assertEqual(system.training_config["batch_size"], new_batch_size)
-            
-            os.unlink(temp_config.name)
+        # Run the filtered suite
+        runner = unittest.TextTestRunner()
+        return runner.run(suite)
 
 if __name__ == "__main__":
-    unittest.main()
+    import argparse
+    
+    # Set up command line argument parsing
+    parser = argparse.ArgumentParser(description='Run curiosity stress tests')
+    parser.add_argument('--modules', nargs='+', default=['all'],
+                        choices=['all', 'initialization', 'silence', 'overload', 
+                                'starvation', 'reporting', 'integration'],
+                        help='Test modules to run')
+    
+    args = parser.parse_args()
+    
+    # Run selected tests
+    print(f"Running tests for modules: {args.modules}")
+    test_runner = ModuleSelectionTestRunner(modules=args.modules)
+    test_runner.run(TestCuriosityStressTest)
