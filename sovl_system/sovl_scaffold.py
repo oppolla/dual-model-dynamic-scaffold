@@ -11,6 +11,7 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
 
+
 class CrossAttentionLayer(nn.Module):
     """
     Enhanced cross-attention layer with gating, memory efficiency, and dynamic control.
@@ -185,6 +186,7 @@ class CrossAttentionLayer(nn.Module):
         """Reset key-value cache for inference."""
         with self.lock:
             self.kv_cache = None
+            self.use_cache = False
             self.logger.record({
                 "event": "cache_reset",
                 "timestamp": time.time()
@@ -233,6 +235,17 @@ class CrossAttentionLayer(nn.Module):
         try:
             with NumericalGuard(dtype=torch.float16 if self.quantization_mode == 'fp16' else torch.float32):
                 batch_size = hidden_states.size(0)
+
+                # Log input shapes for debugging
+                self.logger.record({
+                    "event": "cross_attention_forward",
+                    "hidden_states_shape": list(hidden_states.shape),
+                    "cross_states_shape": list(cross_states.shape),
+                    "memory_tensors_shape": list(memory_tensors.shape) if memory_tensors is not None else None,
+                    "memory_weight": memory_weight,
+                    "use_cache": use_cache,
+                    "timestamp": time.time()
+                })
 
                 # Validate inputs
                 if hidden_states.dim() != 3 or cross_states.dim() != 3:
@@ -413,6 +426,7 @@ class CrossAttentionInjector:
         self.gradient_checkpointing = config_manager.get("core_config.gradient_checkpointing", False)
         self.custom_layers = config_manager.get("core_config.cross_attn_layers", [])
         self.quantization_mode = config_manager.get("core_config.quantization", "fp16")
+        self.scaffold_unk_id = config_manager.get("controls_config.scaffold_unk_id", 0)
         self.scaffold_proj = None
 
     def get_cross_attention_layers(self, model: nn.Module, mode: Optional[str] = None) -> List[int]:
@@ -589,6 +603,7 @@ class CrossAttentionInjector:
                     "event": "injection_start",
                     "layers_to_inject": layers_to_inject,
                     "injection_strategy": injection_strategy,
+                    "token_map_provided": token_map is not None,
                     "timestamp": time.time()
                 })
 
@@ -647,7 +662,7 @@ class CrossAttentionInjector:
                 super().__init__()
                 self.cross_attn = cross_attn
                 self.scaffolds = scaffolds
-                self.token_map = token_map or defaultdict(lambda: [0])
+                self.token_map = token_map or defaultdict(lambda: [parent.scaffold_unk_id])
                 self._parent = parent
 
             def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
@@ -684,7 +699,7 @@ class CrossAttentionInjector:
                 self.base_layer = base_layer
                 self.cross_attn = cross_attn
                 self.scaffolds = scaffolds
-                self.token_map = token_map or defaultdict(lambda: [0])
+                self.token_map = token_map or defaultdict(lambda: [parent.scaffold_unk_id])
                 self._parent = parent
 
             def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
@@ -722,7 +737,7 @@ class CrossAttentionInjector:
                 self.base_layer = base_layer
                 self.cross_attn = cross_attn
                 self.scaffolds = scaffolds
-                self.token_map = token_map or defaultdict(lambda: [0])
+                self.token_map = token_map or defaultdict(lambda: [parent.scaffold_unk_id])
                 self.combine = nn.Linear(cross_attn.hidden_size * 2, cross_attn.hidden_size)
                 self._parent = parent
 
@@ -796,7 +811,8 @@ class CrossAttentionInjector:
         try:
             with self.lock:
                 state_dict = model.state_dict()
-                state_dict.update(torch.load(path, map_location=model.device))
+                checkpoint_dict = torch.load(path, map_location=model.device)
+                state_dict.update({k: v for k, v in checkpoint_dict.items() if k in state_dict})
                 model.load_state_dict(state_dict)
                 self.logger.record({
                     "event": "load_state",
@@ -817,10 +833,18 @@ def inject_cross_attention(
     base_model: nn.Module,
     scaffold_model: Union[nn.Module, List[nn.Module]],
     config_manager: ConfigManager,
-    logger: Logger
+    logger: Logger,
+    token_map: Optional[Dict] = None
 ) -> nn.Module:
     """
     Inject cross-attention layers with configuration from ConfigManager.
+
+    Args:
+        base_model: The base transformer model
+        scaffold_model: The scaffold model(s) providing context
+        config_manager: ConfigManager instance for parameters
+        logger: Logger instance for recording events
+        token_map: Optional token mapping dictionary
     """
     try:
         injector = CrossAttentionInjector(config_manager, logger)
@@ -829,7 +853,7 @@ def inject_cross_attention(
             scaffold_model=scaffold_model,
             layers_to_inject=config_manager.get("core_config.layer_selection_mode", "balanced"),
             injection_strategy=config_manager.get("controls_config.injection_strategy", "sequential"),
-            token_map=config_manager.get("controls_config.token_map", None)
+            token_map=token_map
         )
     except Exception as e:
         logger.record({
