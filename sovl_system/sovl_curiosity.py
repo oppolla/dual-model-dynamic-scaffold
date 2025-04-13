@@ -249,12 +249,32 @@ class CuriosityManager:
         )
 
         query_embedding = None
-        if query:
+        if query and tokenizer and model:
             try:
-                inputs = tokenizer(query, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
+                inputs = tokenizer(
+                    query,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=512
+                ).to(self.device)
                 with torch.no_grad():
                     outputs = model(**inputs, output_hidden_states=True)
-                    query_embedding = outputs.hidden_states[-1][:, -1, :].squeeze()
+                    # Safely access hidden states
+                    hidden_states = (
+                        outputs.hidden_states[-1] if hasattr(outputs, 'hidden_states') else
+                        outputs.base_model_output.hidden_states[-1]
+                        if hasattr(outputs, 'base_model_output') and hasattr(outputs.base_model_output, 'hidden_states')
+                        else None
+                    )
+                    if hidden_states is not None:
+                        query_embedding = hidden_states[:, -1, :].squeeze()
+                    else:
+                        if self.logger:
+                            self.logger.record({
+                                "warning": "Model output lacks hidden states",
+                                "timestamp": time.time()
+                            })
             except Exception as e:
                 if self.logger:
                     self.logger.record({
@@ -262,20 +282,43 @@ class CuriosityManager:
                         "timestamp": time.time()
                     })
 
-        query_emb = query_embedding if query_embedding is not None else (
-            state.last_prompt_embedding if state.last_prompt_embedding is not None else
-            torch.zeros(self.config["default_hidden_size"], device=self.device)
+        # Validate dream memory
+        memory_embeddings = []
+        hidden_size = self.config["default_hidden_size"]
+        if hasattr(state, 'dream_memory') and state.dream_memory:
+            try:
+                for tensor, _ in state.dream_memory:
+                    if tensor.shape[-1] == hidden_size:
+                        memory_embeddings.append(tensor.to(self.device))
+                    else:
+                        if self.logger:
+                            self.logger.record({
+                                "warning": f"Dream memory tensor shape {tensor.shape} mismatches hidden_size {hidden_size}",
+                                "timestamp": time.time()
+                            })
+            except Exception as e:
+                if self.logger:
+                    self.logger.record({
+                        "error": f"Invalid dream memory format: {str(e)}",
+                        "timestamp": time.time()
+                    })
+
+        query_emb = (
+            query_embedding if query_embedding is not None else
+            state.last_prompt_embedding if hasattr(state, 'last_prompt_embedding') and state.last_prompt_embedding is not None else
+            torch.zeros(hidden_size, device=self.device)
         )
 
         score = self.curiosity.compute_curiosity(
             base_conf=base_conf,
             scaf_conf=scaf_conf,
-            memory_embeddings=list(state.dream_memory),
+            memory_embeddings=memory_embeddings,
             query_embedding=query_emb,
             device=self.device
         )
 
-        state.curiosity.novelty_scores.append(score)
+        if hasattr(state, 'curiosity') and hasattr(state.curiosity, 'novelty_scores'):
+            state.curiosity.novelty_scores.append(score)
         self.callbacks.trigger_callback("curiosity_computed", score=score)
         return score
 
@@ -293,11 +336,12 @@ class CuriosityManager:
             confidence (float): Current confidence score.
             silence_duration (float): Time since last interaction.
         """
+        silence_threshold = max(self.config["silence_threshold"], 1e-6)  # Prevent division by zero
         self.pressure.update(
             temperament=temperament,
             confidence=confidence,
             silence=silence_duration,
-            silence_threshold=self.config["silence_threshold"]
+            silence_threshold=silence_threshold
         )
         self.callbacks.trigger_callback("pressure_updated", pressure=self.pressure.value)
 
@@ -312,6 +356,13 @@ class CuriosityManager:
             bool: True if pressure erupts, False otherwise.
         """
         thresh = threshold if threshold is not None else self.config["pressure_threshold"]
+        if not (0.5 <= thresh <= 0.9):
+            thresh = 0.7  # Fallback to default
+            if self.logger:
+                self.logger.record({
+                    "warning": f"Invalid pressure threshold {thresh}, using default 0.7",
+                    "timestamp": time.time()
+                })
         erupted = self.pressure.should_erupt(thresh)
         if erupted:
             self.pressure.drop_pressure(self.config["pressure_drop"])
@@ -370,8 +421,8 @@ class CuriosityManager:
 
         # Select base prompt
         base_prompt = (
-            prompt if prompt else
-            (state.history.messages[-1]["prompt"] if state.history.messages else "What is this about?")
+            prompt if prompt and isinstance(prompt, str) else
+            (state.history.messages[-1]["prompt"] if hasattr(state, 'history') and state.history.messages else "What is this about?")
         )
 
         # Generate question
@@ -387,11 +438,15 @@ class CuriosityManager:
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=self.config["max_new_tokens"],
-                    temperature=self.config["base_temperature"] + self.config["temperament_influence"] * state.temperament_score,
+                    temperature=max(0.1, self.config["base_temperature"] + self.config["temperament_influence"] * state.temperament_score),
                     top_k=self.config["top_k"],
-                    do_sample=True
+                    do_sample=True,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id
                 )
             question = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+            if not question:
+                return None
 
             # Update state
             self.unanswered_questions.append((question, curiosity_score))
