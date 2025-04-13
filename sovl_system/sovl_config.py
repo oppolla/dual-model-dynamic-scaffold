@@ -1,6 +1,7 @@
 import json
 import os
 import gzip
+import hashlib  # Added for _compute_config_hash
 from typing import Any, Optional, Dict, List, Union, Callable
 from dataclasses import dataclass
 from threading import Lock
@@ -183,14 +184,16 @@ class ConfigManager:
                         "event": "config_load",
                         "config_file": self.config_file,
                         "config_hash": self._last_config_hash,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"  # Added for consistency
                     })
                     return
             except (FileNotFoundError, json.JSONDecodeError, gzip.BadGzipFile) as e:
                 self.logger.record({
                     "error": f"Attempt {attempt + 1} failed to load config {self.config_file}: {str(e)}",
                     "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
+                    "stack_trace": traceback.format_exc(),
+                    "conversation_id": "init"
                 })
                 if attempt == max_retries - 1:
                     self.config = {}
@@ -199,13 +202,15 @@ class ConfigManager:
                     self._update_cache()
                     self.logger.record({
                         "warning": f"Using empty config after {max_retries} failed attempts",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
             except Exception as e:
                 self.logger.record({
                     "error": f"Fatal error loading config: {str(e)}",
                     "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
+                    "stack_trace": traceback.format_exc(),
+                    "conversation_id": "init"
                 })
                 raise
             time.sleep(0.1)
@@ -219,7 +224,8 @@ class ConfigManager:
             self.logger.record({
                 "error": f"Config hash computation failed: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "init"
             })
             return ""
 
@@ -231,7 +237,8 @@ class ConfigManager:
                 self.logger.record({
                     "error": f"Required field {schema.field} is missing",
                     "suggested": f"Set to default: {schema.default}",
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
                 })
                 self._set_value(schema.field, schema.default)
                 continue
@@ -242,7 +249,8 @@ class ConfigManager:
                     self.logger.record({
                         "warning": f"Invalid type for {schema.field}: expected {schema.type.__name__}, got {type(value).__name__}",
                         "suggested": f"Set to default: {schema.default}",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     self._set_value(schema.field, schema.default)
                     continue
@@ -251,7 +259,8 @@ class ConfigManager:
                     self.logger.record({
                         "warning": f"Invalid value for {schema.field}: {value}",
                         "suggested": f"Valid options: {valid_options}, default: {schema.default}",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     self._set_value(schema.field, schema.default)
                     continue
@@ -261,7 +270,8 @@ class ConfigManager:
                         self.logger.record({
                             "warning": f"Value for {schema.field} out of range [{min_val}, {max_val}]: {value}",
                             "suggested": f"Set to default: {schema.default}",
-                            "timestamp": time.time()
+                            "timestamp": time.time(),
+                            "conversation_id": "init"
                         })
                         self._set_value(schema.field, schema.default)
 
@@ -317,7 +327,8 @@ class ConfigManager:
             self._frozen = True
             self.logger.record({
                 "event": "config_frozen",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "conversation_id": "init"
             })
 
     def unfreeze(self):
@@ -326,7 +337,8 @@ class ConfigManager:
             self._frozen = False
             self.logger.record({
                 "event": "config_unfrozen",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "conversation_id": "init"
             })
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -353,7 +365,8 @@ class ConfigManager:
             if value == {} or value is None:
                 self.logger.record({
                     "warning": f"Key '{key}' is empty or missing. Using default: {default}",
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
                 })
                 return default
             return value
@@ -373,7 +386,8 @@ class ConfigManager:
             if missing_keys:
                 self.logger.record({
                     "error": f"Missing required configuration keys: {', '.join(missing_keys)}",
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
                 })
                 raise ValueError(f"Missing required configuration keys: {', '.join(missing_keys)}")
 
@@ -406,7 +420,8 @@ class ConfigManager:
                 if self._frozen:
                     self.logger.record({
                         "error": f"Cannot update {key}: configuration is frozen",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     return False
                 for schema in self.SCHEMA:
@@ -414,13 +429,15 @@ class ConfigManager:
                         if value is None and not schema.nullable:
                             self.logger.record({
                                 "error": f"Null value not allowed for {key}",
-                                "timestamp": time.time()
+                                "timestamp": time.time(),
+                                "conversation_id": "init"
                             })
                             return False
                         if value is not None and not isinstance(value, schema.type):
                             self.logger.record({
                                 "error": f"Invalid type for {key}: expected {schema.type.__name__}, got {type(value).__name__}",
-                                "timestamp": time.time()
+                                "timestamp": time.time(),
+                                "conversation_id": "init"
                             })
                             return False
                         if schema.validator and value is not None and not schema.validator(value):
@@ -428,20 +445,23 @@ class ConfigManager:
                             self.logger.record({
                                 "error": f"Invalid value for {key}: {value}",
                                 "suggested": f"Valid options: {valid_options}",
-                                "timestamp": time.time()
+                                "timestamp": time.time(),
+                                "conversation_id": "init"
                             })
                             return False
                         if schema.range and value is not None and not (schema.range[0] <= value <= schema.range[1]):
                             self.logger.record({
                                 "error": f"Value for {key} out of range {schema.range}: {value}",
-                                "timestamp": time.time()
+                                "timestamp": time.time(),
+                                "conversation_id": "init"
                             })
                             return False
                         break
                 else:
                     self.logger.record({
                         "error": f"Unknown configuration key: {key}",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     return False
 
@@ -453,7 +473,8 @@ class ConfigManager:
                     "value": value,
                     "old_hash": self._last_config_hash,
                     "new_hash": new_hash,
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
                 })
                 self._last_config_hash = new_hash
                 return True
@@ -461,7 +482,8 @@ class ConfigManager:
             self.logger.record({
                 "error": f"Failed to update config key {key}: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "init"
             })
             return False
 
@@ -481,11 +503,11 @@ class ConfigManager:
                 if self._frozen:
                     self.logger.record({
                         "error": "Cannot update batch: configuration is frozen",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     return False
-                if rollback_on_failure:
-                    original_config = self.config.copy()
+                original_config = self.config.copy()  # Moved outside conditional
                 for key, value in updates.items():
                     if not self.update(key, value):
                         if rollback_on_failure:
@@ -496,7 +518,8 @@ class ConfigManager:
                             self.logger.record({
                                 "event": "config_rollback",
                                 "reason": f"Failed to update {key}",
-                                "timestamp": time.time()
+                                "timestamp": time.time(),
+                                "conversation_id": "init"
                             })
                         return False
                 return True
@@ -504,7 +527,8 @@ class ConfigManager:
             self.logger.record({
                 "error": f"Failed to update batch config: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "init"
             })
             if rollback_on_failure:
                 self.config = original_config
@@ -542,14 +566,16 @@ class ConfigManager:
                         "file_path": save_path,
                         "compressed": compress,
                         "config_hash": self._last_config_hash,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     return True
             except Exception as e:
                 self.logger.record({
                     "error": f"Attempt {attempt + 1} failed to save config to {save_path}: {str(e)}",
                     "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
+                    "stack_trace": traceback.format_exc(),
+                    "conversation_id": "init"
                 })
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
@@ -582,14 +608,16 @@ class ConfigManager:
                 self.logger.record({
                     "event": "config_diff",
                     "changed_keys": list(diff.keys()),
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
                 })
                 return diff
         except Exception as e:
             self.logger.record({
                 "error": f"Config diff failed: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "init"
             })
             return {}
 
@@ -605,7 +633,8 @@ class ConfigManager:
                 if self._frozen:
                     self.logger.record({
                         "error": "Cannot register schema: configuration is frozen",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     return
                 self.SCHEMA.extend(schemas)
@@ -617,13 +646,15 @@ class ConfigManager:
                     "event": "schema_registered",
                     "new_fields": [s.field for s in schemas],
                     "config_hash": self._last_config_hash,
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
                 })
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to register schema: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "init"
             })
 
     def get_state(self) -> Dict[str, Any]:
@@ -661,13 +692,15 @@ class ConfigManager:
                     "event": "config_load_state",
                     "config_file": self.config_file,
                     "config_hash": self._last_config_hash,
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
                 })
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to load config state: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "init"
             })
             raise
 
@@ -712,20 +745,23 @@ class ConfigManager:
                         "profile": profile,
                         "config_file": profile_file,
                         "config_hash": self._last_config_hash,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     return True
                 else:
                     self.logger.record({
                         "error": f"Profile file {profile_file} not found",
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "conversation_id": "init"
                     })
                     return False
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to load profile {profile}: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "init"
             })
             return False
 
