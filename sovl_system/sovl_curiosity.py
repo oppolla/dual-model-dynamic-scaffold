@@ -1,187 +1,175 @@
-import random
 import time
-import torch
-import torch.nn.functional as F
-from typing import List, Dict, Callable, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional
 from collections import deque
-from sovl_logger import Logger
-from sovl_state import SOVLState
+
+import torch
+from torch import nn
+
 
 class Curiosity:
     """
-    Handles curiosity computation based on ignorance and novelty.
+    Computes curiosity scores based on ignorance and novelty.
     """
-    def __init__(self, weight_ignorance: float = 0.5, weight_novelty: float = 0.5, logger: Optional[Logger] = None):
-        """
-        Initialize Curiosity with weights for ignorance and novelty.
-
-        Args:
-            weight_ignorance (float): Weight for ignorance in curiosity computation.
-            weight_novelty (float): Weight for novelty in curiosity computation.
-            logger (Optional[Logger]): Logger for error reporting.
-        """
+    def __init__(
+        self,
+        weight_ignorance: float = 0.7,
+        weight_novelty: float = 0.3,
+        logger: Optional[Any] = None
+    ):
         self.weight_ignorance = weight_ignorance
         self.weight_novelty = weight_novelty
         self.logger = logger
+        self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
 
     def compute_curiosity(
         self,
         base_conf: float,
         scaf_conf: float,
-        memory_embeddings: List[Tuple[torch.Tensor, float]],
+        memory_embeddings: List[torch.Tensor],
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
         """
-        Compute curiosity as a weighted sum of ignorance and novelty.
+        Compute curiosity score based on confidence and embeddings.
 
         Args:
             base_conf (float): Base model confidence.
             scaf_conf (float): Scaffold model confidence.
-            memory_embeddings (List[Tuple[torch.Tensor, float]]): Embeddings and weights from memory.
-            query_embedding (torch.Tensor): Embedding of the current query.
+            memory_embeddings (List[torch.Tensor]): List of memory embeddings.
+            query_embedding (torch.Tensor): Query embedding.
             device (torch.device): Device for tensor operations.
 
         Returns:
-            float: The computed curiosity score.
+            float: Curiosity score.
         """
         try:
-            if query_embedding is None or query_embedding.numel() == 0:
-                if self.logger:
-                    self.logger.record({"warning": "Empty query_embedding in compute_curiosity", "timestamp": time.time()})
-                return 0.5
+            ignorance = 1.0 - (base_conf * 0.5 + scaf_conf * 0.5)
+            ignorance = max(0.0, min(1.0, ignorance))
 
-            # Move query_embedding to correct device
-            query_embedding = query_embedding.to(device)
+            novelty = 0.0
+            if memory_embeddings and query_embedding is not None:
+                query_embedding = query_embedding.to(device)
+                similarities = [
+                    self.cosine_similarity(
+                        query_embedding,
+                        emb.to(device)
+                    ).item()
+                    for emb in memory_embeddings
+                ]
+                novelty = 1.0 - max(min(max(similarities, default=0.0), 1.0), 0.0)
 
-            # Compute max similarity with memory embeddings
-            mem_sim = 0.0
-            if memory_embeddings:
-                for emb, _ in memory_embeddings:
-                    emb = emb.to(device)
-                    if emb.shape == query_embedding.shape:
-                        sim = F.cosine_similarity(query_embedding, emb, dim=-1).item()
-                        mem_sim = max(mem_sim, sim)
-                    else:
-                        if self.logger:
-                            self.logger.record({
-                                "warning": f"Shape mismatch in memory_embedding: {emb.shape} vs {query_embedding.shape}",
-                                "timestamp": time.time()
-                            })
-
-            ignorance = 1.0 - max(min(base_conf, 1.0), min(scaf_conf, 1.0), 0.0)
-            novelty = 1.0 - mem_sim
-            score = (ignorance * self.weight_ignorance + novelty * self.weight_novelty)
-            return max(0.0, min(1.0, score))
+            score = (
+                self.weight_ignorance * ignorance +
+                self.weight_novelty * novelty
+            )
+            score = max(0.0, min(1.0, score))
+            return score
 
         except Exception as e:
             if self.logger:
                 self.logger.record({
-                    "error": f"Error in compute_curiosity: {str(e)}",
+                    "error": f"Curiosity computation failed: {str(e)}",
                     "timestamp": time.time()
                 })
             return 0.5
 
+
 class CuriosityPressure:
     """
-    Manages curiosity pressure levels and eruption thresholds.
+    Manages curiosity pressure accumulation and eruption.
     """
-    def __init__(self, initial_value: float = 0.0):
+    def __init__(self):
+        self.value: float = 0.0
+        self.last_update: float = time.time()
+
+    def update(
+        self,
+        temperament: float,
+        confidence: float,
+        silence: float,
+        silence_threshold: float
+    ) -> None:
         """
-        Initialize the CuriosityPressure.
+        Update pressure based on temperament, confidence, and silence.
 
         Args:
-            initial_value (float): Initial pressure value.
+            temperament (float): Current temperament score.
+            confidence (float): Current confidence score.
+            silence (float): Time since last interaction.
+            silence_threshold (float): Threshold for silence contribution.
         """
-        self.value = max(0.0, min(1.0, initial_value))
+        current_time = time.time()
+        time_delta = current_time - self.last_update
+        self.last_update = current_time
 
-    def update(self, temperament: float, confidence: float, silence: float, silence_threshold: float) -> None:
-        """
-        Update the pressure value based on temperament, confidence, and silence.
+        temperament_effect = 0.1 * max(0.0, temperament)
+        confidence_effect = 0.05 * (1.0 - confidence)
+        silence_effect = 0.2 * (silence / silence_threshold) if silence > silence_threshold else 0.0
 
-        Args:
-            temperament (float): Temperament value.
-            confidence (float): Confidence level.
-            silence (float): Silence duration (seconds).
-            silence_threshold (float): Threshold to normalize silence.
-        """
-        temperament = max(0.0, min(1.0, temperament))
-        confidence = max(0.0, min(1.0, confidence))
-        normalized_silence = min(silence / silence_threshold, 1.0) if silence_threshold > 0 else 0.0
-        self.value += (temperament * 0.1 + (1 - confidence) * 0.05 + normalized_silence * 0.02)
+        self.value += time_delta * (temperament_effect + confidence_effect + silence_effect)
         self.value = max(0.0, min(1.0, self.value))
 
     def should_erupt(self, threshold: float) -> bool:
         """
-        Determine if the curiosity pressure should trigger an event.
+        Check if pressure exceeds threshold.
 
         Args:
-            threshold (float): The threshold for eruption.
+            threshold (float): Pressure threshold for eruption.
 
         Returns:
-            bool: True if the pressure exceeds the threshold, False otherwise.
+            bool: True if eruption should occur.
         """
-        return self.value > threshold and random.random() < 0.3
+        return self.value >= threshold
 
-    def drop_pressure(self, drop_amount: float) -> None:
+    def drop_pressure(self, amount: float) -> None:
         """
         Reduce pressure by a specified amount.
 
         Args:
-            drop_amount (float): Amount to reduce pressure by.
+            amount (float): Amount to reduce pressure.
         """
-        self.value = max(0.0, self.value - drop_amount)
+        self.value = max(0.0, self.value - amount)
+
 
 class CuriosityCallbacks:
     """
-    Manages callbacks for curiosity-related events.
+    Handles curiosity-related callbacks.
     """
-    def __init__(self, logger: Optional[Logger] = None):
-        """
-        Initialize the callback manager.
-
-        Args:
-            logger (Optional[Logger]): Logger for unregistered events.
-        """
-        self.callbacks: Dict[str, List[Callable]] = {}
+    def __init__(self, logger: Optional[Any] = None):
+        self.callbacks = {}
         self.logger = logger
 
-    def register_callback(self, event: str, callback: Callable) -> None:
+    def register_callback(self, event: str, callback: callable) -> None:
         """
-        Register a callback for a specific event.
+        Register a callback for an event.
 
         Args:
-            event (str): The name of the event.
-            callback (Callable): The callback function.
+            event (str): Event name.
+            callback (callable): Callback function.
         """
         if event not in self.callbacks:
             self.callbacks[event] = []
         self.callbacks[event].append(callback)
 
-    def trigger_callback(self, event: str, *args, **kwargs) -> None:
+    def trigger_callback(self, event: str, **kwargs) -> None:
         """
-        Trigger all registered callbacks for an event.
+        Trigger callbacks for an event.
 
         Args:
-            event (str): The name of the event.
-            *args: Positional arguments for the callbacks.
-            **kwargs: Keyword arguments for the callbacks.
+            event (str): Event name.
+            **kwargs: Arguments to pass to callbacks.
         """
         if event in self.callbacks:
             for callback in self.callbacks[event]:
                 try:
-                    callback(*args, **kwargs)
+                    callback(**kwargs)
                 except Exception as e:
                     if self.logger:
                         self.logger.record({
-                            "error": f"Callback error for {event}: {str(e)}",
+                            "error": f"Callback {event} failed: {str(e)}",
                             "timestamp": time.time()
                         })
-        elif self.logger:
-            self.logger.record({
-                "warning": f"No callback registered for event: {event}",
-                "timestamp": time.time()
-            })
+
 
 class CuriosityManager:
     """
@@ -190,7 +178,7 @@ class CuriosityManager:
     def __init__(
         self,
         config: Optional[Dict[str, Any]] = None,
-        logger: Optional[Logger] = None,
+        logger: Optional[Any] = None,
         device: Optional[torch.device] = None
     ):
         """
@@ -198,13 +186,13 @@ class CuriosityManager:
 
         Args:
             config (Optional[Dict[str, Any]]): Configuration dictionary with curiosity parameters.
-            logger (Optional[Logger]): Logger for events and errors.
+            logger (Optional[Any]): Logger for events and errors.
             device (Optional[torch.device]): Device for tensor operations (default: cuda if available).
         """
         # Default configuration
         default_config = {
-            "weight_ignorance": 0.5,
-            "weight_novelty": 0.5,
+            "weight_ignorance": 0.7,
+            "weight_novelty": 0.3,
             "pressure_threshold": 0.7,
             "pressure_drop": 0.3,
             "novelty_threshold_spontaneous": 0.9,
@@ -216,10 +204,9 @@ class CuriosityManager:
             "base_temperature": 1.1,
             "temperament_influence": 0.4,
             "top_k": 30,
-            "default_hidden_size": 768  # For fallback embeddings
+            "default_hidden_size": 768
         }
-        config = config or {}
-        self.config = {**default_config, **config}
+        self.config = {**default_config, **(config or {})}
 
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = logger
@@ -232,19 +219,25 @@ class CuriosityManager:
         )
         self.pressure = CuriosityPressure()
         self.callbacks = CuriosityCallbacks(logger=self.logger)
-        self.last_question_time: float = 0.0
+        self.last_question_time: float = time.time()
+        self.unanswered_questions: deque = deque(maxlen=self.config["queue_maxlen"])
+        self.metrics: List[Dict] = []
 
     def compute_curiosity(
         self,
-        state: SOVLState,
-        query_embedding: Optional[torch.Tensor] = None
+        state: Any,
+        tokenizer: Any,
+        model: Any,
+        query: Optional[str] = None
     ) -> float:
         """
-        Compute curiosity score using state information.
+        Compute curiosity score for a query using state information.
 
         Args:
-            state (SOVLState): Current system state.
-            query_embedding (Optional[torch.Tensor]): Optional embedding of current query.
+            state: Current system state.
+            tokenizer: Tokenizer for encoding queries.
+            model: Model to generate embeddings.
+            query (Optional[str]): Query to compute curiosity for.
 
         Returns:
             float: The computed curiosity score.
@@ -254,12 +247,26 @@ class CuriosityManager:
             state.sleep_confidence_sum / state.sleep_confidence_count
             if state.sleep_confidence_count > 0 else 0.5
         )
-        
-        query_emb = query_embedding if query_embedding is not None else state.last_prompt_embedding
-        query_emb = query_emb if query_emb is not None else torch.zeros(
-            self.config["default_hidden_size"], device=self.device
+
+        query_embedding = None
+        if query:
+            try:
+                inputs = tokenizer(query, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
+                with torch.no_grad():
+                    outputs = model(**inputs, output_hidden_states=True)
+                    query_embedding = outputs.hidden_states[-1][:, -1, :].squeeze()
+            except Exception as e:
+                if self.logger:
+                    self.logger.record({
+                        "error": f"Failed to generate query embedding: {str(e)}",
+                        "timestamp": time.time()
+                    })
+
+        query_emb = query_embedding if query_embedding is not None else (
+            state.last_prompt_embedding if state.last_prompt_embedding is not None else
+            torch.zeros(self.config["default_hidden_size"], device=self.device)
         )
-        
+
         score = self.curiosity.compute_curiosity(
             base_conf=base_conf,
             scaf_conf=scaf_conf,
@@ -267,62 +274,67 @@ class CuriosityManager:
             query_embedding=query_emb,
             device=self.device
         )
-        
-        # Update state with new score
+
         state.curiosity.novelty_scores.append(score)
         self.callbacks.trigger_callback("curiosity_computed", score=score)
         return score
 
-    def update_pressure(self, state: SOVLState) -> None:
+    def update_pressure(
+        self,
+        temperament: float,
+        confidence: float,
+        silence_duration: float
+    ) -> None:
         """
-        Update curiosity pressure based on current state.
+        Update curiosity pressure based on system state.
 
         Args:
-            state (SOVLState): Current system state.
+            temperament (float): Current temperament score.
+            confidence (float): Current confidence score.
+            silence_duration (float): Time since last interaction.
         """
-        silence = getattr(state, "silence_duration", 0.0)
         self.pressure.update(
-            temperament=state.temperament_score,
-            confidence=state.confidence_history[-1] if state.confidence_history else 0.5,
-            silence=silence,
+            temperament=temperament,
+            confidence=confidence,
+            silence=silence_duration,
             silence_threshold=self.config["silence_threshold"]
         )
-        state.curiosity.pressure = self.pressure.value
         self.callbacks.trigger_callback("pressure_updated", pressure=self.pressure.value)
 
-    def check_pressure_eruption(self, state: SOVLState) -> bool:
+    def should_erupt(self, threshold: Optional[float] = None) -> bool:
         """
-        Check if curiosity pressure should erupt.
+        Check if curiosity pressure should trigger a question.
 
         Args:
-            state (SOVLState): Current system state.
+            threshold (Optional[float]): Custom pressure threshold.
 
         Returns:
             bool: True if pressure erupts, False otherwise.
         """
-        erupted = self.pressure.should_erupt(self.config["pressure_threshold"])
+        thresh = threshold if threshold is not None else self.config["pressure_threshold"]
+        erupted = self.pressure.should_erupt(thresh)
         if erupted:
             self.pressure.drop_pressure(self.config["pressure_drop"])
-            state.curiosity.pressure = self.pressure.value
-            state.curiosity.question_count += 1
             self.callbacks.trigger_callback("pressure_erupted", pressure=self.pressure.value)
         return erupted
 
     def generate_question(
         self,
-        state: SOVLState,
-        tokenizer: Optional[Callable] = None,
-        model: Optional[torch.nn.Module] = None,
-        prompt: Optional[str] = None
+        state: Any,
+        tokenizer: Any,
+        model: Any,
+        prompt: Optional[str] = None,
+        spontaneous: bool = False
     ) -> Optional[str]:
         """
         Generate a curiosity-driven question if conditions are met.
 
         Args:
-            state (SOVLState): Current system state.
-            tokenizer (Optional[Callable]): Tokenizer for encoding prompts.
-            model (Optional[torch.nn.Module]): Model for generating questions.
+            state: Current system state.
+            tokenizer: Tokenizer for encoding prompts.
+            model: Model for generating questions.
             prompt (Optional[str]): Prompt to base the question on.
+            spontaneous (bool): If True, prioritize spontaneous question generation.
 
         Returns:
             Optional[str]: Generated question or None if conditions not met.
@@ -336,25 +348,30 @@ class CuriosityManager:
             return None
 
         # Check cooldown
-        if state.global_step - state.curiosity.last_question_time < self.config["question_cooldown"]:
+        current_time = time.time()
+        if (current_time - self.last_question_time) < self.config["question_cooldown"]:
             return None
 
         # Compute curiosity
-        curiosity_score = self.compute_curiosity(state)
+        curiosity_score = self.compute_curiosity(state, tokenizer, model, prompt)
 
-        # Check silence contribution
-        silence = getattr(state, "silence_duration", 0.0)
-        is_silence_driven = silence >= self.config["silence_threshold"]
-
-        # Determine if question should be generated
-        is_spontaneous = curiosity_score >= self.config["novelty_threshold_spontaneous"]
-        is_response_driven = curiosity_score >= self.config["novelty_threshold_response"] and prompt is not None
-        if not (is_spontaneous or is_response_driven or is_silence_driven):
+        # Check conditions
+        threshold = (
+            self.config["novelty_threshold_spontaneous"] if spontaneous
+            else self.config["novelty_threshold_response"]
+        )
+        should_generate = (
+            (spontaneous and curiosity_score >= threshold) or
+            (not spontaneous and prompt and curiosity_score >= threshold) or
+            self.should_erupt()
+        )
+        if not should_generate:
             return None
 
         # Select base prompt
-        base_prompt = prompt if prompt else (
-            state.history.messages[-1]["prompt"] if state.history.messages else "What is this about?"
+        base_prompt = (
+            prompt if prompt else
+            (state.history.messages[-1]["prompt"] if state.history.messages else "What is this about?")
         )
 
         # Generate question
@@ -377,12 +394,9 @@ class CuriosityManager:
             question = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
 
             # Update state
-            state.curiosity.unanswered_questions.append((question, curiosity_score))
-            state.curiosity.last_question_time = state.global_step
-            state.curiosity.question_count += 1
+            self.unanswered_questions.append((question, curiosity_score))
+            self.last_question_time = current_time
             self.pressure.drop_pressure(self.config["pressure_drop"])
-            state.curiosity.pressure = self.pressure.value
-
             self.callbacks.trigger_callback("question_generated", question=question, score=curiosity_score)
             return question
 
@@ -394,75 +408,180 @@ class CuriosityManager:
                 })
             return None
 
-    def get_scaffold_influence_weight(self, curiosity_score: float) -> float:
+    def update_metrics(
+        self,
+        question: str,
+        score: float,
+        spontaneous: bool = False,
+        answered: bool = False
+    ) -> None:
         """
-        Compute a scaffold influence weight based on curiosity.
+        Update curiosity metrics.
 
         Args:
-            curiosity_score (float): The curiosity score.
+            question (str): The question generated or evaluated.
+            score (float): Curiosity score for the question.
+            spontaneous (bool): Whether the question was spontaneous.
+            answered (bool): Whether the question was answered.
+        """
+        self.metrics.append({
+            "question": question,
+            "score": score,
+            "spontaneous": spontaneous,
+            "answered": answered,
+            "timestamp": time.time()
+        })
+        self.callbacks.trigger_callback(
+            "metrics_updated",
+            question=question,
+            score=score,
+            spontaneous=spontaneous,
+            answered=answered
+        )
+
+    def check_silence(
+        self,
+        state: Any,
+        tokenizer: Any,
+        model: Any,
+        elapsed: float
+    ) -> Optional[str]:
+        """
+        Check for prolonged silence and generate a question if needed.
+
+        Args:
+            state: Current system state.
+            tokenizer: Tokenizer for encoding prompts.
+            model: Model for generating questions.
+            elapsed (float): Time since last interaction.
 
         Returns:
-            float: Suggested weight for scaffold influence.
+            Optional[str]: Generated question or None if not triggered.
         """
-        # Higher curiosity -> higher scaffold influence
-        weight = 0.3 + 0.5 * curiosity_score  # Maps [0,1] to [0.3,0.8]
-        return max(0.0, min(1.0, weight))
+        if elapsed <= self.config["silence_threshold"]:
+            return None
 
-    def register_callback(self, event: str, callback: Callable) -> None:
+        if self.pressure.value <= self.config["pressure_threshold"]:
+            return None
+
+        if (time.time() - self.last_question_time) <= self.config["question_cooldown"]:
+            return None
+
+        # Try generating a new question
+        question = self.generate_question(state, tokenizer, model, spontaneous=True)
+        if question:
+            score = self.compute_curiosity(state, tokenizer, model, question)
+            self.update_metrics(question, score, spontaneous=True)
+            self.pressure.drop_pressure(self.config["pressure_drop"])
+            self.last_question_time = time.time()
+            return question
+
+        # Fall back to unanswered questions
+        if self.unanswered_questions:
+            question, score = self.unanswered_questions.popleft()
+            self.update_metrics(question, score, spontaneous=True)
+            self.pressure.drop_pressure(self.config["pressure_drop"] * 0.7)
+            self.last_question_time = time.time()
+            return question
+
+        return None
+
+    def tune(
+        self,
+        enable: Optional[bool] = None,
+        spontaneous_threshold: Optional[float] = None,
+        response_threshold: Optional[float] = None,
+        pressure_threshold: Optional[float] = None,
+        pressure_drop: Optional[float] = None,
+        silence_threshold: Optional[float] = None,
+        question_cooldown: Optional[float] = None,
+        queue_maxlen: Optional[int] = None,
+        weight_ignorance: Optional[float] = None,
+        weight_novelty: Optional[float] = None,
+        max_new_tokens: Optional[int] = None,
+        base_temperature: Optional[float] = None,
+        temperament_influence: Optional[float] = None,
+        top_k: Optional[int] = None
+    ) -> None:
         """
-        Register a callback for a curiosity-related event.
+        Tune curiosity parameters.
 
         Args:
-            event (str): The name of the event.
-            callback (Callable): The callback function.
+            enable (Optional[bool]): Enable or disable curiosity.
+            spontaneous_threshold (Optional[float]): Threshold for spontaneous questions.
+            response_threshold (Optional[float]): Threshold for response-driven questions.
+            pressure_threshold (Optional[float]): Threshold for pressure eruption.
+            pressure_drop (Optional[float]): Amount to drop pressure after eruption.
+            silence_threshold (Optional[float]): Silence duration threshold.
+            question_cooldown (Optional[float]): Cooldown between questions.
+            queue_maxlen (Optional[int]): Maximum length of unanswered questions queue.
+            weight_ignorance (Optional[float]): Weight for ignorance in curiosity score.
+            weight_novelty (Optional[float]): Weight for novelty in curiosity score.
+            max_new_tokens (Optional[int]): Maximum tokens for generated questions.
+            base_temperature (Optional[float]): Base temperature for generation.
+            temperament_influence (Optional[float]): Temperament influence on generation.
+            top_k (Optional[int]): Top-k sampling parameter.
         """
-        self.callbacks.register_callback(event, callback)
+        updates = {}
+        if enable is not None:
+            updates["enable_curiosity"] = bool(enable)
+        if spontaneous_threshold is not None and 0.5 <= spontaneous_threshold <= 1.0:
+            updates["novelty_threshold_spontaneous"] = spontaneous_threshold
+        if response_threshold is not None and 0.5 <= response_threshold <= 1.0:
+            updates["novelty_threshold_response"] = response_threshold
+        if pressure_threshold is not None and 0.5 <= pressure_threshold <= 0.9:
+            updates["pressure_threshold"] = pressure_threshold
+        if pressure_drop is not None and 0.1 <= pressure_drop <= 0.5:
+            updates["pressure_drop"] = pressure_drop
+        if silence_threshold is not None and 5.0 <= silence_threshold <= 60.0:
+            updates["silence_threshold"] = silence_threshold
+        if question_cooldown is not None and 30.0 <= question_cooldown <= 120.0:
+            updates["question_cooldown"] = question_cooldown
+        if queue_maxlen is not None and 5 <= queue_maxlen <= 20:
+            updates["queue_maxlen"] = queue_maxlen
+            self.unanswered_questions = deque(self.unanswered_questions, maxlen=queue_maxlen)
+        if weight_ignorance is not None and 0.0 <= weight_ignorance <= 1.0:
+            updates["weight_ignorance"] = weight_ignorance
+            self.curiosity.weight_ignorance = weight_ignorance
+        if weight_novelty is not None and 0.0 <= weight_novelty <= 1.0:
+            updates["weight_novelty"] = weight_novelty
+            self.curiosity.weight_novelty = weight_novelty
+        if max_new_tokens is not None and 5 <= max_new_tokens <= 12:
+            updates["max_new_tokens"] = max_new_tokens
+        if base_temperature is not None and 0.5 <= base_temperature <= 1.5:
+            updates["base_temperature"] = base_temperature
+        if temperament_influence is not None and 0.1 <= temperament_influence <= 0.6:
+            updates["temperament_influence"] = temperament_influence
+        if top_k is not None and 10 <= top_k <= 50:
+            updates["top_k"] = top_k
+
+        self.config.update(updates)
+        if self.logger:
+            self.logger.record({
+                "event": "tune_curiosity",
+                "params": updates,
+                "timestamp": time.time()
+            })
 
     def get_pressure(self) -> float:
-        """
-        Get current pressure value.
-
-        Returns:
-            float: Current pressure value.
-        """
         return self.pressure.value
 
-    def set_pressure(self, value: float) -> None:
-        """
-        Set pressure value.
+    def reduce_pressure(self, amount: float) -> None:
+        self.pressure.drop_pressure(amount)
 
-        Args:
-            value (float): New pressure value.
-        """
-        self.pressure.value = max(0.0, min(1.0, value))
+    def save_state(self) -> Dict:
+        return {
+            "pressure": self.pressure.value,
+            "last_question_time": self.last_question_time,
+            "unanswered_questions": list(self.unanswered_questions),
+            "metrics": self.metrics
+        }
 
-    def save_state(self, state: SOVLState) -> None:
-        """
-        Save the current state to the provided SOVLState instance.
-
-        Args:
-            state (SOVLState): The state instance to save to.
-        """
-        state.curiosity.pressure = self.pressure.value
-        state.curiosity.last_question_time = self.last_question_time
-
-    def load_state(self, state: SOVLState) -> None:
-        """
-        Load state from a SOVLState instance.
-
-        Args:
-            state (SOVLState): The state instance to load from.
-        """
-        self.pressure.value = state.curiosity.pressure
-        self.last_question_time = state.curiosity.last_question_time
-
-    def reset(self, state: SOVLState) -> None:
-        """
-        Reset curiosity manager state.
-
-        Args:
-            state (SOVLState): The state instance to reset.
-        """
-        self.pressure.value = 0.0
-        self.last_question_time = 0.0
-        state.curiosity = CuriosityState()
+    def load_state(self, state_dict: Dict) -> None:
+        self.pressure.value = state_dict.get("pressure", 0.0)
+        self.last_question_time = state_dict.get("last_question_time", time.time())
+        self.unanswered_questions = deque(
+            state_dict.get("unanswered_questions", []),
+            maxlen=self.config["queue_maxlen"]
+        )
+        self.metrics = state_dict.get("metrics", [])
