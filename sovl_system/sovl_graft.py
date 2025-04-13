@@ -1,5 +1,3 @@
-# File: sovl_plugin_manager.py
-
 from typing import Dict, List, Optional, Callable, Any
 from abc import ABC, abstractmethod
 import importlib
