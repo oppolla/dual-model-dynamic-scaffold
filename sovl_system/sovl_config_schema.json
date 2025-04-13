@@ -1,1 +1,476 @@
-
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Controls Configuration Schema",
+  "description": "Schema for the controls configuration of the SOVLSystem",
+  "type": "object",
+  "properties": {
+    "sleep_conf_threshold": {
+      "type": "number",
+      "description": "Confidence threshold for entering sleep state",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.7
+    },
+    "sleep_time_factor": {
+      "type": "number",
+      "description": "Factor to scale sleep duration",
+      "minimum": 0.1,
+      "maximum": 10.0,
+      "default": 1.0
+    },
+    "sleep_log_min": {
+      "type": "integer",
+      "description": "Minimum log size for sleep consideration",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 10
+    },
+    "dream_swing_var": {
+      "type": "number",
+      "description": "Variance for dream swing adjustments",
+      "minimum": 0.0,
+      "maximum": 0.5,
+      "default": 0.1
+    },
+    "dream_lifecycle_delta": {
+      "type": "number",
+      "description": "Delta for dream lifecycle updates",
+      "minimum": 0.0,
+      "maximum": 0.5,
+      "default": 0.1
+    },
+    "dream_temperament_on": {
+      "type": "boolean",
+      "description": "Enable temperament influence on dreaming",
+      "default": true
+    },
+    "dream_noise_scale": {
+      "type": "number",
+      "description": "Scale of noise in dream generation",
+      "minimum": 0.0,
+      "maximum": 0.1,
+      "default": 0.05
+    },
+    "temp_eager_threshold": {
+      "type": "number",
+      "description": "Threshold for eager temperament",
+      "minimum": 0.7,
+      "maximum": 0.9,
+      "default": 0.8
+    },
+    "temp_sluggish_threshold": {
+      "type": "number",
+      "description": "Threshold for sluggish temperament",
+      "minimum": 0.4,
+      "maximum": 0.6,
+      "default": 0.6
+    },
+    "temp_mood_influence": {
+      "type": "number",
+      "description": "Influence of mood on temperature",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.0
+    },
+    "scaffold_weight_cap": {
+      "type": "number",
+      "description": "Maximum weight for scaffold influence",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.9
+    },
+    "base_temperature": {
+      "type": "number",
+      "description": "Base temperature for generation",
+      "minimum": 0.1,
+      "maximum": 2.0,
+      "default": 0.7
+    },
+    "save_path_prefix": {
+      "type": "string",
+      "description": "Prefix for saving state files",
+      "pattern": "^[a-zA-Z0-9_/.-]+$",
+      "default": "state"
+    },
+    "dream_memory_weight": {
+      "type": "number",
+      "description": "Weight of memory in dream generation",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.1
+    },
+    "dream_memory_maxlen": {
+      "type": "integer",
+      "description": "Maximum length of dream memory",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 10
+    },
+    "dream_prompt_weight": {
+      "type": "number",
+      "description": "Weight of prompt in dream generation",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.5
+    },
+    "dream_novelty_boost": {
+      "type": "number",
+      "description": "Boost factor for dream novelty",
+      "minimum": 0.0,
+      "maximum": 0.1,
+      "default": 0.03
+    },
+    "temp_curiosity_boost": {
+      "type": "number",
+      "description": "Curiosity boost for temperature",
+      "minimum": 0.0,
+      "maximum": 0.5,
+      "default": 0.5
+    },
+    "temp_restless_drop": {
+      "type": "number",
+      "description": "Restless drop for temperature",
+      "minimum": 0.0,
+      "maximum": 0.5,
+      "default": 0.1
+    },
+    "temp_melancholy_noise": {
+      "type": "number",
+      "description": "Noise factor for melancholy temperament",
+      "minimum": 0.0,
+      "maximum": 0.05,
+      "default": 0.02
+    },
+    "conf_feedback_strength": {
+      "type": "number",
+      "description": "Strength of confidence feedback",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.5
+    },
+    "temp_smoothing_factor": {
+      "type": "number",
+      "description": "Smoothing factor for temperature",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.0
+    },
+    "dream_memory_decay": {
+      "type": "number",
+      "description": "Decay rate for dream memory",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.95
+    },
+    "dream_prune_threshold": {
+      "type": "number",
+      "description": "Threshold for pruning dream memory",
+      "minimum": 0.0,
+      "maximum": 0.5,
+      "default": 0.1
+    },
+    "use_scaffold_memory": {
+      "type": "boolean",
+      "description": "Enable scaffold memory usage",
+      "default": true
+    },
+    "use_token_map_memory": {
+      "type": "boolean",
+      "description": "Enable token map memory usage",
+      "default": true
+    },
+    "memory_decay_rate": {
+      "type": "number",
+      "description": "General memory decay rate",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.95
+    },
+    "dynamic_cross_attn_mode": {
+      "type": ["string", "null"],
+      "description": "Mode for dynamic cross attention",
+      "enum": ["adaptive", "fixed", null],
+      "default": null
+    },
+    "has_woken": {
+      "type": "boolean",
+      "description": "Indicates if system has woken",
+      "default": false
+    },
+    "is_sleeping": {
+      "type": "boolean",
+      "description": "Indicates if system is sleeping",
+      "default": false
+    },
+    "confidence_history_maxlen": {
+      "type": "integer",
+      "description": "Maximum length of confidence history",
+      "minimum": 3,
+      "maximum": 10,
+      "default": 5
+    },
+    "temperament_history_maxlen": {
+      "type": "integer",
+      "description": "Maximum length of temperament history",
+      "minimum": 3,
+      "maximum": 10,
+      "default": 5
+    },
+    "conversation_history_maxlen": {
+      "type": "integer",
+      "description": "Maximum length of conversation history",
+      "minimum": 5,
+      "maximum": 50,
+      "default": 10
+    },
+    "max_seen_prompts": {
+      "type": "integer",
+      "description": "Maximum number of seen prompts",
+      "minimum": 100,
+      "maximum": 10000,
+      "default": 1000
+    },
+    "prompt_timeout": {
+      "type": "number",
+      "description": "Timeout for prompts in seconds",
+      "minimum": 3600.0,
+      "maximum": 604800.0,
+      "default": 86400.0
+    },
+    "temperament_decay_rate": {
+      "type": "number",
+      "description": "Decay rate for temperament",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.95
+    },
+    "scaffold_unk_id": {
+      "type": "integer",
+      "description": "Unknown ID for scaffold",
+      "minimum": 0,
+      "maximum": 100000,
+      "default": 0
+    },
+    "enable_dreaming": {
+      "type": "boolean",
+      "description": "Enable dreaming functionality",
+      "default": true
+    },
+    "enable_temperament": {
+      "type": "boolean",
+      "description": "Enable temperament adjustments",
+      "default": true
+    },
+    "enable_confidence_tracking": {
+      "type": "boolean",
+      "description": "Enable confidence tracking",
+      "default": true
+    },
+    "enable_gestation.ConcurrentModificationException": {
+      "type": "boolean",
+      "description": "Enable gestation process",
+      "default": true
+    },
+    "enable_sleep_training": {
+      "type": "boolean",
+      "description": "Enable sleep training",
+      "default": true
+    },
+    "enable_cross_attention": {
+      "type": "boolean",
+      "description": "Enable cross attention mechanism",
+      "default": true
+    },
+    "enable_dynamic_cross_attention": {
+      "type": "boolean",
+      "description": "Enable dynamic cross attention",
+      "default": true
+    },
+    "enable_lora_adapters": {
+      "type": "boolean",
+      "description": "Enable LoRA adapters",
+      "default": true
+    },
+    "enable_repetition_check": {
+      "type": "boolean",
+      "description": "Enable repetition checking",
+      "default": true
+    },
+    "enable_prompt_driven_dreams": {
+      "type": "boolean",
+      "description": "Enable prompt-driven dreams",
+      "default": true
+    },
+    "enable_lifecycle_weighting": {
+      "type": "boolean",
+      "description": "Enable lifecycle weighting",
+      "default": true
+    },
+    "memory_threshold": {
+      "type": "number",
+      "description": "Threshold for memory retention",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.85
+    },
+    "enable_error_listening": {
+      "type": "boolean",
+      "description": "Enable error listening",
+      "default": true
+    },
+    "enable_curiosity": {
+      "type": "boolean",
+      "description": "Enable curiosity-driven behavior",
+      "default": true
+    },
+    "curiosity_novelty_threshold_spontaneous": {
+      "type": "number",
+      "description": "Novelty threshold for spontaneous curiosity",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.9
+    },
+    "curiosity_novelty_threshold_response": {
+      "type": "number",
+      "description": "Novelty threshold for response-driven curiosity",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.8
+    },
+    "curiosity_pressure_threshold": {
+      "type": "number",
+      "description": "Pressure threshold for curiosity",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.7
+    },
+    "curiosity_pressure_drop": {
+      "type": "number",
+      "description": "Pressure drop for curiosity",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.3
+    },
+    "curiosity_silence_threshold": {
+      "type": "number",
+      "description": "Silence threshold for curiosity in seconds",
+      "minimum": 0.0,
+      "maximum": 3600.0,
+      "default": 20.0
+    },
+    "curiosity_question_cooldown": {
+      "type": "number",
+      "description": "Cooldown for curiosity questions in seconds",
+      "minimum": 0.0,
+      "maximum": 3600.0,
+      "default": 60.0
+    },
+    "curiosity_queue_maxlen": {
+      "type": "integer",
+      "description": "Maximum length of curiosity queue",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 10
+    },
+    "curiosity_weight_ignorance": {
+      "type": "number",
+      "description": "Weight of ignorance in curiosity",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.7
+    },
+    "curiosity_weight_novelty": {
+      "type": "number",
+      "description": "Weight of novelty in curiosity",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.3
+    },
+    "curiosity_max_new_tokens": {
+      "type": "integer",
+      "description": "Maximum new tokens for curiosity",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 8
+    },
+    "curiosity_base_temperature": {
+      "type": "number",
+      "description": "Base temperature for curiosity",
+      "minimum": 0.1,
+      "maximum": 2.0,
+      "default": 1.1
+    },
+    "curiosity_temperament_influence": {
+      "type": "number",
+      "description": "Temperament influence on curiosity",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.4
+    },
+    "curiosity_top_k": {
+      "type": "integer",
+      "description": "Top-k sampling for curiosity",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30
+    },
+    "dropout_rate": {
+      "type": "number",
+      "description": "Dropout rate for controls",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.1
+    },
+    "use_gating": {
+      "type": "boolean",
+      "description": "Enable gating mechanism",
+      "default": true
+    },
+    "scale_attention": {
+      "type": "boolean",
+      "description": "Enable attention scaling",
+      "default": true
+    },
+    "use_residual": {
+      "type": "boolean",
+      "description": "Enable residual connections",
+      "default": true
+    },
+    "use_pooling": {
+      "type": "boolean",
+      "description": "Enable pooling mechanism",
+      "default": false
+    },
+    "use_sparse_attention": {
+      "type": "boolean",
+      "description": "Enable sparse attention",
+      "default": false
+    },
+    "sparse_pattern": {
+      "type": "string",
+      "description": "Pattern for sparse attention",
+      "enum": ["window"],
+      "default": "window"
+    },
+    "sparse_window_size": {
+      "type": "integer",
+      "description": "Window size for sparse attention",
+      "minimum": 1,
+      "maximum": 2048,
+      "default": 128
+    },
+    "injection_strategy": {
+      "type": "string",
+      "description": "Strategy for token injection",
+      "enum": ["sequential"],
+      "default": "sequential"
+    },
+    "token_map": {
+      "type": ["object", "null"],
+      "description": "Token mapping configuration",
+      "default": null
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
