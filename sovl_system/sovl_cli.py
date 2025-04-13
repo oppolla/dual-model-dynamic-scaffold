@@ -3,12 +3,52 @@ import torch
 import traceback
 from sovl_system import SOVLSystem  # Adjust if main file name differs
 from sovl_config import ConfigManager # Import here to avoid circular imports if run_cli is called elsewhere
+import contextlib
+import functools
+from typing import List, Dict, Tuple, Optional
+from datetime import datetime
 
 # Default constants (override if passed from main file)
 TRAIN_EPOCHS = 10  # Example default, adjust as needed
 BATCH_SIZE = 32    # Example default, adjust as needed
 TRAIN_DATA = None  # Placeholder, assumes sovl_system provides it
 VALID_DATA = None  # Placeholder, assumes sovl_system provides it
+
+COMMAND_CATEGORIES = {
+    "System": ["quit", "exit", "save", "load", "reset", "status"],
+    "Training": ["train", "dream"],
+    "Generation": ["generate", "echo", "mimic"],
+    "Memory": ["memory", "recall", "forget", "recap"],
+    "Interaction": ["muse", "flare", "debate", "spark", "reflect"],
+    "Debug": ["log", "config", "panic", "glitch"],
+    "Advanced": ["tune", "rewind"]
+}
+
+class CommandHistory:
+    def __init__(self, max_size: int = 100):
+        self.history: List[Tuple[float, str, Optional[str]]] = []
+        self.max_size = max_size
+        
+    def add(self, command: str, result: Optional[str] = None):
+        """Add command to history with timestamp and optional result."""
+        self.history.append((time.time(), command, result))
+        if len(self.history) > self.max_size:
+            self.history.pop(0)
+            
+    def get_last(self, n: int = 1) -> List[Tuple[float, str, Optional[str]]]:
+        """Get last n commands from history."""
+        return self.history[-n:]
+    
+    def search(self, term: str) -> List[Tuple[float, str, Optional[str]]]:
+        """Search command history for term."""
+        return [entry for entry in self.history if term.lower() in entry[1].lower()]
+    
+    def format_entry(self, entry: Tuple[float, str, Optional[str]]) -> str:
+        """Format a history entry for display."""
+        timestamp, cmd, result = entry
+        time_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        status = "✓" if result and "error" not in result.lower() else "✗"
+        return f"{time_str} [{status}] {cmd}"
 
 def parse_args(parts, min_args=1, max_args=None):
     """Helper to parse command arguments safely."""
@@ -23,17 +63,40 @@ def parse_args(parts, min_args=1, max_args=None):
 
 def generate_response(sovl_system, prompt, max_tokens=60, temp_adjust=0.0):
     """Helper for consistent generation and logging."""
-    # Ensure base_temperature exists, provide default if not
-    base_temp = getattr(sovl_system, 'base_temperature', 0.7) # Example default base temp
+    try:
+        base_temp = getattr(sovl_system, 'base_temperature', 0.7)
+        
+        sovl_system.logger.record({
+            "event": "cli_generate_start",
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": base_temp + temp_adjust,
+            "timestamp": time.time()
+        })
 
-    response = sovl_system.generate(
-        prompt,
-        max_new_tokens=max_tokens,
-        temperature=base_temp + temp_adjust,
-        top_k=50,
-        do_sample=True
-    )
-    return response
+        response = sovl_system.generate(
+            prompt,
+            max_new_tokens=max_tokens,
+            temperature=base_temp + temp_adjust,
+            top_k=50,
+            do_sample=True
+        )
+
+        sovl_system.logger.record({
+            "event": "cli_generate_complete",
+            "response": response,
+            "timestamp": time.time()
+        })
+
+        return response
+    except Exception as e:
+        sovl_system.logger.record({
+            "error": f"CLI generation failed: {str(e)}",
+            "prompt": prompt,
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        raise
 
 def log_action(sovl_system, prompt, response, confidence, is_system=False, extra_attrs=None):
     """Helper for consistent logging with optional extra attributes."""
@@ -60,44 +123,50 @@ def cmd_quit(sovl_system, args):
     return True  # Signal to break the loop
 
 def cmd_train(sovl_system, args):
-    epochs = TRAIN_EPOCHS
-    dry_run = "--dry-run" in args
-    non_flag_args = [arg for arg in args if arg != "--dry-run"] # Separate flags from other args
+    try:
+        epochs = TRAIN_EPOCHS
+        dry_run = "--dry-run" in args
+        non_flag_args = [arg for arg in args if arg != "--dry-run"]
 
-    if non_flag_args:
-        try:
-            epochs = int(non_flag_args[0])
-        except (ValueError, IndexError):
-             raise ValueError("Error: Invalid number of epochs provided.")
+        if non_flag_args:
+            try:
+                epochs = int(non_flag_args[0])
+            except (ValueError, IndexError):
+                raise ValueError("Invalid number of epochs provided.")
 
-    # Check for required data - replace None with actual check if needed
-    if TRAIN_DATA is None or VALID_DATA is None:
-         print("Warning: TRAIN_DATA or VALID_DATA not set. Training cannot proceed.")
-         # Optionally load default data here if applicable
-         # return False # Or raise error depending on desired behavior
+        sovl_system.logger.record({
+            "event": "cli_train_start",
+            "epochs": epochs,
+            "dry_run": dry_run,
+            "timestamp": time.time()
+        })
 
-    if dry_run:
-         # Check if enable_dry_run method exists
-         if hasattr(sovl_system, 'enable_dry_run') and callable(sovl_system.enable_dry_run):
-             sovl_system.enable_dry_run()
-         else:
-             print("Warning: Dry run requested but 'enable_dry_run' method not found in SOVLSystem.")
-    
-    print(f"Starting training for {epochs} epochs{' (dry run)' if dry_run else ''}...")
-    
-    # Check if run_training_cycle method exists
-    if hasattr(sovl_system, 'run_training_cycle') and callable(sovl_system.run_training_cycle):
-        sovl_system.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=epochs, batch_size=BATCH_SIZE)
-    else:
-        print("Error: 'run_training_cycle' method not found in SOVLSystem.")
-        return False # Indicate failure
+        if dry_run and hasattr(sovl_system, 'enable_dry_run'):
+            sovl_system.enable_dry_run()
 
-    if dry_run:
-        print("Dry run setup complete (actual training skipped).")
-        # Decide if dry run should exit. Let's keep it running for now.
-        # return True # Break after dry run if needed
-    else:
-         print(f"Training for {epochs} epochs complete.")
+        if hasattr(sovl_system, 'run_training_cycle'):
+            sovl_system.run_training_cycle(
+                TRAIN_DATA, 
+                VALID_DATA, 
+                epochs=epochs, 
+                batch_size=BATCH_SIZE
+            )
+        else:
+            raise AttributeError("'run_training_cycle' method not found")
+
+        sovl_system.logger.record({
+            "event": "cli_train_complete",
+            "epochs": epochs,
+            "timestamp": time.time()
+        })
+
+    except Exception as e:
+        sovl_system.logger.record({
+            "error": f"Train command failed: {str(e)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        print(f"Error during training: {str(e)}")
     return False
 
 
@@ -212,22 +281,36 @@ def cmd_memory(sovl_system, args):
 
 def cmd_status(sovl_system, args):
     print("\n--- System Status ---")
-    # Use getattr for safety, providing defaults
-    print(f"Conversation ID: {getattr(getattr(sovl_system, 'history', None), 'conversation_id', 'N/A')}")
-    print(f"Temperament: {getattr(sovl_system, 'temperament_score', 'N/A'):.2f}" if isinstance(getattr(sovl_system, 'temperament_score', None), float) else "N/A")
-    
-    confidence_history = getattr(sovl_system, 'confidence_history', [])
-    print(f"Last Confidence: {confidence_history[-1]:.2f}" if confidence_history else 'N/A')
-    
-    # Check memory status based on assumed attributes or a dedicated status method
-    mem_on = getattr(sovl_system, 'use_scaffold_memory', False) or getattr(sovl_system, 'use_token_map_memory', False)
-    # Alternatively: mem_status = sovl_system.get_memory_status() if method exists
-    print(f"Memory Active: {'Yes' if mem_on else 'No'}")
-    
-    print(f"Data Exposure: {getattr(sovl_system, 'data_exposure', 'N/A')}")
-    print(f"Last Trained: {getattr(sovl_system, 'last_trained', 'Never')}")
-    print(f"Gestating (Sleeping): {'Yes' if getattr(sovl_system, 'is_sleeping', False) else 'No'}")
-    # Add more status info if available, e.g., model loaded, GPU usage
+    try:
+        # Use scaffold manager for scaffold-related stats
+        if hasattr(sovl_system, 'scaffold_manager'):
+            scaffold_stats = sovl_system.scaffold_manager.get_scaffold_stats()
+            print("\nScaffold Status:")
+            print(f"  Hidden Size: {scaffold_stats['hidden_size']}")
+            print(f"  Num Heads: {scaffold_stats['num_heads']}")
+            print(f"  Token Map Size: {scaffold_stats['token_map_size']}")
+            print(f"  Has Hidden States: {scaffold_stats['has_hidden_states']}")
+            print(f"  Config Valid: {scaffold_stats['config_valid']}")
+
+        # Rest of status info
+        print(f"\nSystem Status:")
+        print(f"  Conversation ID: {getattr(getattr(sovl_system, 'history', None), 'conversation_id', 'N/A')}")
+        print(f"  Temperament: {getattr(sovl_system, 'temperament_score', 'N/A'):.2f}" if isinstance(getattr(sovl_system, 'temperament_score', None), float) else "N/A")
+        
+        confidence_history = getattr(sovl_system, 'confidence_history', [])
+        print(f"  Last Confidence: {confidence_history[-1]:.2f}" if confidence_history else 'N/A')
+        
+        print(f"  Data Exposure: {getattr(sovl_system, 'data_exposure', 'N/A')}")
+        print(f"  Last Trained: {getattr(sovl_system, 'last_trained', 'Never')}")
+        print(f"  Gestating: {'Yes' if getattr(sovl_system, 'is_sleeping', False) else 'No'}")
+
+    except Exception as e:
+        sovl_system.logger.record({
+            "error": f"Status command failed: {str(e)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        print(f"Error getting status: {str(e)}")
     print("---------------------")
     return False
 
@@ -275,49 +358,42 @@ def cmd_log(sovl_system, args):
 
 
 def cmd_config(sovl_system, args):
-    if not hasattr(sovl_system, 'config_manager'):
-        print("Error: ConfigManager not found in SOVLSystem.")
-        return False
-    if not args:
-        raise ValueError("Error: Usage: config <key> [value_to_set]")
+    try:
+        if not args:
+            raise ValueError("Usage: config <key> [value_to_set]")
 
-    key = args[0]
-    if len(args) == 1: # Get config value
-        value = sovl_system.config_manager.get(key, "Key not found in configuration.")
-        print(f"Config '{key}': {value}")
-    else: # Set config value
-        value_str = ' '.join(args[1:]) # Allow values with spaces if needed, though risky
-        # Attempt to infer type (int, float, bool, str)
-        try:
-            if '.' in value_str:
-                value = float(value_str)
-            else:
-                value = int(value_str)
-        except ValueError:
-            # Handle bools and strings
-            if value_str.lower() == 'true':
-                value = True
-            elif value_str.lower() == 'false':
-                value = False
-            else:
-                 value = value_str # Treat as string
-
-        print(f"Attempting to set config '{key}' to '{value}' ({type(value).__name__})...")
-        # Use update method of ConfigManager
-        sovl_system.config_manager.update(key, value)
-        # Optionally: Verify by getting the value back
-        updated_value = sovl_system.config_manager.get(key)
-        print(f"Config '{key}' set to: {updated_value}")
+        key = args[0]
         
-        # Log the configuration change using the helper
-        log_action(
-            sovl_system,
-            f"Config update command: {key} = {value}",
-            f"Set '{key}' to {updated_value}",
-            0.9, # High confidence for direct action
-            True, # System action initiated by user command
-            {"event": "config_update", "key": key, "value": updated_value}
-        )
+        # Use scaffold manager to validate scaffold-related configs
+        if key.startswith(("core_config.", "controls_config.")) and hasattr(sovl_system, 'scaffold_manager'):
+            if not sovl_system.scaffold_manager.validate_scaffold_config():
+                print("Warning: Current scaffold configuration is invalid")
+
+        if len(args) == 1:
+            value = sovl_system.config_manager.get(key, "Key not found")
+            print(f"Config '{key}': {value}")
+        else:
+            value_str = ' '.join(args[1:])
+            # Convert string to appropriate type
+            value = _parse_config_value(value_str)
+            
+            sovl_system.config_manager.update(key, value)
+            # Verify update
+            updated_value = sovl_system.config_manager.get(key)
+            print(f"Config '{key}' set to: {updated_value}")
+
+            # Revalidate scaffold config if needed
+            if key.startswith(("core_config.", "controls_config.")) and hasattr(sovl_system, 'scaffold_manager'):
+                if not sovl_system.scaffold_manager.validate_scaffold_config():
+                    print("Warning: New configuration created invalid scaffold state")
+
+    except Exception as e:
+        sovl_system.logger.record({
+            "error": f"Config command failed: {str(e)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        print(f"Error updating config: {str(e)}")
     return False
 
 
@@ -449,38 +525,20 @@ def cmd_muse(sovl_system, args):
     log_action(sovl_system, f"Musing on {inspiration}", thought, 0.7, True, {"event": "muse", "inspiration": inspiration})
     return False
 
+@validate_system(['scaffold_manager', 'logger'])
 def cmd_flare(sovl_system, args):
     print("Triggering emotional flare...")
-    if not hasattr(sovl_system, 'temperament_score'):
-         print("Warning: 'temperament_score' attribute not found. Cannot perform flare.")
-         original_temperament = None
-    else:
-        original_temperament = sovl_system.temperament_score
-
-    # Temporarily crank up temperament (if possible)
-    if original_temperament is not None:
-        sovl_system.temperament_score = 1.0 # Max assumed
-        print(f"Temperament temporarily set to: {sovl_system.temperament_score:.2f} (MAX)")
-
-    # Determine outburst prompt
-    prompt = ' '.join(args) if args else "Express a sudden burst of strong feeling!"
-    print(f"Flare prompt: {prompt}")
     
-    # Generate outburst with high temperature adjustment
-    # Adjust temp_adjust based on base temp to ensure high effective temp
-    base_temp = getattr(sovl_system, 'base_temperature', 0.7)
-    temp_adjust = 1.0 # Make it quite high relative to base
-    outburst = generate_response(sovl_system, prompt, max_tokens=100, temp_adjust=temp_adjust)
-    
-    # Optionally make it uppercase for effect
-    print(f"Generated Outburst: {outburst.upper()}")
+    with temporary_system_state(sovl_system, temperament_score=1.0):
+        prompt = ' '.join(args) if args else "Express a sudden burst of strong feeling!"
+        print(f"Flare prompt: {prompt}")
+        
+        base_temp = getattr(sovl_system, 'base_temperature', 0.7)
+        outburst = generate_response(sovl_system, prompt, max_tokens=100, temp_adjust=1.0)
+        print(f"Generated Outburst: {outburst.upper()}")
 
-    # Reset temperament
-    if original_temperament is not None:
-        sovl_system.temperament_score = original_temperament
-        print(f"[Temperament reset to {sovl_system.temperament_score:.2f}]")
-
-    log_action(sovl_system, f"Flare: {prompt}", outburst, 0.9, True, {"event": "flare", "original_temperament": original_temperament})
+    log_action(sovl_system, f"Flare: {prompt}", outburst, 0.9, True, 
+               {"event": "flare", "original_temperament": getattr(sovl_system, 'temperament_score', None)})
     return False
 
 # --- Commands from the previous session ---
@@ -912,7 +970,6 @@ COMMANDS = {
 
 # --- Main CLI Execution Logic ---
 def run_cli(config_manager_instance=None):
-    print("\nInitializing SOVL System...")
     sovl_system = None
     try:
         # Use provided config_manager or create a new one
@@ -968,87 +1025,247 @@ def run_cli(config_manager_instance=None):
         print("  forget <topic>               : Request the system to disregard a topic (simulated)")
         print("-" * 30)
 
+        # Initialize command history
+        sovl_system.cmd_history = CommandHistory()
+        
         # Main interaction loop
         while True:
             try:
                 user_input = input("\nEnter command: ").strip()
                 if not user_input:
-                    continue # Skip empty input
+                    continue
 
                 parts = user_input.split()
                 cmd_name = parts[0].lower()
                 
+                # Add command to history before execution
+                sovl_system.cmd_history.add(user_input)
+                
                 if cmd_name in COMMANDS:
-                     # Use parse_args to handle argument validation per command
-                     # Min args defaults to 1 (command name itself)
-                     # Max args can be set per command if needed in COMMANDS dict (more complex setup)
-                     cmd_func = COMMANDS[cmd_name]
-                     
-                     # Basic parsing before calling handler (can be refined)
-                     try:
-                         # Note: parse_args expects min_args=1 for command name + 0 args
-                         # Adjust min_args based on specific command needs if necessary
-                         # This basic call assumes most commands take optional args
-                         cmd, args = parse_args(parts) 
-                     except ValueError as e:
-                         print(str(e))
-                         continue # Ask for input again
-
-                     # Execute the command
-                     should_exit = cmd_func(sovl_system, args)
-                     if should_exit:
-                         break # Exit the loop if command signals quit
+                    cmd, args = parse_args(parts)
+                    try:
+                        should_exit = COMMANDS[cmd_name](sovl_system, args)
+                        # Update history with success
+                        sovl_system.cmd_history.history[-1] = (
+                            sovl_system.cmd_history.history[-1][0],
+                            sovl_system.cmd_history.history[-1][1],
+                            "success"
+                        )
+                        if should_exit:
+                            break
+                    except Exception as e:
+                        # Update history with error
+                        sovl_system.cmd_history.history[-1] = (
+                            sovl_system.cmd_history.history[-1][0],
+                            sovl_system.cmd_history.history[-1][1],
+                            f"error: {str(e)}"
+                        )
+                        raise
                 else:
-                    print(f"Error: Unknown command '{cmd_name}'. Type 'help' or see command list.")
-                    # Simple 'help' command
-                    if cmd_name == 'help':
-                         # Re-print the command list (or a shorter version)
-                         print("\nAvailable Commands:")
-                         # (Print list again - or format nicely)
-                         for c in sorted(COMMANDS.keys()): print(f" - {c}")
-
-            except ValueError as e:
-                # Catch parsing errors or errors raised within commands
-                print(str(e))
+                    print(f"Unknown command '{cmd_name}'. Type 'help' for command list.")
+                    
+            except KeyboardInterrupt:
+                print("\nInterrupt received, initiating clean shutdown...")
+                break
             except Exception as e:
-                # Catch unexpected errors during command execution
-                print(f"An unexpected command error occurred: {e}")
-                traceback.print_exc() # Print full traceback for debugging
-
-    except FileNotFoundError as e:
-        print(f"\nInitialization Error: File not found - {e}.")
-        print("Please ensure required files like 'sovl_config.json' or model data exist.")
-    except torch.cuda.OutOfMemoryError:
-        print("\nCritical Error: Out of GPU memory!")
-        print("Try reducing BATCH_SIZE in constants, MAX_SEQ_LENGTH in config,")
-        print("or consider using model quantization (INT8/INT4) if supported.")
-    except ImportError as e:
-         print(f"\nInitialization Error: Missing dependency - {e}.")
-         print("Please ensure all required libraries (torch, transformers, etc.) are installed.")
-    except Exception as e:
-        print(f"\nAn unexpected error occurred during initialization or runtime: {e}")
-        traceback.print_exc()
-        
+                print(f"Command error: {e}")
+                sovl_system.logger.record({
+                    "error": f"Command execution failed: {str(e)}",
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                })
+                
     finally:
-        # Cleanup actions when CLI exits (normally or via error)
-        print("\nShutting down...")
         if sovl_system is not None:
-            if hasattr(sovl_system, 'cleanup') and callable(sovl_system.cleanup):
-                print("Running system cleanup...")
-                sovl_system.cleanup()
-            # Explicitly delete to potentially help GC, especially with GPU resources
-            del sovl_system 
-            print("SOVLSystem instance deleted.")
-            
-        # Clear CUDA cache if PyTorch GPU was used
-        if torch.cuda.is_available():
-            print("Clearing CUDA cache...")
-            torch.cuda.empty_cache()
-            
-        print("\nExiting CLI.")
+            shutdown_system(sovl_system)
 
 # --- Entry Point ---
 if __name__ == "__main__":
     # This allows running the CLI directly
     # You might pass a pre-configured ConfigManager here if needed
     run_cli()
+
+def cleanup_resources(sovl_system):
+    """Properly cleanup system resources."""
+    try:
+        # Use scaffold manager's reset
+        if hasattr(sovl_system, 'scaffold_manager'):
+            sovl_system.scaffold_manager.reset_scaffold_state()
+            
+        # System cleanup
+        if hasattr(sovl_system, 'cleanup') and callable(sovl_system.cleanup):
+            sovl_system.cleanup()
+            
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        sovl_system.logger.record({
+            "event": "cli_cleanup_complete",
+            "timestamp": time.time()
+        })
+            
+    except Exception as e:
+        if hasattr(sovl_system, 'logger'):
+            sovl_system.logger.record({
+                "error": f"CLI cleanup failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+
+def _parse_config_value(value_str: str):
+    """Helper to parse configuration values into appropriate types."""
+    try:
+        # Try to parse as number first
+        if '.' in value_str:
+            return float(value_str)
+        try:
+            return int(value_str)
+        except ValueError:
+            pass
+            
+        # Handle booleans
+        if value_str.lower() == 'true':
+            return True
+        if value_str.lower() == 'false':
+            return False
+            
+        # Handle lists (comma-separated)
+        if ',' in value_str:
+            parts = [p.strip() for p in value_str.split(',')]
+            # Recursively parse each part
+            return [_parse_config_value(p) for p in parts]
+            
+        # Default to string
+        return value_str
+    except Exception as e:
+        raise ValueError(f"Failed to parse config value '{value_str}': {str(e)}")
+
+@contextlib.contextmanager
+def temporary_system_state(sovl_system, **kwargs):
+    """Context manager for temporarily modifying system attributes."""
+    original_values = {}
+    try:
+        # Save original values and set new ones
+        for key, value in kwargs.items():
+            if hasattr(sovl_system, key):
+                original_values[key] = getattr(sovl_system, key)
+                setattr(sovl_system, key, value)
+        yield
+    finally:
+        # Restore original values
+        for key, value in original_values.items():
+            setattr(sovl_system, key, value)
+
+def validate_system(required_attrs):
+    """Decorator to validate system has required attributes."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(sovl_system, *args, **kwargs):
+            missing = [attr for attr in required_attrs 
+                      if not hasattr(sovl_system, attr)]
+            if missing:
+                print(f"Error: System missing required attributes: {missing}")
+                return False
+            return func(sovl_system, *args, **kwargs)
+        return wrapper
+    return decorator
+
+def shutdown_system(sovl_system):
+    """Properly shutdown the system."""
+    try:
+        print("\nInitiating shutdown sequence...")
+        
+        # Save final state if possible
+        if hasattr(sovl_system, 'save_state'):
+            try:
+                sovl_system.save_state("final_state.json")
+                print("Final state saved.")
+            except Exception as e:
+                print(f"Warning: Could not save final state: {e}")
+        
+        # Clean up resources
+        cleanup_resources(sovl_system)
+        
+        # Log shutdown
+        if hasattr(sovl_system, 'logger'):
+            sovl_system.logger.record({
+                "event": "system_shutdown",
+                "timestamp": time.time(),
+                "status": "clean"
+            })
+            
+        print("Shutdown complete.")
+        
+    except Exception as e:
+        print(f"Error during shutdown: {e}")
+        if hasattr(sovl_system, 'logger'):
+            sovl_system.logger.record({
+                "event": "system_shutdown",
+                "status": "error",
+                "error": str(e),
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+
+def cmd_history(sovl_system, args):
+    """Handle the history command."""
+    if not hasattr(sovl_system, 'cmd_history'):
+        print("Command history not available.")
+        return False
+        
+    try:
+        num_entries = 10  # default
+        search_term = None
+        
+        if args:
+            if args[0].isdigit():
+                num_entries = int(args[0])
+            else:
+                search_term = ' '.join(args)
+        
+        if search_term:
+            entries = sovl_system.cmd_history.search(search_term)
+            print(f"\nCommands matching '{search_term}':")
+        else:
+            entries = sovl_system.cmd_history.get_last(num_entries)
+            print(f"\nLast {len(entries)} commands:")
+            
+        if not entries:
+            print("No matching commands found.")
+            return False
+            
+        for entry in entries:
+            print(sovl_system.cmd_history.format_entry(entry))
+            
+    except Exception as e:
+        sovl_system.logger.record({
+            "error": f"History command failed: {str(e)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        print(f"Error displaying history: {str(e)}")
+    return False
+
+def cmd_help(sovl_system, args):
+    """Display categorized help information."""
+    if args:
+        category = args[0].capitalize()
+        if category in COMMAND_CATEGORIES:
+            print(f"\n{category} Commands:")
+            for cmd in COMMAND_CATEGORIES[category]:
+                if cmd in COMMANDS:
+                    doc = COMMANDS[cmd].__doc__ or "No description available."
+                    print(f"  {cmd:<20} : {doc.split('.')[0]}")
+        else:
+            print(f"Unknown category: {category}")
+            print("Available categories:", ", ".join(COMMAND_CATEGORIES.keys()))
+    else:
+        print("\nCommand Categories:")
+        for category, commands in COMMAND_CATEGORIES.items():
+            print(f"\n{category}:")
+            for cmd in commands:
+                if cmd in COMMANDS:
+                    doc = COMMANDS[cmd].__doc__ or "No description available."
+                    print(f"  {cmd:<20} : {doc.split('.')[0]}")
+    return False

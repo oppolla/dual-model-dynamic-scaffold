@@ -10,6 +10,7 @@ from threading import Lock
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
+import contextlib
 
 def create_sparse_mask(
     seq_len: int,
@@ -23,6 +24,12 @@ def create_sparse_mask(
     """
     try:
         with NumericalGuard():
+            # Validate parameters using scaffold manager
+            scaffold_manager = ScaffoldManager(config_manager, logger)
+            if not scaffold_manager.validate_scaffold_config():
+                raise ValueError("Invalid scaffold configuration for sparse mask creation")
+
+            # Rest of the sparse mask creation logic remains the same
             if sparse_pattern == 'window':
                 mask = torch.zeros(seq_len, seq_len, device=device)
                 for i in range(seq_len):
@@ -151,7 +158,7 @@ class CrossAttentionLayer(nn.Module):
         logger: Logger,
         hidden_size: Optional[int] = None,
         num_heads: Optional[int] = None,
-        device: str = 'cpu'  # New parameter
+        device: str = 'cpu'
     ):
         """
         Initialize the cross-attention layer.
@@ -169,7 +176,14 @@ class CrossAttentionLayer(nn.Module):
         self.lock = Lock()
         self.device = device
 
-        # Load configuration
+        # Create a scaffold manager instance for validation
+        self.scaffold_manager = ScaffoldManager(config_manager, logger)
+        
+        # Validate configuration before proceeding
+        if not self.scaffold_manager.validate_scaffold_config():
+            raise ValueError("Invalid scaffold configuration for cross attention layer")
+
+        # Load configuration with validation
         self.load_config(hidden_size, num_heads)
 
         # Validate configuration
@@ -536,138 +550,7 @@ class CrossAttentionInjector:
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
-        self.hidden_size = config_manager.get("core_config.hidden_size", 768)
-        self.num_heads = config_manager.get("core_config.num_heads", 12)
-        self.gradient_checkpointing = config_manager.get("core_config.gradient_checkpointing", False)
-        self.custom_layers = config_manager.get("core_config.cross_attn_layers", [])
-        self.quantization_mode = config_manager.get("core_config.quantization", "fp16")
-        self.scaffold_unk_id = config_manager.get("controls_config.scaffold_unk_id", 0)
-        self.scaffold_proj = None
-
-    def get_cross_attention_layers(self, model: nn.Module, mode: Optional[str] = None) -> List[int]:
-        """
-        Determine which layers to inject cross-attention into.
-        """
-        try:
-            mode = mode or self.config_manager.get("core_config.layer_selection_mode", "balanced")
-            total_layers = 0
-            if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
-                total_layers = len(model.transformer.h)
-            elif hasattr(model, 'layers'):
-                total_layers = len(model.layers)
-            elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
-                total_layers = len(model.model.layers)
-            elif hasattr(model, 'decoder') and hasattr(model.decoder, 'layers'):
-                total_layers = len(model.decoder.layers)
-
-            if total_layers == 0:
-                self.logger.record({
-                    "error": "No layers found for cross-attention injection",
-                    "timestamp": time.time()
-                })
-                return []
-
-            if mode == "early":
-                layers = list(range(total_layers // 3))
-            elif mode == "late":
-                layers = list(range(2 * total_layers // 3, total_layers))
-            elif mode == "custom" and self.custom_layers:
-                layers = validate_layer_indices(self.custom_layers, total_layers, "CrossAttentionInjector", self.logger)
-            else:  # balanced
-                layers = list(range(total_layers // 3, 2 * total_layers // 3))
-
-            self.logger.record({
-                "event": "layer_selection",
-                "mode": mode,
-                "selected_layers": layers,
-                "total_layers": total_layers,
-                "timestamp": time.time()
-            })
-            return layers
-        except Exception as e:
-            self.logger.record({
-                "error": f"Layer selection failed: {str(e)}",
-                "mode": mode,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-    def inject_cross_attention(self, model, scaffold_model, core_config, cross_attn_config, lora_config, token_map, device):
-        try:
-            # Validate inputs
-            self._validate_inputs(model, scaffold_model, core_config)
-            
-            # Get layer indices
-            layer_indices = core_config.get("cross_attn_layers", [])
-            
-            # Inject each layer
-            for layer_idx in layer_indices:
-                try:
-                    self._inject_single_layer(
-                        model, scaffold_model, layer_idx,
-                        cross_attn_config, lora_config, token_map, device
-                    )
-                except Exception as e:
-                    raise RuntimeError(f"Failed to inject layer {layer_idx}: {str(e)}")
-                    
-        except Exception as e:
-            raise RuntimeError(f"Cross-attention injection failed: {str(e)}")
-            
-    def _validate_inputs(self, model, scaffold_model, core_config):
-        """Validate input models and configuration."""
-        if not hasattr(model, 'transformer'):
-            raise ValueError("Model must have transformer attribute")
-        if not hasattr(scaffold_model, 'transformer'):
-            raise ValueError("Scaffold model must have transformer attribute")
-        if not isinstance(core_config.get("cross_attn_layers", []), list):
-            raise ValueError("cross_attn_layers must be a list")    
-
-    def set_scaffold_influence(
-        self,
-        model: nn.Module,
-        layers: List[int],
-        weight: Optional[float] = None,
-        blend_strength: Optional[float] = None,
-        layer_weights: Optional[List[float]] = None,
-        lifecycle_weighting: bool = False,
-        lifecycle_curve: Optional[str] = None
-    ):
-        """
-        Set influence weights and blend strengths for cross-attention layers.
-        """
-        try:
-            lifecycle_weighting = lifecycle_weighting or self.config_manager.get("controls_config.enable_lifecycle_weighting", False)
-            lifecycle_curve = lifecycle_curve or self.config_manager.get("training_config.lifecycle_curve", "sigmoid_linear")
-            model_layers, _ = self.find_model_layers(model)
-            for layer_idx in layers:
-                if layer_idx >= len(model_layers) or not hasattr(model_layers[layer_idx], 'cross_attn'):
-                    self.logger.record({
-                        "warning": f"Layer {layer_idx} lacks cross_attn or is out of bounds",
-                        "timestamp": time.time()
-                    })
-                    continue
-                cross_attn = model_layers[layer_idx].cross_attn
-                if layer_weights and len(layer_weights) > layer_idx:
-                    cross_attn.set_influence_weight(layer_weights[layer_idx])
-                elif weight is not None:
-                    cross_attn.set_influence_weight(weight)
-                if blend_strength is not None:
-                    cross_attn.set_blend_strength(blend_strength)
-                if lifecycle_weighting and weight is not None:
-                    cross_attn.set_lifecycle_weight(weight, lifecycle_curve)
-        except Exception as e:
-            self.logger.record({
-                "error": f"Scaffold influence setting failed: {str(e)}",
-                "layers": layers,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-    def find_model_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
-        strategy = LayerDiscoveryStrategy(self.logger)
-        return strategy.find_layers(model)
+        self.scaffold_manager = ScaffoldManager(config_manager, logger)
 
     def inject(
         self,
@@ -677,11 +560,28 @@ class CrossAttentionInjector:
         injection_strategy: Optional[str] = None,
         token_map: Optional[Dict] = None
     ) -> nn.Module:
-        """
-        Inject cross-attention layers into the base model.
-        """
         try:
             with self.lock:
+                # Initialize and validate scaffold state
+                if not self.scaffold_manager.initialize_scaffold_state(
+                    self.config_manager.get("core_config.scaffold_model_name"),
+                    base_model.device
+                ):
+                    raise ValueError("Failed to initialize scaffold state")
+
+                # Verify compatibility
+                if not self.scaffold_manager.verify_scaffold_compatibility(base_model.config):
+                    raise ValueError("Base and scaffold models are incompatible")
+
+                # Get scaffold stats for logging
+                scaffold_stats = self.scaffold_manager.get_scaffold_stats()
+                self.logger.record({
+                    "event": "injection_start",
+                    "scaffold_stats": scaffold_stats,
+                    "timestamp": time.time()
+                })
+
+                # Rest of injection logic remains the same
                 injection_strategy = injection_strategy or self.config_manager.get("controls_config.injection_strategy", "sequential")
                 allow_empty_layers = self.config_manager.get("controls_config.allow_empty_layers", False)
                 if isinstance(scaffold_model, nn.Module):
@@ -690,8 +590,8 @@ class CrossAttentionInjector:
                     scaffold_models = scaffold_model
 
                 # Validate hidden sizes
-                base_hidden_size = getattr(base_model.config, 'hidden_size', self.hidden_size)
-                scaffold_hidden_size = getattr(scaffold_models[0].config, 'hidden_size', self.hidden_size)
+                base_hidden_size = getattr(base_model.config, 'hidden_size', self.config_manager.get("core_config.hidden_size", 768))
+                scaffold_hidden_size = getattr(scaffold_models[0].config, 'hidden_size', self.config_manager.get("core_config.hidden_size", 768))
                 if base_hidden_size != scaffold_hidden_size:
                     self.logger.record({
                         "event": "hidden_size_mismatch",
@@ -755,12 +655,65 @@ class CrossAttentionInjector:
         except Exception as e:
             self.logger.record({
                 "error": f"Cross-attention injection failed: {str(e)}",
-                "layers_to_inject": layers_to_inject,
-                "injection_strategy": injection_strategy,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            # Clean up on failure
+            self.scaffold_manager.reset_scaffold_state()
+            raise
+
+    def get_cross_attention_layers(self, model: nn.Module, mode: Optional[str] = None) -> List[int]:
+        """
+        Determine which layers to inject cross-attention into.
+        """
+        try:
+            mode = mode or self.config_manager.get("core_config.layer_selection_mode", "balanced")
+            total_layers = 0
+            if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+                total_layers = len(model.transformer.h)
+            elif hasattr(model, 'layers'):
+                total_layers = len(model.layers)
+            elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
+                total_layers = len(model.model.layers)
+            elif hasattr(model, 'decoder') and hasattr(model.decoder, 'layers'):
+                total_layers = len(model.decoder.layers)
+
+            if total_layers == 0:
+                self.logger.record({
+                    "error": "No layers found for cross-attention injection",
+                    "timestamp": time.time()
+                })
+                return []
+
+            if mode == "early":
+                layers = list(range(total_layers // 3))
+            elif mode == "late":
+                layers = list(range(2 * total_layers // 3, total_layers))
+            elif mode == "custom" and self.custom_layers:
+                layers = validate_layer_indices(self.custom_layers, total_layers, "CrossAttentionInjector", self.logger)
+            else:  # balanced
+                layers = list(range(total_layers // 3, 2 * total_layers // 3))
+
+            self.logger.record({
+                "event": "layer_selection",
+                "mode": mode,
+                "selected_layers": layers,
+                "total_layers": total_layers,
+                "timestamp": time.time()
+            })
+            return layers
+        except Exception as e:
+            self.logger.record({
+                "error": f"Layer selection failed: {str(e)}",
+                "mode": mode,
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc()
             })
             raise
+
+    def find_model_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
+        strategy = LayerDiscoveryStrategy(self.logger)
+        return strategy.find_layers(model)
 
     def _create_wrapped_layer(
         self,
@@ -1051,3 +1004,325 @@ def get_injection_state(self, model: nn.Module) -> Dict[int, bool]:
     except Exception as e:
         raise RuntimeError(f"Failed to get injection state: {str(e)}")
     return state            
+
+class InsufficientDataError(Exception):
+    """Exception raised when there is insufficient data for scaffold operations."""
+    pass
+
+def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
+    """
+    Calculate confidence score for scaffold generation.
+    
+    Args:
+        logits: Model prediction logits
+        generated_ids: Generated token IDs
+        
+    Returns:
+        float: Confidence score between 0 and 1
+    """
+    try:
+        with torch.no_grad():
+            probs = torch.softmax(logits, dim=-1)
+            selected_probs = probs[torch.arange(len(generated_ids)), generated_ids]
+            return float(selected_probs.mean())
+    except Exception as e:
+        raise RuntimeError(f"Failed to calculate confidence score: {str(e)}")
+
+class ScaffoldManager:
+    """Manages scaffold-related operations and state."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        self.config_manager = config_manager
+        self.logger = logger
+        self.token_map = None
+        self.scaffold_hidden_states = None
+        self.scaffold_config = None
+        self.validation_cache = {}
+        self.lock = Lock()
+
+    def validate_scaffold_config(self) -> bool:
+        """
+        Validate scaffold-specific configuration settings.
+        
+        Returns:
+            bool: True if configuration is valid, False otherwise
+        """
+        try:
+            required_keys = [
+                "core_config.scaffold_model_name",
+                "core_config.cross_attn_layers",
+                "controls_config.scaffold_weight_cap",
+                "controls_config.scaffold_unk_id"
+            ]
+            
+            # Check required keys
+            for key in required_keys:
+                if not self.config_manager.has_key(key):
+                    self.logger.record({
+                        "error": f"Missing required scaffold config key: {key}",
+                        "timestamp": time.time()
+                    })
+                    return False
+
+            # Validate cross attention layers
+            cross_attn_layers = self.config_manager.get("core_config.cross_attn_layers", [])
+            if not isinstance(cross_attn_layers, list):
+                self.logger.record({
+                    "error": "cross_attn_layers must be a list",
+                    "timestamp": time.time()
+                })
+                return False
+
+            # Validate numeric parameters
+            numeric_validations = {
+                "controls_config.scaffold_weight_cap": (0.0, 1.0),
+                "controls_config.blend_strength": (0.0, 1.0),
+                "controls_config.attention_weight": (0.0, None),
+                "controls_config.memory_weight": (0.0, 1.0)
+            }
+
+            for key, (min_val, max_val) in numeric_validations.items():
+                if self.config_manager.has_key(key):
+                    value = self.config_manager.get(key)
+                    if not isinstance(value, (int, float)):
+                        self.logger.record({
+                            "error": f"{key} must be numeric",
+                            "timestamp": time.time()
+                        })
+                        return False
+                    if min_val is not None and value < min_val:
+                        self.logger.record({
+                            "error": f"{key} must be >= {min_val}",
+                            "timestamp": time.time()
+                        })
+                        return False
+                    if max_val is not None and value > max_val:
+                        self.logger.record({
+                            "error": f"{key} must be <= {max_val}",
+                            "timestamp": time.time()
+                        })
+                        return False
+
+            self.validation_cache["config_valid"] = True
+            return True
+
+        except Exception as e:
+            self.logger.record({
+                "error": f"Scaffold config validation failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return False
+
+    def initialize_scaffold_state(self, model_name: str, device: str) -> bool:
+        """
+        Initialize scaffold model state and configuration.
+        
+        Args:
+            model_name: Name of the scaffold model
+            device: Device to initialize on
+            
+        Returns:
+            bool: True if initialization successful, False otherwise
+        """
+        try:
+            from transformers import AutoConfig
+            
+            self.scaffold_config = AutoConfig.from_pretrained(model_name)
+            
+            # Validate model architecture
+            required_attrs = ["hidden_size", "num_attention_heads", "num_hidden_layers"]
+            for attr in required_attrs:
+                if not hasattr(self.scaffold_config, attr):
+                    raise ValueError(f"Scaffold model config missing {attr}")
+
+            # Cache important values
+            with self.lock:
+                self.hidden_size = self.scaffold_config.hidden_size
+                self.num_heads = self.scaffold_config.num_attention_heads
+                self.num_layers = self.scaffold_config.num_hidden_layers
+                self.device = device
+
+            return True
+
+        except Exception as e:
+            self.logger.record({
+                "error": f"Scaffold state initialization failed: {str(e)}",
+                "model_name": model_name,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return False
+
+    def verify_scaffold_compatibility(self, base_config) -> bool:
+        """
+        Verify compatibility between base and scaffold models.
+        
+        Args:
+            base_config: Configuration of the base model
+            
+        Returns:
+            bool: True if models are compatible, False otherwise
+        """
+        try:
+            if not self.scaffold_config:
+                raise ValueError("Scaffold config not initialized")
+
+            # Check dimension compatibility
+            if self.scaffold_config.hidden_size % base_config.hidden_size != 0:
+                self.logger.record({
+                    "error": "Incompatible hidden sizes",
+                    "scaffold_size": self.scaffold_config.hidden_size,
+                    "base_size": base_config.hidden_size,
+                    "timestamp": time.time()
+                })
+                return False
+
+            # Check attention head compatibility
+            if self.scaffold_config.num_attention_heads % base_config.num_attention_heads != 0:
+                self.logger.record({
+                    "error": "Incompatible number of attention heads",
+                    "scaffold_heads": self.scaffold_config.num_attention_heads,
+                    "base_heads": base_config.num_attention_heads,
+                    "timestamp": time.time()
+                })
+                return False
+
+            return True
+
+        except Exception as e:
+            self.logger.record({
+                "error": f"Scaffold compatibility check failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return False
+
+    def get_scaffold_stats(self) -> Dict:
+        """
+        Get current statistics about scaffold state.
+        
+        Returns:
+            Dict containing scaffold statistics
+        """
+        try:
+            with self.lock:
+                stats = {
+                    "hidden_size": self.hidden_size if hasattr(self, "hidden_size") else None,
+                    "num_heads": self.num_heads if hasattr(self, "num_heads") else None,
+                    "num_layers": self.num_layers if hasattr(self, "num_layers") else None,
+                    "token_map_size": len(self.token_map) if self.token_map else 0,
+                    "has_hidden_states": self.scaffold_hidden_states is not None,
+                    "config_valid": self.validation_cache.get("config_valid", False),
+                    "device": str(self.device) if hasattr(self, "device") else None,
+                    "timestamp": time.time()
+                }
+                return stats
+
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to get scaffold stats: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return {}
+
+    def reset_scaffold_state(self):
+        """Reset all scaffold-related state."""
+        with self.lock:
+            self.token_map = None
+            self.scaffold_hidden_states = None
+            self.validation_cache.clear()
+            self.logger.record({
+                "event": "scaffold_state_reset",
+                "timestamp": time.time()
+            })
+
+    def build_token_map(self, base_tokenizer, scaffold_tokenizer):
+        """
+        Build mapping between base and scaffold tokenizers.
+        
+        Args:
+            base_tokenizer: Base model tokenizer
+            scaffold_tokenizer: Scaffold model tokenizer
+        """
+        try:
+            token_map = {}
+            for token, base_id in base_tokenizer.get_vocab().items():
+                scaffold_id = scaffold_tokenizer.convert_tokens_to_ids(token)
+                if scaffold_id != scaffold_tokenizer.unk_token_id:
+                    token_map[base_id] = scaffold_id
+            self.token_map = token_map
+            return token_map
+        except Exception as e:
+            self.logger.record({
+                "error": f"Token map building failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise            
+
+    @contextlib.contextmanager
+    def scaffold_context(self, hidden_states):
+        """
+        Context manager for scaffold hidden states.
+        
+        Args:
+            hidden_states: Scaffold model hidden states
+        """
+        try:
+            prev_states = self.scaffold_hidden_states
+            self.scaffold_hidden_states = hidden_states
+            yield
+        finally:
+            self.scaffold_hidden_states = prev_states
+
+    def get_scaffold_hidden_states(self, scaffold_inputs):
+        """
+        Get hidden states from scaffold inputs.
+        
+        Args:
+            scaffold_inputs: Input tensors for scaffold model
+            
+        Returns:
+            torch.Tensor: Scaffold hidden states
+        """
+        try:
+            return self.scaffold_hidden_states
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to get scaffold hidden states: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
+
+    def clear_scaffold_cache(self):
+        """Clear scaffold hidden states cache."""
+        self.scaffold_hidden_states = None
+
+    def map_sequence(self, base_input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Map base model token IDs to scaffold token IDs.
+        
+        Args:
+            base_input_ids: Input token IDs from base model
+            
+        Returns:
+            torch.Tensor: Mapped scaffold token IDs
+        """
+        try:
+            if self.token_map is None:
+                raise ValueError("Token map not initialized")
+                
+            scaffold_ids = []
+            for base_id in base_input_ids.tolist():
+                scaffold_ids.append(self.token_map.get(base_id, self.config_manager.get("controls_config.scaffold_unk_id", 0)))
+            return torch.tensor(scaffold_ids, device=base_input_ids.device)
+        except Exception as e:
+            self.logger.record({
+                "error": f"Sequence mapping failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise            

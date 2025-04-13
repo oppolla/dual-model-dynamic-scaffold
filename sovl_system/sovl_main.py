@@ -19,7 +19,7 @@ from sovl_io import load_jsonl, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
 from sovl_config import ConfigManager
-from sovl_scaffold import inject_cross_attention, CrossAttentionInjector
+from sovl_scaffold import inject_cross_attention, CrossAttentionInjector, ScaffoldManager
 from sovl_processor import LogitsProcessor
 from sovl_utils import (
     NumericalGuard,
@@ -34,6 +34,7 @@ from sovl_utils import (
     detect_repetitions,
     validate_layer_indices,
 )
+from sovl_temperament import TemperamentSystem, TemperamentConfig
 
 class InsufficientDataError(Exception):
     pass
@@ -492,6 +493,20 @@ class SOVLSystem:
 
         # After initializing the processor and token maps, add:
         self.processor.set_token_map(self.state.token_map, self.scaffold_unk_id)
+
+        self.scaffold_manager = ScaffoldManager(config_manager, self.logger)
+
+        # Replace direct temperament variables with TemperamentSystem
+        self.temperament = TemperamentSystem(
+            config=TemperamentConfig(),
+            logger=self.logger,
+            device=self.device
+        )
+        
+        # Remove these variables as they're now handled by TemperamentSystem
+        # self.temperament_score = 0.0
+        # self.last_temperament_score = 0.0
+        # self.temperament_history = deque(maxlen=5)
 
     def _validate_config(self):
         """Validate required configuration keys and layer settings."""
@@ -1394,39 +1409,40 @@ class SOVLSystem:
             })
             print(f"Lifecycle params updated: {updates}")
 
-    def save_state(self, path_prefix=None):
+    def save_state(self, path=None):
         """Save all system state with proper serialization."""
-        if path_prefix is None:
-            path_prefix = self.controls_config.get("save_path_prefix", "state")
+        if path is None:
+            path = self.controls_config.get("save_path_prefix", "state")
         try:
             with self.memory_lock:
                 # Save scaffold
-                torch.save(self.scaffolds[0].state_dict(), f"{path_prefix}_scaffold.pth")
+                torch.save(self.scaffolds[0].state_dict(), f"{path}_scaffold.pth")
 
                 # Save cross-attention
-                self.cross_attention_injector.save_state(f"{path_prefix}_cross_attn.pth", self.base_model)
+                self.cross_attention_injector.save_state(f"{path}_cross_attn.pth", self.base_model)
 
                 # Save token map
-                with open(f"{path_prefix}_token_map.json", "w") as f:
+                with open(f"{path}_token_map.json", "w") as f:
                     json.dump({str(k): v for k, v in self.token_map.items()}, f)
 
                 # Save system state
                 state_dict = {
                     "system_state": self.state.to_dict(),
                     "curiosity_state": self.curiosity_manager.save_state() if self.curiosity_manager else {},
-                    "config_state": self.config_manager.get_state()
+                    "config_state": self.config_manager.get_state(),
+                    "temperament": self.temperament.get_state()
                 }
-                with open(f"{path_prefix}_state.json", "w") as f:
+                with open(f"{path}_state.json", "w") as f:
                     json.dump(state_dict, f)
 
                 self.logger.record({
                     "event": "state_saved",
-                    "path_prefix": path_prefix,
+                    "path_prefix": path,
                     "timestamp": time.time(),
                     "conversation_id": self.history.conversation_id,
                     "state_hash": self.state.state_hash()
                 })
-                print(f"State saved to {path_prefix}_*.pth/json")
+                print(f"State saved to {path}_*.pth/json")
         except Exception as e:
             self.error_logger.record({
                 "error": f"Save failed: {str(e)}",
@@ -1440,27 +1456,28 @@ class SOVLSystem:
                 state_dict = {
                     "system_state": self.state.to_dict(),
                     "curiosity_state": {},
-                    "config_state": self.config_manager.get_state()
+                    "config_state": self.config_manager.get_state(),
+                    "temperament": {}
                 }
-                with open(f"{path_prefix}_state.json", "w") as f:
+                with open(f"{path}_state.json", "w") as f:
                     json.dump(state_dict, f)
                 print("Saved core state")
             except:
                 print("Complete save failure!")
 
-    def load_state(self, path_prefix=None):
+    def load_state(self, path=None):
         """Load all system state with proper device handling."""
-        if path_prefix is None:
-            path_prefix = self.controls_config.get("save_path_prefix", "state")
+        if path is None:
+            path = self.controls_config.get("save_path_prefix", "state")
         try:
             with self.memory_lock:
-                if os.path.exists(f"{path_prefix}_scaffold.pth"):
-                    self.scaffolds[0].load_state_dict(torch.load(f"{path_prefix}_scaffold.pth"))
+                if os.path.exists(f"{path}_scaffold.pth"):
+                    self.scaffolds[0].load_state_dict(torch.load(f"{path}_scaffold.pth"))
                     print("Scaffold state loaded.")
 
-                if os.path.exists(f"{path_prefix}_cross_attn.pth"):
+                if os.path.exists(f"{path}_cross_attn.pth"):
                     try:
-                        self.cross_attention_injector.load_state(f"{path_prefix}_cross_attn.pth", self.base_model)
+                        self.cross_attention_injector.load_state(f"{path}_cross_attn.pth", self.base_model)
                         print("Cross-attention state loaded.")
                     except Exception as e:
                         self.error_logger.record({
@@ -1472,15 +1489,15 @@ class SOVLSystem:
                         })
                         print(f"Warning: Cross-attention state load failed: {e}. Continuing without it.")
 
-                if os.path.exists(f"{path_prefix}_token_map.json"):
-                    with open(f"{path_prefix}_token_map.json", "r") as f:
+                if os.path.exists(f"{path}_token_map.json"):
+                    with open(f"{path}_token_map.json", "r") as f:
                         loaded_map = json.load(f)
                     self.token_map = defaultdict(lambda: [self.scaffold_unk_id],
                                                 {int(k): v for k, v in loaded_map.items()})
                     print("Token map loaded.")
 
-                if os.path.exists(f"{path_prefix}_state.json"):
-                    with open(f"{path_prefix}_state.json", "r") as f:
+                if os.path.exists(f"{path}_state.json"):
+                    with open(f"{path}_state.json", "r") as f:
                         state_dict = json.load(f)
                     self.state.from_dict(state_dict["system_state"], device=DEVICE)
                     if self.curiosity_manager and "curiosity_state" in state_dict:
@@ -1493,11 +1510,13 @@ class SOVLSystem:
                         self.cross_attn_config = self.config_manager.get_section("cross_attn_config")
                         self.controls_config = self.config_manager.get_section("controls_config")
                         self.lora_config = self.config_manager.get_section("lora_config")
+                    if "temperament" in state_dict:
+                        self.temperament.load_state(state_dict["temperament"])
                     print("System and curiosity state loaded.")
 
                 self.logger.record({
                     "event": "state_loaded",
-                    "path_prefix": path_prefix,
+                    "path_prefix": path,
                     "timestamp": time.time(),
                     "conversation_id": self.history.conversation_id,
                     "state_hash": self.state.state_hash()
@@ -1631,7 +1650,7 @@ class SOVLSystem:
         if isinstance(prompts, str):
             prompts = [prompts]
         inputs = self.base_tokenizer(prompts, return_tensors='pt', padding=padding, truncation=True, max_length=max_length).to(DEVICE)
-        scaffold_input_ids = self.map_sequence(inputs.input_ids)
+        scaffold_input_ids = self.scaffold_manager.map_sequence(inputs.input_ids)
         scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
         return {'input_ids': scaffold_input_ids, 'attention_mask': scaffold_attention_mask}
     
@@ -1667,70 +1686,85 @@ class SOVLSystem:
             print("Cross-attention disabled.")
             return
     
-        injector = CrossAttentionInjector(
-            hidden_size=self.core_config.get("hidden_size", self.base_config.hidden_size),
-            num_heads=self.base_config.num_attention_heads,
-            logger=self.logger.record
-        )
-    
-        layers_to_inject = (
-            injector.get_cross_attention_layers(self.base_model, mode=self.core_config.get("layer_selection_mode", "balanced"))
-            if self.core_config.get("use_dynamic_layers", False)
-            else self.core_config.get("cross_attn_layers", [5, 7])
-        )
-    
-        config = {
-            'hidden_size': self.core_config.get("hidden_size", self.base_config.hidden_size),
-            'num_heads': self.base_config.num_attention_heads,
-            'layers_to_inject': layers_to_inject,
-            'injection_strategy': self.cross_attn_config.get("injection_strategy", "sequential"),
-            'cross_attention_config': {
-                'use_pooling': self.cross_attn_config.get("use_pooling", True),
-                'use_gating': self.cross_attn_config.get("use_gating", True),
-                'dropout_rate': self.lora_config.get("lora_dropout", 0.1),
-                'use_residual': self.cross_attn_config.get("use_residual", True),
-                'scale_attention': self.cross_attn_config.get("scale_attention", True),
-                'use_sparse_attention': self.cross_attn_config.get("use_sparse_attention", False),
-                'gradient_checkpointing': DEVICE.type == 'cuda',
-                'quantization_mode': self.core_config.get("quantization", "fp16"),
-            },
-            'gradient_checkpointing': DEVICE.type == 'cuda',
-            'custom_layers': self.core_config.get("custom_layers", []),
-            'token_map': self.token_map,
-            'logger': self.logger.record,
-        }
-    
         try:
-            start_time = time.time()
-            injector.inject_cross_attention(
-                model=self.base_model,
-                scaffold_model=self.scaffolds[0],
-                layers=layers_to_inject,
-                memory_weight=self.cross_attn_config.get("memory_weight", 0.5),
-                dynamic_scale=self.cross_attn_config.get("dynamic_scale", 0.3)
+            # Validate layer indices before injection
+            cross_attn_layers = self.core_config.get("cross_attn_layers", [])
+            if not validate_layer_indices(cross_attn_layers, self.base_config.num_hidden_layers):
+                raise ValueError(f"Invalid cross-attention layer indices: {cross_attn_layers}")
+    
+            # Create injector with validation
+            injector = CrossAttentionInjector(
+                hidden_size=self.base_config.hidden_size,
+                num_heads=self.base_config.num_attention_heads,
+                logger=self.logger.record
             )
-            elapsed = time.time() - start_time
-            self.logger.record({
-                "event": "cross_attention_injected",
-                "status": "success",
-                "layers_injected": layers_to_inject,
-                "time_elapsed": elapsed,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Cross-attention injection complete in {elapsed:.2f}s.")
+    
+            # Backup original model state
+            original_state = {}
+            for name, param in self.base_model.named_parameters():
+                original_state[name] = param.clone()
+            
+            try:
+                # Log injection attempt
+                self.logger.record({
+                    "event": "cross_attention_injection_start",
+                    "layers": cross_attn_layers,
+                    "timestamp": time.time()
+                })
+                
+                # Perform injection
+                injector.inject_cross_attention(
+                    model=self.base_model,
+                    scaffold_model=self.scaffolds[0],
+                    core_config=self.core_config,
+                    cross_attn_config=self.cross_attn_config,
+                    lora_config=self.lora_config,
+                    token_map=self.token_map,
+                    device=DEVICE
+                )
+                
+                # Verify injection
+                if not self._verify_cross_attention_injection():
+                    raise RuntimeError("Cross-attention injection verification failed")
+                    
+                # Log successful injection
+                self.logger.record({
+                    "event": "cross_attention_injection_complete",
+                    "status": "success",
+                    "timestamp": time.time()
+                })
+                    
+            except Exception as e:
+                # Log failure
+                self.logger.record({
+                    "event": "cross_attention_injection_failed",
+                    "error": str(e),
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                })
+                
+                # Restore original state
+                for name, param in self.base_model.named_parameters():
+                    if name in original_state:
+                        param.data.copy_(original_state[name])
+                        
+                # Log restoration
+                self.logger.record({
+                    "event": "cross_attention_restored",
+                    "status": "success",
+                    "timestamp": time.time()
+                })
+                
+                raise
+            
         except Exception as e:
             self.error_logger.record({
                 "error": f"Cross-attention injection failed: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "config": config,
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
+                "stack_trace": traceback.format_exc()
             })
             raise
-        
+
     def enable_dry_run(self, max_samples=2, max_length=128, validate_architecture=True, skip_training=True):
         """Enable dry run mode."""
         self.dry_run = True
@@ -1838,71 +1872,60 @@ class SOVLSystem:
             print("--- Sleep Training Complete ---")
     
     def _update_temperament(self):
-        """Update temperament based on confidence and lifecycle."""
-        avg_confidence = safe_divide(
-            self.state.sleep_confidence_sum,
-            self.state.sleep_confidence_count,
-            default=0.5
-        )
-        lifecycle_stage = safe_divide(
-            self.trainer.data_exposure,
-            self.trainer.lora_capacity,
-            default=0.0
-        )
-    
-        curiosity_boost = self.controls_config.get("temp_curiosity_boost", 0.3)
-        mood_influence = self.controls_config.get("temp_mood_influence", 0.5)
-        feedback_strength = self.controls_config.get("conf_feedback_strength", 0.5)
-        smoothing_factor = self.controls_config.get("temp_smoothing_factor", 0.5)
-    
-        base_score = 2.0 * (avg_confidence - 0.5)
-    
-        if float_lt(lifecycle_stage, 0.25):
-            bias = curiosity_boost * (1 - lifecycle_stage / 0.25)
-        elif float_lt(lifecycle_stage, 0.75):
-            bias = 0.0
-            if len(self.state.temperament_history) >= 5:
-                variance = torch.var(torch.tensor(list(self.state.temperament_history))).item()
-                bias -= 0.2 * variance
-        else:
-            bias = -curiosity_boost * (lifecycle_stage - 0.75) / 0.25
-    
-        target_score = base_score + bias + (feedback_strength * (avg_confidence - 0.5))
-        target_score = max(-1.0, min(1.0, target_score))
-        alpha = 0.1 * (1 - smoothing_factor)
-        self.state.temperament_score = (1 - alpha) * self.state.temperament_score + alpha * target_score
-        self.state.temperament_score = max(-1.0, min(1.0, self.state.temperament_score))
-        self.state.temperament_history = deque(
-            self.state.temperament_history,
-            maxlen=self.controls_config.get("temperament_history_maxlen", 5)
-        )
-        self.state.temperament_history.append(self.state.temperament_score)
-    
-        if self.curiosity_config.get("enable_curiosity", True) and self.curiosity_manager:
-            self.curiosity_manager.update_pressure(
-                temperament=self.state.temperament_score,
-                confidence=avg_confidence,
-                silence_duration=0.0,
-                context_vector=self.state.curiosity.context_vector
+        """Update system temperament based on recent performance."""
+        try:
+            # Get current lifecycle stage (0.0 to 1.0)
+            lifecycle_stage = self.trainer.data_exposure / max(1, self.config_manager.get(
+                "training_config.max_data_exposure", 1000))
+                
+            # Calculate average confidence from recent interactions
+            avg_confidence = self._calculate_average_confidence()
+            
+            # Get curiosity pressure if available
+            curiosity_pressure = (
+                self.state.curiosity.pressure 
+                if hasattr(self.state, 'curiosity') 
+                else None
             )
-    
-        label = (
-            "melancholic" if float_lt(self.state.temperament_score, -0.5) else
-            "restless" if float_lt(self.state.temperament_score, 0.0) else
-            "calm" if float_lt(self.state.temperament_score, 0.5) else "curious"
-        )
-        self.logger.record({
-            "event": "temperament_updated",
-            "score": self.state.temperament_score,
-            "label": label,
-            "lifecycle_stage": lifecycle_stage,
-            "avg_confidence": avg_confidence,
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        })
-        print(f"Temperament score: {self.state.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
-    
+            
+            # Use TemperamentSystem to update
+            self.temperament.update(
+                confidence=avg_confidence,
+                lifecycle_stage=lifecycle_stage,
+                time_since_last=time.time() - self.last_interaction_time,
+                curiosity_pressure=curiosity_pressure
+            )
+            
+            # Log the update
+            self.logger.record({
+                "event": "temperament_updated",
+                "score": self.temperament.score,
+                "mood": self.temperament.mood_label,
+                "lifecycle_stage": lifecycle_stage,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Temperament update failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+
+    def _calculate_average_confidence(self):
+        """Helper to calculate average confidence from recent interactions."""
+        try:
+            if not hasattr(self.state, 'confidence_history') or not self.state.confidence_history:
+                return 0.5  # Default confidence
+                
+            return sum(self.state.confidence_history) / len(self.state.confidence_history)
+        except Exception as e:
+            self.logger.record({
+                "error": f"Confidence calculation failed: {str(e)}",
+                "timestamp": time.time()
+            })
+            return 0.5
+
     def train_step(self, batch):
         """Execute a single training step with scaffold context."""
         try:
@@ -2140,12 +2163,14 @@ class SOVLSystem:
             scaffold_inputs = self.tokenize_and_map(prompt)
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
     
-            temp = adjust_temperature(
-                self.controls_config.get("base_temperature", 0.7),
-                self.state.temperament_score,
-                self.controls_config.get("temp_mood_influence", 0.5)
+            # Use TemperamentSystem's adjust_parameter method
+            temperature = self.temperament.adjust_parameter(
+                base_value=kwargs.get('temperature', self.base_temperature),
+                parameter_type="temperature"
             )
-            generation_params["adjusted_temperature"] = temp
+            
+            # Update kwargs with adjusted temperature
+            kwargs['temperature'] = temperature
     
             dynamic_factor = None
             if self.controls_config.get("enable_dynamic_cross_attention", False) and self.dynamic_cross_attn_mode:
@@ -2209,7 +2234,7 @@ class SOVLSystem:
                         max_new_tokens=max_new_tokens,
                         pad_token_id=self.base_tokenizer.pad_token_id,
                         eos_token_id=self.base_tokenizer.eos_token_id,
-                        temperature=temp,
+                        temperature=temperature,
                         return_dict_in_generate=True,
                         output_scores=True,
                         scaffold_context=scaffold_hidden_states,
@@ -2493,6 +2518,33 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
     
+    def tune_temperament(self, **kwargs):
+        """Update temperament configuration."""
+        try:
+            self.temperament.tune(**kwargs)
+            self.logger.record({
+                "event": "temperament_tuned",
+                "parameters": kwargs,
+                "timestamp": time.time()
+            })
+        except Exception as e:
+            self.logger.record({
+                "error": f"Temperament tuning failed: {str(e)}",
+                "parameters": kwargs,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+
+    @property
+    def temperament_score(self):
+        """Maintain compatibility with existing code."""
+        return self.temperament.score
+
+    @property
+    def mood_label(self):
+        """Get current mood label."""
+        return self.temperament.mood_label
+
     # Main block
     if __name__ == "__main__":
         from sovl_config import ConfigManager
