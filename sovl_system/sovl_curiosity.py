@@ -20,6 +20,8 @@ class Curiosity:
         self.weight_novelty = weight_novelty
         self.logger = logger
         self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
+        self.metrics_maxlen = self.config.get("metrics_maxlen", 1000)  # Default to 1000 entries
+        self.metrics: deque = deque(maxlen=self.metrics_maxlen)
 
     def compute_curiosity(
         self,
@@ -43,27 +45,20 @@ class Curiosity:
             float: Curiosity score.
         """
         try:
-            ignorance = 1.0 - (base_conf * 0.5 + scaf_conf * 0.5)
-            ignorance = max(0.0, min(1.0, ignorance))
+            # Early return if no embeddings to process
+            if not memory_embeddings or query_embedding is None:
+                return self._compute_ignorance_score(base_conf, scaf_conf)
 
-            novelty = 0.0
-            if memory_embeddings and query_embedding is not None:
-                query_embedding = query_embedding.to(device)
-                similarities = [
-                    self.cosine_similarity(
-                        query_embedding,
-                        emb.to(device)
-                    ).item()
-                    for emb in memory_embeddings
-                ]
-                novelty = 1.0 - max(min(max(similarities, default=0.0), 1.0), 0.0)
+            # Compute components
+            ignorance = self._compute_ignorance_score(base_conf, scaf_conf)
+            novelty = self._compute_novelty_score(memory_embeddings, query_embedding, device)
 
+            # Combine scores with weights
             score = (
                 self.weight_ignorance * ignorance +
                 self.weight_novelty * novelty
             )
-            score = max(0.0, min(1.0, score))
-            return score
+            return max(0.0, min(1.0, score))
 
         except Exception as e:
             if self.logger:
@@ -72,6 +67,29 @@ class Curiosity:
                     "timestamp": time.time()
                 })
             return 0.5
+
+    def _compute_ignorance_score(self, base_conf: float, scaf_conf: float) -> float:
+        """Compute ignorance component of curiosity score."""
+        ignorance = 1.0 - (base_conf * 0.5 + scaf_conf * 0.5)
+        return max(0.0, min(1.0, ignorance))
+
+    def _compute_novelty_score(
+        self,
+        memory_embeddings: List[torch.Tensor],
+        query_embedding: torch.Tensor,
+        device: torch.device
+    ) -> float:
+        """Compute novelty component of curiosity score."""
+        query_embedding = query_embedding.to(device)
+        similarities = [
+            self.cosine_similarity(
+                query_embedding,
+                emb.to(device)
+            ).item()
+            for emb in memory_embeddings
+        ]
+        max_similarity = max(similarities, default=0.0)
+        return 1.0 - max(0.0, min(1.0, max_similarity))
 
 
 class CuriosityPressure:
@@ -471,7 +489,7 @@ class CuriosityManager:
         answered: bool = False
     ) -> None:
         """
-        Update curiosity metrics.
+        Update curiosity metrics with automatic cleanup.
 
         Args:
             question (str): The question generated or evaluated.
@@ -479,13 +497,30 @@ class CuriosityManager:
             spontaneous (bool): Whether the question was spontaneous.
             answered (bool): Whether the question was answered.
         """
-        self.metrics.append({
+        # Check if adding will cause trimming
+        will_trim = len(self.metrics) == self.metrics_maxlen
+        # Create new metric entry
+        new_metric = {
             "question": question,
             "score": score,
             "spontaneous": spontaneous,
             "answered": answered,
             "timestamp": time.time()
-        })
+        }
+
+        # Add to metrics with automatic size limit
+        self.metrics.append(new_metric)
+
+        # Log if trimming occurred
+        if will_trim and self.logger:
+            self.logger.record({
+                "event": "metrics_trimmed",
+                "current_size": len(self.metrics),
+                "max_size": self.metrics_maxlen,
+                "timestamp": time.time()
+            })
+
+        # Trigger callback
         self.callbacks.trigger_callback(
             "metrics_updated",
             question=question,
@@ -493,6 +528,25 @@ class CuriosityManager:
             spontaneous=spontaneous,
             answered=answered
         )
+
+    def get_metrics(self, limit: Optional[int] = None) -> List[Dict]:
+        """
+        Get metrics with optional limit.
+
+        Args:
+            limit (Optional[int]): Maximum number of metrics to return.
+
+        Returns:
+            List[Dict]: List of metrics, optionally limited in size.
+        """
+        if limit is None:
+            return list(self.metrics)
+        return list(self.metrics)[-limit:]  
+
+    def clear_metrics(self) -> None:
+        """Clear all metrics."""
+        self.metrics.clear()
+        self.callbacks.trigger_callback("metrics_cleared")  
 
     def check_silence(
         self,
@@ -556,6 +610,7 @@ class CuriosityManager:
         max_new_tokens: Optional[int] = None,
         base_temperature: Optional[float] = None,
         temperament_influence: Optional[float] = None,
+        metrics_maxlen: Optional[int] = None,
         top_k: Optional[int] = None
     ) -> None:
         """
@@ -607,6 +662,10 @@ class CuriosityManager:
             updates["base_temperature"] = base_temperature
         if temperament_influence is not None and 0.1 <= temperament_influence <= 0.6:
             updates["temperament_influence"] = temperament_influence
+        if metrics_maxlen is not None and 100 <= metrics_maxlen <= 10000:
+            updates["metrics_maxlen"] = metrics_maxlen
+            self.metrics_maxlen = metrics_maxlen
+            self.metrics = deque(self.metrics, maxlen=metrics_maxlen)    
         if top_k is not None and 10 <= top_k <= 50:
             updates["top_k"] = top_k
 
@@ -629,14 +688,12 @@ class CuriosityManager:
             "pressure": self.pressure.value,
             "last_question_time": self.last_question_time,
             "unanswered_questions": list(self.unanswered_questions),
-            "metrics": self.metrics
+            "metrics": list(self.metrics)  # Convert deque to list for serialization
         }
 
     def load_state(self, state_dict: Dict) -> None:
-        self.pressure.value = state_dict.get("pressure", 0.0)
-        self.last_question_time = state_dict.get("last_question_time", time.time())
-        self.unanswered_questions = deque(
-            state_dict.get("unanswered_questions", []),
-            maxlen=self.config["queue_maxlen"]
-        )
-        self.metrics = state_dict.get("metrics", [])
+        # ... existing validation code ...
+        metrics = state_dict.get("metrics", [])
+        if not isinstance(metrics, list):
+            metrics = []
+        self.metrics = deque(metrics, maxlen=self.metrics_maxlen)
