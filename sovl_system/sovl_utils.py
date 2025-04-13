@@ -44,6 +44,12 @@ def validate_quantization_mode(quantization_mode: str, logger: Logger) -> str:
 
     return quantization_mode
 
+def validate_layer_indices(layer_indices: list, total_layers: int) -> bool:
+    """Validate that layer indices are within model bounds."""
+    if not isinstance(layer_indices, list):
+        return False
+    return all(0 <= idx < total_layers for idx in layer_indices)
+
 class NumericalGuard:
     """Context manager for precision-sensitive blocks with mixed precision support."""
     def __init__(self, dtype: torch.dtype = torch.float32, no_grad: bool = False, mixed_precision: bool = False):

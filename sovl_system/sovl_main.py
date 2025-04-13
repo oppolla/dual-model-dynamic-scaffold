@@ -536,53 +536,171 @@ class SOVLSystem:
             })
             raise
 
+    def _verify_cross_attention_injection(self) -> bool:
+        """Verify that cross-attention layers were properly injected."""
+        try:
+            # Check if expected layers exist
+            cross_attn_layers = self.core_config.get("cross_attn_layers", [])
+            expected_layers = set(cross_attn_layers)
+            found_layers = set()
+
+            # Scan model for cross-attention layers
+            for name, module in self.base_model.named_modules():
+                if "cross_attention" in name.lower():
+                    try:
+                        # Extract layer index from module name
+                        parts = name.split('.')
+                        if len(parts) >= 3 and parts[0] == 'transformer' and parts[1] == 'h':
+                            layer_idx = int(parts[2])
+                            found_layers.add(layer_idx)
+                    except (ValueError, IndexError):
+                        continue
+                    
+            # Log verification results
+            self.logger.record({
+                "event": "cross_attention_verification",
+                "expected_layers": list(expected_layers),
+                "found_layers": list(found_layers),
+                "timestamp": time.time()
+            })
+
+            # Check if all expected layers were found
+            if not expected_layers.issubset(found_layers):
+                missing_layers = expected_layers - found_layers
+                self.logger.record({
+                    "warning": f"Missing cross-attention layers: {missing_layers}",
+                    "timestamp": time.time()
+                })
+                return False
+
+            # Verify layer dimensions and structure
+            for layer_idx in expected_layers:
+                try:
+                    layer = self.base_model.transformer.h[layer_idx]
+                    if not hasattr(layer, 'cross_attention'):
+                        self.logger.record({
+                            "warning": f"Layer {layer_idx} missing cross_attention attribute",
+                            "timestamp": time.time()
+                        })
+                        return False
+
+                    # Verify dimensions match
+                    if layer.cross_attention.hidden_size != self.base_config.hidden_size:
+                        self.logger.record({
+                            "warning": f"Layer {layer_idx} dimension mismatch",
+                            "timestamp": time.time()
+                        })
+                        return False
+
+                    # Verify attention heads match
+                    if layer.cross_attention.num_attention_heads != self.base_config.num_attention_heads:
+                        self.logger.record({
+                            "warning": f"Layer {layer_idx} attention heads mismatch",
+                            "timestamp": time.time()
+                        })
+                        return False
+                except Exception as e:
+                    self.logger.record({
+                        "warning": f"Error verifying layer {layer_idx}: {str(e)}",
+                        "timestamp": time.time()
+                    })
+                    return False
+
+            return True
+        except Exception as e:
+            self.logger.record({
+                "error": f"Cross-attention verification failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return False
+
     def _insert_cross_attention(self):
         """Inject cross-attention layers by delegating to CrossAttentionInjector."""
         if not self.cross_attn_config.get("enable_cross_attention", True):
             self.logger.record({
                 "event": "cross_attention",
                 "status": "disabled",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
+                "timestamp": time.time()
             })
-            print("Cross-attention disabled.")
             return
-
-        injector = CrossAttentionInjector(
-            hidden_size=self.base_config.hidden_size,
-            num_heads=self.base_config.num_attention_heads,
-            logger=self.logger.record
-        )
-
+    
         try:
-            start_time = time.time()
-            injector.inject_cross_attention(
-                model=self.base_model,
-                scaffold_model=self.scaffolds[0],
-                core_config=self.core_config,
-                cross_attn_config=self.cross_attn_config,
-                lora_config=self.lora_config,
-                token_map=self.token_map,
-                device=DEVICE
+            # Validate layer indices before injection
+            cross_attn_layers = self.core_config.get("cross_attn_layers", [])
+            if not validate_layer_indices(cross_attn_layers, self.base_config.num_hidden_layers):
+                raise ValueError(f"Invalid cross-attention layer indices: {cross_attn_layers}")
+    
+            # Create injector with validation
+            injector = CrossAttentionInjector(
+                hidden_size=self.base_config.hidden_size,
+                num_heads=self.base_config.num_attention_heads,
+                logger=self.logger.record
             )
-            elapsed = time.time() - start_time
-            self.logger.record({
-                "event": "cross_attention_injected",
-                "status": "success",
-                "time_elapsed": elapsed,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Cross-attention injection complete in {elapsed:.2f}s.")
+    
+            # Backup original model state
+            original_state = {}
+            for name, param in self.base_model.named_parameters():
+                original_state[name] = param.clone()
+            
+            try:
+                # Log injection attempt
+                self.logger.record({
+                    "event": "cross_attention_injection_start",
+                    "layers": cross_attn_layers,
+                    "timestamp": time.time()
+                })
+                
+                # Perform injection
+                injector.inject_cross_attention(
+                    model=self.base_model,
+                    scaffold_model=self.scaffolds[0],
+                    core_config=self.core_config,
+                    cross_attn_config=self.cross_attn_config,
+                    lora_config=self.lora_config,
+                    token_map=self.token_map,
+                    device=DEVICE
+                )
+                
+                # Verify injection
+                if not self._verify_cross_attention_injection():
+                    raise RuntimeError("Cross-attention injection verification failed")
+                    
+                # Log successful injection
+                self.logger.record({
+                    "event": "cross_attention_injection_complete",
+                    "status": "success",
+                    "timestamp": time.time()
+                })
+                    
+            except Exception as e:
+                # Log failure
+                self.logger.record({
+                    "event": "cross_attention_injection_failed",
+                    "error": str(e),
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                })
+                
+                # Restore original state
+                for name, param in self.base_model.named_parameters():
+                    if name in original_state:
+                        param.data.copy_(original_state[name])
+                        
+                # Log restoration
+                self.logger.record({
+                    "event": "cross_attention_restored",
+                    "status": "success",
+                    "timestamp": time.time()
+                })
+                
+                raise
+            
         except Exception as e:
             self.error_logger.record({
                 "error": f"Cross-attention injection failed: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
+                "stack_trace": traceback.format_exc()
             })
             raise
 

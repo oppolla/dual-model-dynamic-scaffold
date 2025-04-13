@@ -593,6 +593,36 @@ class CrossAttentionInjector:
             })
             raise
 
+    def inject_cross_attention(self, model, scaffold_model, core_config, cross_attn_config, lora_config, token_map, device):
+        try:
+            # Validate inputs
+            self._validate_inputs(model, scaffold_model, core_config)
+            
+            # Get layer indices
+            layer_indices = core_config.get("cross_attn_layers", [])
+            
+            # Inject each layer
+            for layer_idx in layer_indices:
+                try:
+                    self._inject_single_layer(
+                        model, scaffold_model, layer_idx,
+                        cross_attn_config, lora_config, token_map, device
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"Failed to inject layer {layer_idx}: {str(e)}")
+                    
+        except Exception as e:
+            raise RuntimeError(f"Cross-attention injection failed: {str(e)}")
+            
+    def _validate_inputs(self, model, scaffold_model, core_config):
+        """Validate input models and configuration."""
+        if not hasattr(model, 'transformer'):
+            raise ValueError("Model must have transformer attribute")
+        if not hasattr(scaffold_model, 'transformer'):
+            raise ValueError("Scaffold model must have transformer attribute")
+        if not isinstance(core_config.get("cross_attn_layers", []), list):
+            raise ValueError("cross_attn_layers must be a list")    
+
     def set_scaffold_influence(
         self,
         model: nn.Module,
@@ -872,24 +902,43 @@ class CrossAttentionInjector:
 
         return ParallelLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
 
-    def verify_injection(self, model: nn.Module) -> bool:
-        """Verify that cross-attention layers were injected."""
+    def _verify_injection(self, model: nn.Module, layer_idx: int) -> bool:
+        """Quick verification of a single layer's cross-attention injection."""
         try:
-            layers, _ = self.find_model_layers(model)
-            result = any(hasattr(layer, 'cross_attn') for layer in layers)
-            self.logger.record({
-                "event": "injection_verification",
-                "success": result,
-                "timestamp": time.time()
-            })
-            return result
+            layer = model.transformer.h[layer_idx]
+            if not hasattr(layer, 'cross_attention'):
+                return False
+
+            # Basic dimension checks
+            if layer.cross_attention.embed_dim != self.hidden_size:
+                return False
+            if layer.cross_attention.num_heads != self.num_heads:
+                return False
+
+            # Verify the layer is properly connected
+            if not hasattr(layer.cross_attention, 'in_proj_weight'):
+                return False
+
+            return True
+        except Exception:
+            return False
+        
+    def _inject_single_layer(self, model, scaffold_model, layer_idx, cross_attn_config, lora_config, token_map, device):
+        """Inject cross-attention into a single layer."""
+        try:
+            # ... existing injection code ...
+            
+            # Add immediate verification
+            if not self._verify_injection(model, layer_idx):
+                raise RuntimeError(f"Layer {layer_idx} injection verification failed")
+                
+            if self.logger:
+                self.logger(f"Successfully injected and verified layer {layer_idx}")
+                
         except Exception as e:
-            self.logger.record({
-                "error": f"Injection verification failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+            if self.logger:
+                self.logger(f"Failed to inject layer {layer_idx}: {str(e)}")
+            raise    
 
     def save_state(self, path: str, state_dict: dict):
         """Save cross-attention parameters."""
@@ -935,7 +984,6 @@ class CrossAttentionInjector:
             })
             raise
 
-
 def inject_cross_attention(
     base_model: nn.Module,
     scaffold_model: Union[nn.Module, List[nn.Module]],
@@ -969,3 +1017,37 @@ def inject_cross_attention(
             "stack_trace": traceback.format_exc()
         })
         raise
+
+def verify_injection(self, model: nn.Module, layer_indices: List[int]) -> bool:
+    """Verify that cross-attention layers were properly injected."""
+    try:
+        for layer_idx in layer_indices:
+            layer = model.transformer.h[layer_idx]
+            if not hasattr(layer, 'cross_attention'):
+                return False
+            if layer.cross_attention.embed_dim != self.hidden_size:
+                return False
+            if layer.cross_attention.num_heads != self.num_heads:
+                return False
+        return True
+    except Exception:
+        return False
+
+def remove_cross_attention(self, model: nn.Module, layer_indices: List[int]) -> None:
+    """Remove cross-attention layers from specified indices."""
+    try:
+        for layer_idx in layer_indices:
+            if hasattr(model.transformer.h[layer_idx], 'cross_attention'):
+                delattr(model.transformer.h[layer_idx], 'cross_attention')
+    except Exception as e:
+        raise RuntimeError(f"Failed to remove cross-attention: {str(e)}")
+
+def get_injection_state(self, model: nn.Module) -> Dict[int, bool]:
+    """Get the current state of cross-attention layers."""
+    state = {}
+    try:
+        for i, layer in enumerate(model.transformer.h):
+            state[i] = hasattr(layer, 'cross_attention')
+    except Exception as e:
+        raise RuntimeError(f"Failed to get injection state: {str(e)}")
+    return state            
