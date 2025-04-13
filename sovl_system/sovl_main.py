@@ -13,7 +13,7 @@ from collections import deque, defaultdict, OrderedDict
 import traceback
 import os
 from threading import Lock
-from sovl_curiosity import CuriosityPressure
+from sovl_curiosity import CuriosityManager
 from sovl_logger import Logger
 from sovl_io import load_jsonl, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
@@ -127,6 +127,22 @@ if QUANTIZATION_MODE not in ["fp16", "int8", "int4"]:
     print(f"Warning: Invalid quantization '{QUANTIZATION_MODE}'. Defaulting to 'fp16'.")
     QUANTIZATION_MODE = "fp16"
 
+    # Curiosity Config
+ENABLE_CURIOSITY = config_manager.get("controls_config.enable_curiosity", True, expected_type=bool)
+CURIOSITY_WEIGHT_IGNORANCE = config_manager.get("controls_config.curiosity_weight_ignorance", 0.5, expected_type=float)
+CURIOSITY_WEIGHT_NOVELTY = config_manager.get("controls_config.curiosity_weight_novelty", 0.5, expected_type=float)
+CURIOSITY_PRESSURE_THRESHOLD = config_manager.get("controls_config.curiosity_pressure_threshold", 0.7, expected_type=float)
+CURIOSITY_PRESSURE_DROP = config_manager.get("controls_config.curiosity_pressure_drop", 0.2, expected_type=float)
+CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = config_manager.get("controls_config.curiosity_novelty_threshold_spontaneous", 0.8, expected_type=float)
+CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = config_manager.get("controls_config.curiosity_novelty_threshold_response", 0.6, expected_type=float)
+CURIOSITY_SILENCE_THRESHOLD = config_manager.get("controls_config.curiosity_silence_threshold", 30.0, expected_type=float)
+CURIOSITY_QUESTION_COOLDOWN = config_manager.get("controls_config.curiosity_question_cooldown", 60.0, expected_type=float)
+CURIOSITY_QUEUE_MAXLEN = config_manager.get("controls_config.curiosity_queue_maxlen", 10, expected_type=int)
+CURIOSITY_MAX_NEW_TOKENS = config_manager.get("controls_config.curiosity_max_new_tokens", 10, expected_type=int)
+CURIOSITY_BASE_TEMPERATURE = config_manager.get("controls_config.curiosity_base_temperature", 0.9, expected_type=float)
+CURIOSITY_TEMPERAMENT_INFLUENCE = config_manager.get("controls_config.curiosity_temperament_influence", 0.3, expected_type=float)
+CURIOSITY_TOP_K = config_manager.get("controls_config.curiosity_top_k", 40, expected_type=int)
+
 # LoRA Config
 LORA_RANK = config_manager.get("lora_config.lora_rank", 8, expected_type=int)
 LORA_ALPHA = config_manager.get("lora_config.lora_alpha", 16, expected_type=int)
@@ -201,110 +217,9 @@ ENABLE_REPETITION_CHECK = config_manager.get("controls_config.enable_repetition_
 ENABLE_PROMPT_DRIVEN_DREAMS = config_manager.get("controls_config.enable_prompt_driven_dreams", True, expected_type=bool)
 ENABLE_LIFECYCLE_WEIGHTING = config_manager.get("controls_config.enable_lifecycle_weighting", True, expected_type=bool)
 ENABLE_ERROR_LISTENING = config_manager.get("controls_config.enable_error_listening", True, expected_type=bool)
-# TCQS Controls
-ENABLE_CURIOSITY = config_manager.get("controls_config.enable_curiosity", True, expected_type=bool)
-CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = config_manager.get("controls_config.curiosity_novelty_threshold_spontaneous", 0.9, expected_type=float)
-CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = config_manager.get("controls_config.curiosity_novelty_threshold_response", 0.8, expected_type=float)
-CURIOSITY_PRESSURE_THRESHOLD = config_manager.get("controls_config.curiosity_pressure_threshold", 0.7, expected_type=float)
-CURIOSITY_PRESSURE_DROP = config_manager.get("controls_config.curiosity_pressure_drop", 0.3, expected_type=float)
-CURIOSITY_SILENCE_THRESHOLD = config_manager.get("controls_config.curiosity_silence_threshold", 20.0, expected_type=float)
-CURIOSITY_QUESTION_COOLDOWN = config_manager.get("controls_config.curiosity_question_cooldown", 60.0, expected_type=float)
-CURIOSITY_QUEUE_MAXLEN = config_manager.get("controls_config.curiosity_queue_maxlen", 10, expected_type=int)
-CURIOSITY_WEIGHT_IGNORANCE = config_manager.get("controls_config.curiosity_weight_ignorance", 0.7, expected_type=float)
-CURIOSITY_WEIGHT_NOVELTY = config_manager.get("controls_config.curiosity_weight_novelty", 0.3, expected_type=float)
-# Curiosity Generation Controls
-CURIOSITY_MAX_NEW_TOKENS = config_manager.get("controls_config.curiosity_max_new_tokens", 8, expected_type=int)
-CURIOSITY_BASE_TEMPERATURE = config_manager.get("controls_config.curiosity_base_temperature", 1.1, expected_type=float)
-CURIOSITY_TEMPERAMENT_INFLUENCE = config_manager.get("controls_config.curiosity_temperament_influence", 0.4, expected_type=float)
-CURIOSITY_TOP_K = config_manager.get("controls_config.curiosity_top_k", 30, expected_type=int)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")
-
-def _validate_config(self):
-    """Validate required configuration keys and layer settings."""
-    config_snapshot = OrderedDict()
-    try:
-        # Take snapshot of current config
-        config_snapshot = OrderedDict(sorted(self.config_manager.get_all().items()))
-        
-        # Validate required keys with types
-        self.config_manager.validate_keys([
-            ("core_config.base_model_name", str),
-            ("training_config.learning_rate", float)
-        ])
-        # Validate CROSS_ATTN_LAYERS
-        if not isinstance(CROSS_ATTN_LAYERS, list):
-            raise ValueError("CROSS_ATTN_LAYERS must be a list!")
-        
-        if not USE_DYNAMIC_LAYERS:
-            base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
-            invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-            if invalid_layers:
-                raise ValueError(f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.")
-        
-        if LAYER_SELECTION_MODE == "custom":
-            base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
-            invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
-            if invalid_custom:
-                raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
-        # Log successful validation
-        self.logger.write({
-            "event": "config_validation",
-            "status": "success",
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "config_snapshot": config_snapshot
-        })
-    except Exception as e:
-        self.error_logger.write({
-            "error": f"Config validation failed: {str(e)}",
-            "type": type(e).__name__,
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id if hasattr(self, 'history') else str(uuid.uuid4()),
-            "stack_trace": traceback.format_exc(),
-            "config_snapshot": config_snapshot,
-            "validation_stage": "pre-init" if not hasattr(self, 'logger') else "runtime"
-        })
-        raise
-
-    if not TRAIN_DATA or not VALID_DATA:
-        print("Warning: TRAIN_DATA or VALID_DATA empty. Training may fail.")
-
-class TrueCuriosity:
-    def __init__(self, sovl_system):
-        self.sovl = sovl_system
-        self.novelty_cache = deque(maxlen=100)
-
-    def calculate_metric(self, question: str) -> float:
-        q_inputs = self.sovl.base_tokenizer(question, return_tensors='pt', truncation=True, max_length=MAX_SEQ_LENGTH).to(DEVICE)
-        with torch.no_grad():
-            q_emb = self.sovl.scaffolds[0](**q_inputs, output_hidden_states=True).hidden_states[-1].mean(dim=1)
-        
-        base_conf = calculate_confidence_score(self.sovl.base_model(**q_inputs).logits, q_inputs.input_ids)
-        scaf_conf = calculate_confidence_score(self.sovl.scaffolds[0](**q_inputs).logits, q_inputs.input_ids)
-        
-        mem_sim = 0.0
-        if self.sovl.dream_memory:
-            dream_embs, _ = zip(*self.sovl.dream_memory)
-            sim_matrix = cosine_similarity_matrix(q_emb, torch.stack(dream_embs).to(DEVICE))
-            mem_sim = sim_matrix.max().item()
-        
-        ignorance = 1 - max(base_conf, scaf_conf)
-        novelty = 1 - mem_sim
-        return (ignorance * self.sovl.curiosity_weight_ignorance + 
-                novelty * self.sovl.curiosity_weight_novelty)
-
-class CuriosityPressure:
-    def __init__(self):
-        self.value = 0.0
-
-    def update(self, temperament: float, confidence: float, silence: float):
-        self.value += (temperament * 0.1 + (1 - confidence) * 0.05 + silence * 0.02)
-        self.value = max(0.0, min(1.0, self.value))
-
-    def should_erupt(self, threshold):
-        return self.value > threshold and random.random() < 0.3
+print(f"Using device: {DEVICE}")       
 
 class SOVLSystem:
     def __init__(self, config_manager):
@@ -326,6 +241,48 @@ class SOVLSystem:
         self.use_scaffold_memory = config_manager.get("controls_config.use_scaffold_memory", True, expected_type=bool)
         self.use_token_map_memory = config_manager.get("controls_config.use_token_map_memory", True, expected_type=bool)
         self.scaffold_weight = config_manager.get("controls_config.scaffold_weight_cap", 1.0, expected_type=float)
+
+    def _validate_config(self):
+        """Validate required configuration keys and layer settings."""
+        config_snapshot = OrderedDict()
+        try:
+            config_snapshot = OrderedDict(sorted(self.config_manager.config.items()))
+            self.config_manager.validate_keys([
+                "core_config.base_model_name",
+                "training_config.learning_rate"
+            ])
+            if not isinstance(CROSS_ATTN_LAYERS, list):
+                raise ValueError("CROSS_ATTN_LAYERS must be a list!")
+            if not USE_DYNAMIC_LAYERS:
+                base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+                invalid_layers = [l for l in CROSS_ATTN_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
+                if invalid_layers:
+                    raise ValueError(f"Invalid CROSS_ATTN_LAYERS: {invalid_layers} for {base_config.num_hidden_layers} layers.")
+            if LAYER_SELECTION_MODE == "custom":
+                base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
+                invalid_custom = [l for l in CUSTOM_LAYERS if not (0 <= l < base_config.num_hidden_layers)]
+                if invalid_custom:
+                    raise ValueError(f"Invalid CUSTOM_LAYERS: {invalid_custom} for {BASE_MODEL_NAME}")
+            self.logger.record({
+                "event": "config_validation",
+                "status": "success",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "config_snapshot": config_snapshot
+            })
+        except Exception as e:
+            self.error_logger.record({
+                "error": f"Config validation failed: {str(e)}",
+                "type": type(e).__name__,
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "stack_trace": traceback.format_exc(),
+                "config_snapshot": config_snapshot,
+                "validation_stage": "runtime"
+            })
+            raise
+        if not TRAIN_DATA or not VALID_DATA:
+            print("Warning: TRAIN_DATA or VALID_DATA empty. Training may fail.")
 
         self.base_config = AutoConfig.from_pretrained(BASE_MODEL_NAME)
         self.scaffold_config = AutoConfig.from_pretrained(SCAFFOLD_MODEL_NAME)
@@ -520,17 +477,12 @@ class SOVLSystem:
         self.trainer.state = self.state  # Share state with trainer
        
         # Curiosity system
-        self.curiosity = TrueCuriosity(self) if ENABLE_CURIOSITY else None
-        self.pressure = CuriosityPressure() if ENABLE_CURIOSITY else None
+        self.curiosity_manager = CuriosityManager(
+            config=self.config_manager.get("controls_config", {}),
+            logger=self.logger,
+            device=DEVICE
+        ) if ENABLE_CURIOSITY else None
         self.last_question_time = time.time()
-
-        self.metrics = {
-            "curiosity_eruptions": 0,
-            "spontaneous_questions": 0,
-            "answered_questions": 0,
-            "avg_novelty": 0.0,
-            "eruption_count": 0
-        }
 
         self.load_state()
 
@@ -635,28 +587,16 @@ class SOVLSystem:
                         delattr(self, '_original_batch_size')
 
     def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
-        if not ENABLE_CURIOSITY:
+        if not ENABLE_CURIOSITY or not self.curiosity_manager:
             return None
         
-        if not context and self.state.dream_memory:
-            dream_embs, _ = zip(*self.state.dream_memory)
-            seed = self.generate("", max_new_tokens=5, temperature=1.3, do_sample=True)
-            context = " ".join(seed.split()[:3])
-        elif not context:
-            context = ""
-
-        temp = CURIOSITY_BASE_TEMPERATURE + (self.state.temperament_score * CURIOSITY_TEMPERAMENT_INFLUENCE)
-        temp = max(0.7, min(1.7, temp))
-
-        output = self.generate(context, max_new_tokens=CURIOSITY_MAX_NEW_TOKENS, 
-                             temperature=temp, top_k=CURIOSITY_TOP_K, do_sample=True)
-
-        if not output.endswith("?"):
-            output += "?"
-
-        score = self.curiosity.calculate_metric(output)
-        threshold = CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS if spontaneous else CURIOSITY_NOVELTY_THRESHOLD_RESPONSE
-        return output if score > threshold else None
+        return self.curiosity_manager.generate_question(
+            state=self.state,
+            tokenizer=self.base_tokenizer,
+            model=self.scaffolds[0],  # Use scaffold model for question generation
+            prompt=context,
+            spontaneous=spontaneous
+        )
     
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
         """Handle training completion callback."""
@@ -675,143 +615,144 @@ class SOVLSystem:
         pass
     
     def update_metrics(self, question, score, spontaneous=False, answered=False):
-        self.metrics["curiosity_eruptions"] += 1
-        if spontaneous:
-            self.metrics["spontaneous_questions"] += 1
-        if answered:
-            self.metrics["answered_questions"] += 1
-        self.metrics["avg_novelty"] = (self.metrics["avg_novelty"] * self.metrics["eruption_count"] + score) / (self.metrics["eruption_count"] + 1)
-        self.metrics["eruption_count"] += 1
+        if self.curiosity_manager:
+            self.curiosity_manager.update_metrics(
+                question=question,
+                score=score,
+                spontaneous=spontaneous,
+                answered=answered
+            )
 
     def check_silence(self, elapsed: float):
-        if not ENABLE_CURIOSITY or not self.pressure:
+        if not ENABLE_CURIOSITY or not self.curiosity_manager:
             return
-        if (elapsed > CURIOSITY_SILENCE_THRESHOLD and 
-            self.pressure.value > CURIOSITY_PRESSURE_THRESHOLD and 
-            (time.time() - self.last_question_time) > CURIOSITY_QUESTION_COOLDOWN):
-            q = self.generate_curiosity_question(spontaneous=True)
-            if q:
-                print(f"{q}")
-                self.logger.record({
-                    "prompt": q,
-                    "response": "",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "confidence_score": 0.0,
-                    "is_system_question": True
-                })
-                self.update_metrics(q, self.curiosity.calculate_metric(q), spontaneous=True)
-                self.pressure.value -= CURIOSITY_PRESSURE_DROP
-                self.last_question_time = time.time()
-            elif self.state.unanswered_q:
-                q, score = self.state.unanswered_q.popleft()
-                print(f"{q}")
-                self.logger.record({
-                    "prompt": q,
-                    "response": "",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "confidence_score": 0.0,
-                    "is_system_question": True
-                })
-                self.update_metrics(q, score, spontaneous=True)
-                self.pressure.value -= CURIOSITY_PRESSURE_DROP * 0.7
-                self.last_question_time = time.time()
+        question = self.curiosity_manager.check_silence(
+            state=self.state,
+            tokenizer=self.base_tokenizer,
+            model=self.scaffolds[0],
+            elapsed=elapsed
+        )
+        if question:
+            print(f"{question}")
+            self.logger.record({
+                "prompt": question,
+                "response": "",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "confidence_score": 0.0,
+                "is_system_question": True
+            })
+            self.last_question_time = time.time()
 
     def tune_curiosity(self, enable=None, spontaneous_threshold=None, response_threshold=None, pressure_threshold=None, 
                        pressure_drop=None, silence_threshold=None, question_cooldown=None, queue_maxlen=None, 
                        weight_ignorance=None, weight_novelty=None, max_new_tokens=None, base_temperature=None, 
                        temperament_influence=None, top_k=None):
+        updates = {}
         if enable is not None:
+            updates["enable_curiosity"] = bool(enable)
             config_manager.update("controls_config.enable_curiosity", bool(enable))
             global ENABLE_CURIOSITY
             ENABLE_CURIOSITY = bool(enable)
-            if ENABLE_CURIOSITY and not self.curiosity:
-                self.curiosity = TrueCuriosity(self)
-                self.pressure = CuriosityPressure()
+            if ENABLE_CURIOSITY and not self.curiosity_manager:
+                self.curiosity_manager = CuriosityManager(
+                    config=self.config_manager.get("controls_config", {}),
+                    logger=self.logger,
+                    device=DEVICE
+                )
             elif not ENABLE_CURIOSITY:
-                self.curiosity = None
-                self.pressure = None
+                self.curiosity_manager = None
         if spontaneous_threshold is not None and 0.5 <= spontaneous_threshold <= 1.0:
+            updates["spontaneous_threshold"] = spontaneous_threshold
             config_manager.update("controls_config.curiosity_novelty_threshold_spontaneous", spontaneous_threshold)
             global CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS
             CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = spontaneous_threshold
         if response_threshold is not None and 0.5 <= response_threshold <= 1.0:
+            updates["response_threshold"] = response_threshold
             config_manager.update("controls_config.curiosity_novelty_threshold_response", response_threshold)
             global CURIOSITY_NOVELTY_THRESHOLD_RESPONSE
             CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = response_threshold
         if pressure_threshold is not None and 0.5 <= pressure_threshold <= 0.9:
+            updates["pressure_threshold"] = pressure_threshold
             config_manager.update("controls_config.curiosity_pressure_threshold", pressure_threshold)
             global CURIOSITY_PRESSURE_THRESHOLD
             CURIOSITY_PRESSURE_THRESHOLD = pressure_threshold
         if pressure_drop is not None and 0.1 <= pressure_drop <= 0.5:
+            updates["pressure_drop"] = pressure_drop
             config_manager.update("controls_config.curiosity_pressure_drop", pressure_drop)
             global CURIOSITY_PRESSURE_DROP
             CURIOSITY_PRESSURE_DROP = pressure_drop
         if silence_threshold is not None and 5.0 <= silence_threshold <= 60.0:
+            updates["silence_threshold"] = silence_threshold
             config_manager.update("controls_config.curiosity_silence_threshold", silence_threshold)
             global CURIOSITY_SILENCE_THRESHOLD
             CURIOSITY_SILENCE_THRESHOLD = silence_threshold
         if question_cooldown is not None and 30.0 <= question_cooldown <= 120.0:
+            updates["question_cooldown"] = question_cooldown
             config_manager.update("controls_config.curiosity_question_cooldown", question_cooldown)
             global CURIOSITY_QUESTION_COOLDOWN
             CURIOSITY_QUESTION_COOLDOWN = question_cooldown
         if queue_maxlen is not None and 5 <= queue_maxlen <= 20:
+            updates["queue_maxlen"] = queue_maxlen
             config_manager.update("controls_config.curiosity_queue_maxlen", queue_maxlen)
-            self.state.curiosity_queue_maxlen = queue_maxlen
-            self.state.unanswered_q = deque(self.state.unanswered_q, maxlen=queue_maxlen)
         if weight_ignorance is not None and 0.0 <= weight_ignorance <= 1.0:
+            updates["weight_ignorance"] = weight_ignorance
             config_manager.update("controls_config.curiosity_weight_ignorance", weight_ignorance)
             global CURIOSITY_WEIGHT_IGNORANCE
             CURIOSITY_WEIGHT_IGNORANCE = weight_ignorance
         if weight_novelty is not None and 0.0 <= weight_novelty <= 1.0:
+            updates["weight_novelty"] = weight_novelty
             config_manager.update("controls_config.curiosity_weight_novelty", weight_novelty)
             global CURIOSITY_WEIGHT_NOVELTY
             CURIOSITY_WEIGHT_NOVELTY = weight_novelty
         if max_new_tokens is not None and 5 <= max_new_tokens <= 12:
+            updates["max_new_tokens"] = max_new_tokens
             config_manager.update("controls_config.curiosity_max_new_tokens", max_new_tokens)
             global CURIOSITY_MAX_NEW_TOKENS
             CURIOSITY_MAX_NEW_TOKENS = max_new_tokens
         if base_temperature is not None and 0.5 <= base_temperature <= 1.5:
+            updates["base_temperature"] = base_temperature
             config_manager.update("controls_config.curiosity_base_temperature", base_temperature)
             global CURIOSITY_BASE_TEMPERATURE
             CURIOSITY_BASE_TEMPERATURE = base_temperature
         if temperament_influence is not None and 0.1 <= temperament_influence <= 0.6:
+            updates["temperament_influence"] = temperament_influence
             config_manager.update("controls_config.curiosity_temperament_influence", temperament_influence)
             global CURIOSITY_TEMPERAMENT_INFLUENCE
             CURIOSITY_TEMPERAMENT_INFLUENCE = temperament_influence
         if top_k is not None and 10 <= top_k <= 50:
+            updates["top_k"] = top_k
             config_manager.update("controls_config.curiosity_top_k", top_k)
             global CURIOSITY_TOP_K
             CURIOSITY_TOP_K = top_k
-        self.logger.write({
-            "event": "tune_curiosity",
-            "params": {
-                "enable": ENABLE_CURIOSITY,
-                "spontaneous_threshold": CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS,
-                "response_threshold": CURIOSITY_NOVELTY_THRESHOLD_RESPONSE,
-                "pressure_threshold": CURIOSITY_PRESSURE_THRESHOLD,
-                "pressure_drop": CURIOSITY_PRESSURE_DROP,
-                "silence_threshold": CURIOSITY_SILENCE_THRESHOLD,
-                "question_cooldown": CURIOSITY_QUESTION_COOLDOWN,
-                "queue_maxlen": self.state.curiosity_queue_maxlen,
-                "weight_ignorance": CURIOSITY_WEIGHT_IGNORANCE,
-                "weight_novelty": CURIOSITY_WEIGHT_NOVELTY,
-                "max_new_tokens": CURIOSITY_MAX_NEW_TOKENS,
-                "base_temperature": CURIOSITY_BASE_TEMPERATURE,
-                "temperament_influence": CURIOSITY_TEMPERAMENT_INFLUENCE,
-                "top_k": CURIOSITY_TOP_K
-            },
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id
-        })
-        print(f"Curiosity params: enable={ENABLE_CURIOSITY}, spontaneous_threshold={CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS}, "
-              f"response_threshold={CURIOSITY_NOVELTY_THRESHOLD_RESPONSE}, pressure_threshold={CURIOSITY_PRESSURE_THRESHOLD}, "
-              f"pressure_drop={CURIOSITY_PRESSURE_DROP}, silence_threshold={CURIOSITY_SILENCE_THRESHOLD}, "
-              f"question_cooldown={CURIOSITY_QUESTION_COOLDOWN}, queue_maxlen={self.state.curiosity_queue_maxlen}, "
-              f"weight_ignorance={CURIOSITY_WEIGHT_IGNORANCE}, weight_novelty={CURIOSITY_WEIGHT_NOVELTY}, "
-              f"max_new_tokens={CURIOSITY_MAX_NEW_TOKENS}, base_temperature={CURIOSITY_BASE_TEMPERATURE}, "
-              f"temperament_influence={CURIOSITY_TEMPERAMENT_INFLUENCE}, top_k={CURIOSITY_TOP_K}")
+
+        if self.curiosity_manager and updates:
+            self.curiosity_manager.tune(**updates)
+        
+        if updates:
+            config_manager.save_config()
+            self.logger.record({
+                "event": "tune_curiosity",
+                "params": {
+                    "enable": ENABLE_CURIOSITY,
+                    "spontaneous_threshold": CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS,
+                    "response_threshold": CURIOSITY_NOVELTY_THRESHOLD_RESPONSE,
+                    "pressure_threshold": CURIOSITY_PRESSURE_THRESHOLD,
+                    "pressure_drop": CURIOSITY_PRESSURE_DROP,
+                    "silence_threshold": CURIOSITY_SILENCE_THRESHOLD,
+                    "question_cooldown": CURIOSITY_QUESTION_COOLDOWN,
+                    "queue_maxlen": queue_maxlen if queue_maxlen is not None else self.curiosity_manager.config.get("queue_maxlen", 10) if self.curiosity_manager else 10,
+                    "weight_ignorance": CURIOSITY_WEIGHT_IGNORANCE,
+                    "weight_novelty": CURIOSITY_WEIGHT_NOVELTY,
+                    "max_new_tokens": CURIOSITY_MAX_NEW_TOKENS,
+                    "base_temperature": CURIOSITY_BASE_TEMPERATURE,
+                    "temperament_influence": CURIOSITY_TEMPERAMENT_INFLUENCE,
+                    "top_k": CURIOSITY_TOP_K
+                },
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
+            print(f"Curiosity params updated: {updates}")
 
     def toggle_memory(self, mode):
         modes = {
@@ -825,7 +766,7 @@ class SOVLSystem:
             print(f"Memory toggled: Scaffold={self.use_scaffold_memory}, Token Map={self.use_token_map_memory}")
         else:
             print("Invalid memory mode. Use: 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'")
-            
+
     def wake_up(self):
         if self.has_woken:
             return None
@@ -839,18 +780,21 @@ class SOVLSystem:
         self.has_woken = True
         print(f"\n{response}")
 
-        q = self.generate_curiosity_question() if not self.state.unanswered_q else self.state.unanswered_q.popleft()[0]
-        if q:
-            print(f"{q}")
-            self.logger.record({
-                "prompt": q,
-                "response": "",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "confidence_score": 0.0,
-                "is_system_question": True
-            })
-            self.update_metrics(q, self.curiosity.calculate_metric(q))
+        if self.curiosity_manager:
+            last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
+            self.curiosity_manager.update_pressure(self.state.temperament_score, last_conf, 0.0)
+            q = self.generate_curiosity_question(spontaneous=True)
+            if q and isinstance(q, str) and q.strip():
+                print(f"{q}")
+                self.logger.record({
+                    "prompt": q,
+                    "response": "",
+                    "timestamp": time.time(),
+                    "conversation_id": self.history.conversation_id,
+                    "confidence_score": 0.0,
+                    "is_system_question": True
+                })
+                self.last_question_time = time.time()
 
         self.logger.record({"event": "wake_up", "response": response, "timestamp": time.time(), "conversation_id": self.history.conversation_id})
         return response
@@ -1134,9 +1078,13 @@ class SOVLSystem:
             with open(f"{path_prefix}_token_map.json", "w") as f:
                 json.dump({str(k): v for k, v in self.token_map.items()}, f)
 
-            # Save state using module's serialization
+            # Save system state
+            state_dict = {
+                "system_state": self.state.to_dict(),
+                "curiosity_state": self.curiosity_manager.save_state() if self.curiosity_manager else {}
+            }
             with open(f"{path_prefix}_state.json", "w") as f:
-                json.dump(self.state.to_dict(), f)
+                json.dump(state_dict, f)
 
             print(f"State saved to {path_prefix}_*.pth/json")
         except Exception as e:
@@ -1148,8 +1096,12 @@ class SOVLSystem:
             print(f"Save failed: {e}")
             # Attempt partial save
             try:
+                state_dict = {
+                    "system_state": self.state.to_dict(),
+                    "curiosity_state": {}
+                }
                 with open(f"{path_prefix}_state.json", "w") as f:
-                    json.dump(self.state.to_dict(), f)
+                    json.dump(state_dict, f)
                 print("At least saved core state")
             except:
                 print("Complete save failure!")
@@ -1182,12 +1134,14 @@ class SOVLSystem:
                                            {int(k): v for k, v in loaded_map.items()})
                 print("Token map loaded.")
 
-            # Load system state
+            # Load system and curiosity state
             if os.path.exists(f"{path_prefix}_state.json"):
                 with open(f"{path_prefix}_state.json", "r") as f:
-                    state_data = json.load(f)
-                self.state.from_dict(state_data, device=DEVICE)
-                print("System state loaded.")
+                    state_dict = json.load(f)
+                self.state.from_dict(state_dict["system_state"], device=DEVICE)
+                if self.curiosity_manager and "curiosity_state" in state_dict:
+                    self.curiosity_manager.load_state(state_dict["curiosity_state"])
+                print("System and curiosity state loaded.")
 
         except Exception as e:
             self.logger.record({
@@ -1196,7 +1150,7 @@ class SOVLSystem:
                 "conversation_id": self.history.conversation_id
             })
             print(f"Load failed: {e}. Starting fresh.")
-            self.state = SOVLState(config)
+            self.state = SOVLState(self.config_manager)
             self.state.set_scaffold_unk_id(self.scaffold_tokenizer.unk_token_id)
 
     def _clear_scaffold_cache(self):
@@ -1531,8 +1485,12 @@ class SOVLSystem:
         self.state.temperament_history = deque(self.state.temperament_history, maxlen=TEMPERAMENT_HISTORY_MAXLEN)
         self.state.temperament_history.append(self.state.temperament_score)
 
-        if ENABLE_CURIOSITY and self.pressure:
-            self.pressure.update(self.state.temperament_score, avg_confidence, 0.0)
+        if ENABLE_CURIOSITY and self.curiosity_manager:
+            self.curiosity_manager.update_pressure(
+                temperament=self.state.temperament_score,
+                confidence=avg_confidence,
+                silence_duration=0.0
+            )
 
         label = "melancholic" if float_lt(self.state.temperament_score, -0.5) else \
                 "restless" if float_lt(self.state.temperament_score, 0.0) else \
@@ -1713,7 +1671,7 @@ class SOVLSystem:
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
 
             temp = adjust_temperature(
-                BASE_TEMPERAMENT,
+                BASE_TEMPERATURE,
                 self.state.temperament_score,
                 TEMP_MOOD_INFLUENCE
             )
@@ -1817,11 +1775,11 @@ class SOVLSystem:
             response = self.base_tokenizer.decode(generated_ids, skip_special_tokens=True)
 
             last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
-            if ENABLE_CURIOSITY:
-                self.pressure.update(self.state.temperament_score, last_conf, 0.0)
-                if self.pressure.should_erupt(CURIOSITY_PRESSURE_THRESHOLD):
+            if ENABLE_CURIOSITY and self.curiosity_manager:
+                self.curiosity_manager.update_pressure(self.state.temperament_score, last_conf, 0.0)
+                if self.curiosity_manager.should_erupt():
                     q = self.generate_curiosity_question(prompt)
-                    if q:
+                    if q and isinstance(q, str) and q.strip():
                         response += f" {q}"
                         self.logger.record({
                             "prompt": q,
@@ -1831,8 +1789,6 @@ class SOVLSystem:
                             "confidence_score": 0.0,
                             "is_system_question": True
                         })
-                        self.update_metrics(q, self.curiosity.calculate_metric(q))
-                        self.pressure.value -= CURIOSITY_PRESSURE_DROP
 
             log_entry = {
                 "prompt": prompt,
@@ -1875,7 +1831,7 @@ class SOVLSystem:
                 try:
                     return self._handle_error_prompt("GPU memory error occurred")
                 except Exception as e:
-                    self.error_logger.write({
+                    self.error_logger.record({
                         "error": f"Failed to handle OOM error: {str(e)}",
                         "timestamp": time.time(),
                         "stack_trace": traceback.format_exc()
@@ -1898,7 +1854,7 @@ class SOVLSystem:
                 try:
                     return self._handle_error_prompt(f"Generation error: {str(e)}")
                 except Exception as inner_e:
-                    self.error_logger.write({
+                    self.error_logger.record({
                         "error": f"Failed to handle generation error: {str(inner_e)}",
                         "original_error": str(e),
                         "timestamp": time.time(),
