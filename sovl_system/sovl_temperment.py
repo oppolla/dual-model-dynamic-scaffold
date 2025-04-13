@@ -6,11 +6,12 @@ import random
 from dataclasses import dataclass
 from sovl_utils import safe_divide, float_lt
 from sovl_logger import Logger
+from threading import Lock
 import traceback
 
 @dataclass
 class TemperamentConfig:
-    """Configuration for the temperament system, mirroring SOVLSystem controls."""
+    """Configuration for the temperament system, aligned with SOVLSystem's controls_config."""
     # Thresholds for mood classification
     eager_threshold: float = 0.8
     sluggish_threshold: float = 0.6
@@ -29,8 +30,9 @@ class TemperamentConfig:
     mid_lifecycle: float = 0.75
     # Randomization factor for natural fluctuations
     randomization_factor: float = 0.05
-    # Validation ranges for parameters
+    # Validation ranges
     _ranges: Dict[str, Tuple[float, float]] = None
+    _history_ranges: Dict[str, Tuple[int, int]] = None
 
     def __post_init__(self):
         """Validate configuration parameters."""
@@ -92,9 +94,10 @@ class TemperamentSystem:
         self._score: float = 0.0  # Temperament score in [-1.0, 1.0]
         self._history: Deque[float] = deque(maxlen=config.history_maxlen)
         self._confidence_history: Deque[float] = deque(maxlen=config.confidence_history_maxlen)
-        self._last_update: float = time.time()
         self._sleep_confidence_sum: float = 0.0
         self._sleep_confidence_count: int = 0
+        self._last_update: float = time.time()
+        self._lock = Lock()
         self._initialize_logging()
 
     def _initialize_logging(self) -> None:
@@ -110,25 +113,28 @@ class TemperamentSystem:
     @property
     def score(self) -> float:
         """Current temperament score (-1.0 to 1.0)."""
-        return self._score
+        with self._lock:
+            return self._score
 
     @property
     def mood_label(self) -> str:
         """Human-readable mood label based on score."""
-        if float_lt(self._score, -0.5):
-            return "melancholic"
-        elif float_lt(self._score, 0.0):
-            return "restless"
-        elif float_lt(self._score, 0.5):
-            return "calm"
-        return "curious"
+        with self._lock:
+            if float_lt(self._score, -0.5):
+                return "melancholic"
+            elif float_lt(self._score, 0.0):
+                return "restless"
+            elif float_lt(self._score, self.config.sluggish_threshold):
+                return "calm"
+            return "curious"
 
     @property
     def variance(self) -> float:
         """Measure of mood stability based on history."""
-        if len(self._history) < 2:
-            return 0.0
-        return float(torch.var(torch.tensor(list(self._history), device=self.device)).item())
+        with self._lock:
+            if len(self._history) < 2:
+                return 0.0
+            return float(torch.var(torch.tensor(list(self._history), device=self.device)).item())
 
     def update(self,
                confidence: float,
@@ -145,73 +151,76 @@ class TemperamentSystem:
             curiosity_pressure: Curiosity pressure from curiosity manager (optional, 0.0-1.0)
         """
         try:
-            # Validate inputs
-            if not (0.0 <= confidence <= 1.0):
-                raise ValueError(f"Confidence must be between 0.0 and 1.0, got {confidence}")
-            if not (0.0 <= lifecycle_stage <= 1.0):
-                raise ValueError(f"Lifecycle stage must be between 0.0 and 1.0, got {lifecycle_stage}")
+            with self._lock:
+                # Validate inputs
+                if not (0.0 <= confidence <= 1.0):
+                    raise ValueError(f"Confidence must be between 0.0 and 1.0, got {confidence}")
+                if not (0.0 <= lifecycle_stage <= 1.0):
+                    raise ValueError(f"Lifecycle stage must be between 0.0 and 1.0, got {lifecycle_stage}")
+                if curiosity_pressure is not None and not (0.0 <= curiosity_pressure <= 1.0):
+                    raise ValueError(f"Curiosity pressure must be between 0.0 and 1.0, got {curiosity_pressure}")
 
-            # Update confidence tracking
-            self._confidence_history.append(confidence)
-            self._sleep_confidence_sum += confidence
-            self._sleep_confidence_count += 1
+                # Update confidence tracking
+                self._confidence_history.append(confidence)
+                self._sleep_confidence_sum += confidence
+                self._sleep_confidence_count += 1
 
-            # Calculate average confidence
-            avg_confidence = safe_divide(
-                self._sleep_confidence_sum,
-                self._sleep_confidence_count,
-                default=0.5
-            )
+                # Calculate average confidence
+                avg_confidence = safe_divide(
+                    self._sleep_confidence_sum,
+                    self._sleep_confidence_count,
+                    default=0.5
+                )
 
-            # Base score from confidence (maps 0.5 confidence to 0.0 score)
-            base_score = 2.0 * (avg_confidence - 0.5)
+                # Base score from confidence (maps 0.5 confidence to 0.0 score)
+                base_score = 2.0 * (avg_confidence - 0.5)
 
-            # Lifecycle-based bias
-            bias = self._calculate_lifecycle_bias(lifecycle_stage)
+                # Lifecycle-based bias
+                bias = self._calculate_lifecycle_bias(lifecycle_stage)
 
-            # Confidence feedback effect
-            feedback = self.config.confidence_feedback_strength * (avg_confidence - 0.5)
+                # Confidence feedback effect
+                feedback = self.config.confidence_feedback_strength * (avg_confidence - 0.5)
 
-            # Curiosity influence (if provided)
-            curiosity_effect = 0.0
-            if curiosity_pressure is not None and 0.0 <= curiosity_pressure <= 1.0:
-                curiosity_effect = self.config.curiosity_boost * curiosity_pressure
+                # Curiosity influence
+                curiosity_effect = 0.0
+                if curiosity_pressure is not None:
+                    curiosity_effect = self.config.curiosity_boost * curiosity_pressure
 
-            # Calculate target score
-            target_score = base_score + bias + feedback + curiosity_effect
+                # Calculate target score
+                target_score = base_score + bias + feedback + curiosity_effect
 
-            # Add random fluctuation and noise
-            noise = random.uniform(-self.config.randomization_factor, self.config.randomization_factor)
-            if self.mood_label == "melancholic":
-                noise += random.uniform(-self.config.melancholy_noise, self.config.melancholy_noise)
-            target_score += noise
+                # Add mood-dependent noise
+                noise = random.uniform(-self.config.randomization_factor, self.config.randomization_factor)
+                if self.mood_label == "melancholic":
+                    noise += random.uniform(-self.config.melancholy_noise, self.config.melancholy_noise)
+                target_score += noise
 
-            # Clamp target score
-            target_score = max(-1.0, min(1.0, target_score))
+                # Clamp target score
+                target_score = max(-1.0, min(1.0, target_score))
 
-            # Apply smoothing
-            alpha = self.config.temp_smoothing_factor
-            if time_since_last is not None:
-                alpha *= min(1.0, time_since_last / 60.0)
-            self._score = (1 - alpha) * self._score + alpha * target_score
-            self._score = max(-1.0, min(1.0, self._score))
+                # Apply smoothing
+                alpha = self.config.temp_smoothing_factor
+                if time_since_last is not None:
+                    alpha *= min(1.0, time_since_last / 60.0)
+                self._score = (1 - alpha) * self._score + alpha * target_score
+                self._score = max(-1.0, min(1.0, self._score))
 
-            # Update history
-            self._history.append(self._score)
-            self._last_update = time.time()
+                # Update history
+                self._history.append(self._score)
+                self._last_update = time.time()
 
-            # Log update
-            self.logger.record({
-                "event": "temperament_update",
-                "score": self._score,
-                "mood": self.mood_label,
-                "confidence": confidence,
-                "avg_confidence": avg_confidence,
-                "lifecycle_stage": lifecycle_stage,
-                "variance": self.variance,
-                "curiosity_effect": curiosity_effect,
-                "timestamp": self._last_update
-            })
+                # Log update
+                self.logger.record({
+                    "event": "temperament_update",
+                    "score": self._score,
+                    "mood": self.mood_label,
+                    "confidence": confidence,
+                    "avg_confidence": avg_confidence,
+                    "lifecycle_stage": lifecycle_stage,
+                    "variance": self.variance,
+                    "curiosity_effect": curiosity_effect,
+                    "timestamp": self._last_update
+                })
 
         except Exception as e:
             self.logger.record({
@@ -219,7 +228,8 @@ class TemperamentSystem:
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc(),
                 "confidence": confidence,
-                "lifecycle_stage": lifecycle_stage
+                "lifecycle_stage": lifecycle_stage,
+                "curiosity_pressure": curiosity_pressure
             })
             raise
 
@@ -233,18 +243,19 @@ class TemperamentSystem:
         Returns:
             Bias value influencing temperament score
         """
-        if float_lt(lifecycle_stage, self.config.early_lifecycle):
-            # Early stage: encourage curiosity
-            return self.config.curiosity_boost * (1 - lifecycle_stage / self.config.early_lifecycle)
-        elif float_lt(lifecycle_stage, self.config.mid_lifecycle):
-            # Middle stage: stabilize based on variance
-            if len(self._history) >= self.config.history_maxlen:
-                return -0.2 * self.variance
-            return 0.0
-        else:
-            # Late stage: introduce melancholy
-            return -self.config.curiosity_boost * (lifecycle_stage - self.config.mid_lifecycle) / (
-                1.0 - self.config.mid_lifecycle)
+        with self._lock:
+            if float_lt(lifecycle_stage, self.config.early_lifecycle):
+                # Early stage: encourage curiosity
+                return self.config.curiosity_boost * (1 - lifecycle_stage / self.config.early_lifecycle)
+            elif float_lt(lifecycle_stage, self.config.mid_lifecycle):
+                # Middle stage: stabilize based on variance
+                if len(self._history) >= self.config.history_maxlen:
+                    return -0.2 * self.variance
+                return 0.0
+            else:
+                # Late stage: introduce melancholy
+                return -self.config.curiosity_boost * (lifecycle_stage - self.config.mid_lifecycle) / (
+                    1.0 - self.config.mid_lifecycle)
 
     def adjust_parameter(self,
                         base_value: float,
@@ -255,40 +266,39 @@ class TemperamentSystem:
 
         Args:
             base_value: Baseline parameter value
-            parameter_type: Type of parameter ("temperature", "top_k", "top_p", etc.)
+            parameter_type: Type of parameter ("temperature", "top_k", "top_p", "repetition_penalty")
             context: Additional context (e.g., generation settings)
 
         Returns:
             Adjusted parameter value
         """
         try:
-            adjustment = self._score * self.config.mood_influence
-            if parameter_type == "temperature":
-                if self.mood_label == "restless":
-                    adjustment -= self.config.restless_drop
-                return base_value + adjustment
-            elif parameter_type == "top_k":
-                # Wider sampling for positive moods
-                scaling = 1.0 + self._score * 0.2
-                return int(base_value * scaling)
-            elif parameter_type == "top_p":
-                # Adjust nucleus sampling based on mood
-                return max(0.1, min(0.9, base_value * (1.0 - self._score * 0.1)))
-            elif parameter_type == "repetition_penalty":
-                # Increase penalty for melancholic moods
-                return base_value * (1.0 + abs(self._score) * 0.1 if self._score < 0 else 1.0)
-            else:
-                self.logger.record({
-                    "warning": f"Unknown parameter type: {parameter_type}",
-                    "timestamp": time.time()
-                })
-                return base_value
+            with self._lock:
+                adjustment = self._score * self.config.mood_influence
+                if parameter_type == "temperature":
+                    if self.mood_label == "restless":
+                        adjustment -= self.config.restless_drop
+                    return base_value + adjustment
+                elif parameter_type == "top_k":
+                    scaling = 1.0 + self._score * 0.2
+                    return int(base_value * scaling)
+                elif parameter_type == "top_p":
+                    return max(0.1, min(0.9, base_value * (1.0 - self._score * 0.1)))
+                elif parameter_type == "repetition_penalty":
+                    return base_value * (1.0 + abs(self._score) * 0.1 if self._score < 0 else 1.0)
+                else:
+                    self.logger.record({
+                        "warning": f"Unknown parameter type: {parameter_type}",
+                        "timestamp": time.time()
+                    })
+                    return base_value
         except Exception as e:
             self.logger.record({
                 "error": f"Parameter adjustment failed: {str(e)}",
                 "parameter_type": parameter_type,
                 "base_value": base_value,
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
             })
             return base_value
 
@@ -300,19 +310,20 @@ class TemperamentSystem:
             **kwargs: Parameters to update (e.g., eager_threshold, curiosity_boost)
         """
         try:
-            old_config = vars(self.config).copy()
-            self.config.update(**kwargs)
-            # Adjust history lengths if changed
-            if "history_maxlen" in kwargs:
-                self._history = deque(self._history, maxlen=self.config.history_maxlen)
-            if "confidence_history_maxlen" in kwargs:
-                self._confidence_history = deque(self._confidence_history, maxlen=self.config.confidence_history_maxlen)
-            self.logger.record({
-                "event": "temperament_tune",
-                "old_config": old_config,
-                "new_config": vars(self.config),
-                "timestamp": time.time()
-            })
+            with self._lock:
+                old_config = vars(self.config).copy()
+                self.config.update(**kwargs)
+                # Adjust history lengths if changed
+                if "history_maxlen" in kwargs:
+                    self._history = deque(self._history, maxlen=self.config.history_maxlen)
+                if "confidence_history_maxlen" in kwargs:
+                    self._confidence_history = deque(self._confidence_history, maxlen=self.config.confidence_history_maxlen)
+                self.logger.record({
+                    "event": "temperament_tune",
+                    "old_config": old_config,
+                    "new_config": vars(self.config),
+                    "timestamp": time.time()
+                })
         except Exception as e:
             self.logger.record({
                 "error": f"Temperament tuning failed: {str(e)}",
@@ -329,14 +340,15 @@ class TemperamentSystem:
         Returns:
             Dictionary containing temperament state
         """
-        return {
-            "score": self._score,
-            "history": list(self._history),
-            "confidence_history": list(self._confidence_history),
-            "last_update": self._last_update,
-            "sleep_confidence_sum": self._sleep_confidence_sum,
-            "sleep_confidence_count": self._sleep_confidence_count
-        }
+        with self._lock:
+            return {
+                "score": self._score,
+                "history": list(self._history),
+                "confidence_history": list(self._confidence_history),
+                "sleep_confidence_sum": self._sleep_confidence_sum,
+                "sleep_confidence_count": self._sleep_confidence_count,
+                "last_update": self._last_update
+            }
 
     def load_state(self, state: Dict[str, Any]) -> None:
         """
@@ -346,23 +358,24 @@ class TemperamentSystem:
             state: Dictionary containing temperament state
         """
         try:
-            self._score = state.get("score", 0.0)
-            self._history = deque(
-                state.get("history", []),
-                maxlen=self.config.history_maxlen
-            )
-            self._confidence_history = deque(
-                state.get("confidence_history", []),
-                maxlen=self.config.confidence_history_maxlen
-            )
-            self._last_update = state.get("last_update", time.time())
-            self._sleep_confidence_sum = state.get("sleep_confidence_sum", 0.0)
-            self._sleep_confidence_count = state.get("sleep_confidence_count", 0)
-            self.logger.record({
-                "event": "temperament_load_state",
-                "state": state,
-                "timestamp": time.time()
-            })
+            with self._lock:
+                self._score = state.get("score", 0.0)
+                self._history = deque(
+                    state.get("history", []),
+                    maxlen=self.config.history_maxlen
+                )
+                self._confidence_history = deque(
+                    state.get("confidence_history", []),
+                    maxlen=self.config.confidence_history_maxlen
+                )
+                self._sleep_confidence_sum = state.get("sleep_confidence_sum", 0.0)
+                self._sleep_confidence_count = state.get("sleep_confidence_count", 0)
+                self._last_update = state.get("last_update", time.time())
+                self.logger.record({
+                    "event": "temperament_load_state",
+                    "state": state,
+                    "timestamp": time.time()
+                })
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to load temperament state: {str(e)}",
@@ -375,44 +388,48 @@ class TemperamentSystem:
         """
         Reset temperament to initial state.
         """
-        self._score = 0.0
-        self._history.clear()
-        self._confidence_history.clear()
-        self._sleep_confidence_sum = 0.0
-        self._sleep_confidence_count = 0
-        self._last_update = time.time()
-        self.logger.record({
-            "event": "temperament_reset",
-            "timestamp": time.time()
-        })
+        with self._lock:
+            self._score = 0.0
+            self._history.clear()
+            self._confidence_history.clear()
+            self._sleep_confidence_sum = 0.0
+            self._sleep_confidence_count = 0
+            self._last_update = time.time()
+            self.logger.record({
+                "event": "temperament_reset",
+                "timestamp": time.time()
+            })
 
-    def get_mood_influence(self, parameter: str = "generation") -> float:
+    def get_mood_influence(self, component: str = "generation") -> float:
         """
-        Calculate mood influence on a specific parameter or system component.
+        Calculate mood influence on a specific system component.
 
         Args:
-            parameter: Component to influence ("generation", "curiosity", etc.)
+            component: Component to influence ("generation", "curiosity", "training")
 
         Returns:
             Influence factor based on mood
         """
         try:
-            if parameter == "generation":
-                # Positive moods increase exploration
-                return 1.0 + self._score * self.config.mood_influence
-            elif parameter == "curiosity":
-                # Curious moods boost question generation
-                return 1.0 + self._score * self.config.curiosity_boost
-            elif parameter == "training":
-                # Melancholic moods reduce learning rate
-                return 1.0 - abs(self._score) * 0.1 if self._score < 0 else 1.0
-            else:
-                return 1.0
+            with self._lock:
+                if component == "generation":
+                    return 1.0 + self._score * self.config.mood_influence
+                elif component == "curiosity":
+                    return 1.0 + (self._score if self._score > 0 else 0.0) * self.config.curiosity_boost
+                elif component == "training":
+                    return 1.0 - abs(self._score) * 0.1 if self._score < 0 else 1.0
+                else:
+                    self.logger.record({
+                        "warning": f"Unknown component: {component}",
+                        "timestamp": time.time()
+                    })
+                    return 1.0
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to calculate mood influence: {str(e)}",
-                "parameter": parameter,
-                "timestamp": time.time()
+                "component": component,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
             })
             return 1.0
 
@@ -426,16 +443,26 @@ class TemperamentSystem:
         Returns:
             True if temperament is stable, False otherwise
         """
-        variance = self.variance
-        is_stable = variance < threshold
-        self.logger.record({
-            "event": "temperament_stability_check",
-            "variance": variance,
-            "threshold": threshold,
-            "is_stable": is_stable,
-            "timestamp": time.time()
-        })
-        return is_stable
+        try:
+            with self._lock:
+                variance = self.variance
+                is_stable = variance < threshold
+                self.logger.record({
+                    "event": "temperament_stability_check",
+                    "variance": variance,
+                    "threshold": threshold,
+                    "is_stable": is_stable,
+                    "timestamp": time.time()
+                })
+                return is_stable
+        except Exception as e:
+            self.logger.record({
+                "error": f"Stability check failed: {str(e)}",
+                "threshold": threshold,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return True
 
     def apply_noise(self, value: float) -> float:
         """
@@ -447,7 +474,17 @@ class TemperamentSystem:
         Returns:
             Noisy value
         """
-        noise = random.uniform(-self.config.randomization_factor, self.config.randomization_factor)
-        if self.mood_label == "melancholic":
-            noise += random.uniform(-self.config.melancholy_noise, self.config.melancholy_noise)
-        return value + noise
+        try:
+            with self._lock:
+                noise = random.uniform(-self.config.randomization_factor, self.config.randomization_factor)
+                if self.mood_label == "melancholic":
+                    noise += random.uniform(-self.config.melancholy_noise, self.config.melancholy_noise)
+                return value + noise
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to apply noise: {str(e)}",
+                "value": value,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return value
