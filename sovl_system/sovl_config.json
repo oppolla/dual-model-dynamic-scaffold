@@ -2,7 +2,7 @@
   "core_config": {
     "base_model_name": "gpt2",
     "scaffold_model_name": "gpt2",
-    "cross_attn_layers": [],  // Empty for dynamic fallback
+    "cross_attn_layers": [],  //
     "use_dynamic_layers": false,
     "layer_selection_mode": "balanced",
     "custom_layers": null,
@@ -90,7 +90,7 @@
     "learning_rate": 0.0003,
     "train_epochs": 3,
     "batch_size": 1,
-    "max_seq_length": 512,  // Increased for flexibility
+    "max_seq_length": 512,
     "sigmoid_scale": 0.5,
     "sigmoid_shift": 5.0,
     "lifecycle_capacity_factor": 0.01,
