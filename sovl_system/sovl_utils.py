@@ -8,6 +8,42 @@ import random
 from threading import Lock
 from sovl_logger import Logger
 
+def validate_quantization_mode(quantization_mode: str, logger: Logger) -> str:
+    """
+    Validate and handle quantization mode configuration.
+    
+    Args:
+        quantization_mode: The requested quantization mode
+        logger: Logger instance for recording events
+        
+    Returns:
+        Validated quantization mode (fp16, int8, or int4)
+    """
+    if quantization_mode not in ["fp16", "int8", "int4"]:
+        logger.write({
+            "warning": f"Invalid quantization mode '{quantization_mode}'. Defaulting to 'fp16'.",
+            "timestamp": time.time(),
+            "conversation_id": "init"
+        })
+        return "fp16"
+
+    if quantization_mode in ["int8", "int4"]:
+        try:
+            import bitsandbytes as bnb
+            if quantization_mode == "int8":
+                from bitsandbytes.nn import Linear8bitLt
+            elif quantization_mode == "int4":
+                from bitsandbytes.nn import Linear4bit
+        except ImportError:
+            logger.write({
+                "warning": "bitsandbytes not available. Falling back to fp16 quantization.",
+                "timestamp": time.time(),
+                "conversation_id": "init"
+            })
+            return "fp16"
+
+    return quantization_mode
+
 class NumericalGuard:
     """Context manager for precision-sensitive blocks with mixed precision support."""
     def __init__(self, dtype: torch.dtype = torch.float32, no_grad: bool = False, mixed_precision: bool = False):

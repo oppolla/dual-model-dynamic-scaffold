@@ -121,12 +121,10 @@ LAYER_SELECTION_MODE = config_manager.get("core_config.layer_selection_mode", "b
 CUSTOM_LAYERS = config_manager.get("core_config.custom_layers", [], expected_type=list)
 VALID_SPLIT_RATIO = config_manager.get("core_config.valid_split_ratio", 0.2, expected_type=float)
 RANDOM_SEED = config_manager.get("core_config.random_seed", 42, expected_type=int)
-QUANTIZATION_MODE = config_manager.get("core_config.quantization", "fp16", expected_type=str)
-if QUANTIZATION_MODE not in ["fp16", "int8", "int4"]:
-    logger.write({"warning": f"Invalid quantization '{QUANTIZATION_MODE}'. Defaulting to 'fp16'.", "timestamp": time.time(), "conversation_id": "init"})
-    print(f"Warning: Invalid quantization '{QUANTIZATION_MODE}'. Defaulting to 'fp16'.")
-    QUANTIZATION_MODE = "fp16"
-
+UANTIZATION_MODE = validate_quantization_mode(
+    config_manager.get("core_config.quantization", "fp16", expected_type=str),
+    logger
+)
     # Curiosity Config
 ENABLE_CURIOSITY = config_manager.get("controls_config.enable_curiosity", True, expected_type=bool)
 CURIOSITY_WEIGHT_IGNORANCE = config_manager.get("controls_config.curiosity_weight_ignorance", 0.5, expected_type=float)
