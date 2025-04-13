@@ -1062,30 +1062,41 @@ class SOVLTrainer:
 
     def get_memory_stats(self) -> dict:
         """Get detailed statistics about dream memory usage"""
-        if not hasattr(self, 'dream_memory'):
-            return {
-                'status': 'dream_memory_not_initialized',
-                'count': 0,
-                'average_weight': 0,
-                'oldest': None,
-                'newest': None
+        base_stats = {
+            'status': 'dream_memory_not_initialized',
+            'count': 0,
+            'average_weight': 0.0,
+            'max_weight': 0.0,
+            'min_weight': 0.0,
+            'oldest': None,
+            'newest': None,
+            'config': {
+                'max_memories': 0,
+                'decay_rate': 0.0,
+                'prune_threshold': 0.0
             }
+        }
+        
+        if not hasattr(self, 'dream_memory'):
+            return base_stats
 
         with self.dream_memory.lock:
             memories = list(self.dream_memory.memory)
             if not memories:
-                return {
+                base_stats.update({
                     'status': 'empty',
-                    'count': 0,
-                    'average_weight': 0,
-                    'oldest': None,
-                    'newest': None
-                }
+                    'config': {
+                        'max_memories': self.dream_memory.memory.maxlen,
+                        'decay_rate': self.dream_memory.config.decay_rate,
+                        'prune_threshold': self.dream_memory.config.prune_threshold
+                    }
+                })
+                return base_stats
 
             weights = [m['weight'] for m in memories]
             timestamps = [m['timestamp'] for m in memories]
-
-            return {
+            
+            base_stats.update({
                 'status': 'active',
                 'count': len(memories),
                 'average_weight': sum(weights) / len(weights),
@@ -1098,7 +1109,8 @@ class SOVLTrainer:
                     'decay_rate': self.dream_memory.config.decay_rate,
                     'prune_threshold': self.dream_memory.config.prune_threshold
                 }
-            }
+            })
+            return base_stats
 
     def __post_init__(self):
         if self.metrics_to_track is None:
