@@ -71,6 +71,8 @@ class SOVLProcessor:
         self._confidence_history: Deque[float] = deque(maxlen=config.max_confidence_history)
         self._lock = Lock()
         self._initialize_logging()
+        self.scaffold_unk_id = None  # Should be set after initialization
+        self.token_map = {}  # Should be populated with token mapping data
 
     def _initialize_logging(self) -> None:
         """Initialize logging with system startup event."""
@@ -324,5 +326,105 @@ class SOVLProcessor:
             self._confidence_history.clear()
             self.logger.record({
                 "event": "processor_reset",
+                "timestamp": time.time()
+            })
+
+    def validate_and_map_tokens(self, base_ids: torch.Tensor, max_expanded_len: int, max_seq_length: int) -> torch.Tensor:
+        """
+        Validates and maps token IDs with proper error handling and logging.
+        
+        Args:
+            base_ids: Input tensor of token IDs (batch_size, seq_len)
+            max_expanded_len: Maximum length after expansion
+            max_seq_length: Maximum allowed sequence length
+            
+        Returns:
+            Mapped token IDs tensor
+        """
+        batch_size, seq_len = base_ids.shape
+        mapped_ids = torch.full((batch_size, max_expanded_len), 
+                              self.scaffold_unk_id, 
+                              dtype=torch.long,
+                              device=self.device)
+        
+        for batch_idx in range(batch_size):
+            position = 0
+            truncated = False
+            
+            for base_id_item in base_ids[batch_idx]:
+                if base_id_item == -100:  # Skip padding
+                    continue
+                    
+                try:
+                    mapped_entry = self.token_map.get(base_id_item, [self.scaffold_unk_id])
+                    mapped_tokens = mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
+                except Exception as e:
+                    self.logger.record({
+                        "warning": f"Token mapping error for ID {base_id_item}: {str(e)}",
+                        "timestamp": time.time()
+                    })
+                    mapped_tokens = [self.scaffold_unk_id]
+
+                if position + len(mapped_tokens) > max_expanded_len:
+                    truncated = True
+                    break
+                
+                for token in mapped_tokens:
+                    if position >= max_expanded_len:
+                        truncated = True
+                        break
+                    mapped_ids[batch_idx, position] = token
+                    position += 1
+
+                if truncated:
+                    break
+
+            if truncated:
+                self.logger.record({
+                    "warning": f"Token mapping truncated to {max_expanded_len}",
+                    "original_length": seq_len,
+                    "allowed_length": max_expanded_len,
+                    "timestamp": time.time()
+                })
+
+        return mapped_ids[:, :min(max_expanded_len, max_seq_length)]
+
+    def set_token_map(self, token_map: Dict, scaffold_unk_id: int) -> None:
+        """
+        Sets the token mapping dictionary and UNK token ID.
+        
+        Args:
+            token_map: Dictionary mapping base tokens to scaffold tokens
+            scaffold_unk_id: Unknown token ID for scaffold model
+        """
+        with self._lock:
+            self.token_map = token_map
+            self.scaffold_unk_id = scaffold_unk_id
+
+    def update_token_map_memory(self, prompt: str, confidence: float, tokenizer, memory_decay_rate: float = 0.95) -> None:
+        """
+        Update token map weights based on prompt and confidence.
+        
+        Args:
+            prompt: Input prompt text
+            confidence: Confidence score
+            tokenizer: Tokenizer to use for encoding
+            memory_decay_rate: Rate at which memory decays
+        """
+        with self._lock:
+            tokens = tokenizer.encode(prompt, add_special_tokens=False)
+            for token_id in tokens:
+                if token_id in self.token_map:
+                    self.token_map[token_id]['weight'] = min(
+                        self.token_map[token_id]['weight'] + confidence * 0.1, 
+                        2.0
+                    )
+            for token_id in self.token_map:
+                self.token_map[token_id]['weight'] *= memory_decay_rate
+            
+            self.logger.record({
+                "event": "token_map_updated",
+                "prompt_length": len(prompt),
+                "confidence": confidence,
                 "timestamp": time.time()
             })
