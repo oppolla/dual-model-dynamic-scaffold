@@ -1,5 +1,7 @@
 # SOVL System (Self-Organizing Virtual Lifeform)
 
+# NOTE: This project is still under development 
+
 ## Overview
 An AI agent with autonomous learning capabilities, combining a base LLM with a scaffolded second dynamic LLM for continuous learning via sleep and dream mechanisms
 
