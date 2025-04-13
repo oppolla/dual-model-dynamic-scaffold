@@ -2,7 +2,7 @@
   "core_config": {
     "base_model_name": "gpt2",
     "scaffold_model_name": "gpt2",
-    "cross_attn_layers": [],  //
+    "cross_attn_layers": [],
     "use_dynamic_layers": false,
     "layer_selection_mode": "balanced",
     "custom_layers": null,
