@@ -780,7 +780,7 @@ class SOVLSystem:
         self.has_woken = True
         print(f"\n{response}")
 
-        if self.curiosity_manager:
+        if ENABLE_CURIOSITY and self.curiosity_manager:
             last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
             self.curiosity_manager.update_pressure(self.state.temperament_score, last_conf, 0.0)
             q = self.generate_curiosity_question(spontaneous=True)
