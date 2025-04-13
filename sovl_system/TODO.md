@@ -84,6 +84,7 @@ To enhance relevance and efficiency, the SOVL System will implement a dynamic co
 # Modularization Tasts
 - Logger logic needs to be cleaned up and refined between modules
 - Layer injection needs to be incorporated into scaffold module
+- Add INSTALLER.py
 
 
 
