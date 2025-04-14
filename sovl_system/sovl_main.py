@@ -43,6 +43,7 @@ from sovl_memory import MemoryManager
 from sovl_manager import ModelManager
 from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
+from sovl_error import ErrorHandler
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Wrapper for backward compatibility"""
@@ -227,6 +228,16 @@ class SOVLSystem:
             log_file="sovl_errors.jsonl",
             max_size_mb=10,
             compress_old=True
+        )
+
+        # Initialize error handler
+        self.error_handler = ErrorHandler(
+            config_manager=config_manager,
+            logger=self.logger,
+            error_log_file="sovl_errors.jsonl",
+            max_error_log_size_mb=10,
+            compress_old=True,
+            state=None  # Will be set after state initialization
         )
 
         # Initialize memory manager
@@ -477,17 +488,7 @@ class SOVLSystem:
                 "state_hash": self.state.state_hash() if hasattr(self, "state") else None
             })
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Config validation failed: {str(e)}",
-                "type": type(e).__name__,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "stack_trace": traceback.format_exc(),
-                "config_snapshot": config_snapshot,
-                "validation_stage": "runtime",
-                "state_hash": self.state.state_hash() if hasattr(self, "state") else None
-            })
-            raise
+            self.error_handler.handle_config_validation_error(e, config_snapshot)
 
     def _verify_cross_attention_injection(self) -> bool:
         """Verify that cross-attention layers were properly injected."""
@@ -553,19 +554,12 @@ class SOVLSystem:
                         })
                         return False
                 except Exception as e:
-                    self.logger.record({
-                        "warning": f"Error verifying layer {layer_idx}: {str(e)}",
-                        "timestamp": time.time()
-                    })
+                    self.error_handler.handle_cross_attention_error(e, layer_idx)
                     return False
 
             return True
         except Exception as e:
-            self.logger.record({
-                "error": f"Cross-attention verification failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.error_handler.handle_cross_attention_error(e)
             return False
 
     def _insert_cross_attention(self):
@@ -590,12 +584,7 @@ class SOVLSystem:
                 device=self.device
             )
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Cross-attention injection failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+            self.error_handler.handle_cross_attention_error(e)
 
     def check_memory_health(self, model_size: int, trainer: Optional[Trainer] = None):
         """Delegate memory health check to MemoryManager."""
@@ -619,11 +608,7 @@ class SOVLSystem:
                 
             return question
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Question generation failed: {str(e)}",
-                error_type="generation_error",
-                stack_trace=traceback.format_exc()
-            )
+            self.error_handler.handle_curiosity_error(e, "question_generation")
             return None
 
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
@@ -780,17 +765,7 @@ class SOVLSystem:
             return metrics.get("loss")
 
         except Exception as e:
-            self.error_logger.record({
-                "error": str(e),
-                "type": type(e).__name__,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "batch_size": len(batch),
-                "phase": "training",
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            raise
+            self.error_handler.handle_training_error(e, len(batch))
 
     def run_training_cycle(self, train_data, valid_data, epochs=None, batch_size=None):
         """Run a full training cycle."""
@@ -913,16 +888,7 @@ class SOVLSystem:
                 **kwargs
             )
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Generation failed: {str(e)}",
-                "type": type(e).__name__,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "prompt": prompt[:200],
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            return "An error occurred during generation"
+            return self.error_handler.handle_generation_error(e, prompt)
 
     def tokenize_and_map(self, prompts, max_length=None):
         """Tokenize prompts and map to scaffold token space using the generation manager."""

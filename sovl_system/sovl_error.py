@@ -250,23 +250,116 @@ class ErrorHandler:
                 "timestamp": time.time(),
             })
 
+    def handle_config_validation_error(self, error: Exception, config_snapshot: Dict[str, Any]) -> None:
+        """Handle configuration validation errors."""
+        self.record_error(
+            error=error,
+            context="config_validation",
+            phase="validation",
+            additional_info={
+                "config_snapshot": config_snapshot,
+                "validation_stage": "runtime",
+                "state_hash": self.state.state_hash() if self.state else None
+            },
+            severity="error",
+            reraise=True
+        )
+
+    def handle_cross_attention_error(self, error: Exception, layer_idx: Optional[int] = None) -> None:
+        """Handle cross-attention related errors."""
+        additional_info = {}
+        if layer_idx is not None:
+            additional_info["layer_idx"] = layer_idx
+            severity = "warning"
+        else:
+            severity = "error"
+            additional_info["state_hash"] = self.state.state_hash() if self.state else None
+
+        self.record_error(
+            error=error,
+            context="cross_attention",
+            phase="verification" if layer_idx is not None else "injection",
+            additional_info=additional_info,
+            severity=severity,
+            reraise=severity == "error"
+        )
+
+    def handle_generation_error(self, error: Exception, prompt: str) -> str:
+        """Handle generation errors and return a fallback response."""
+        self.record_error(
+            error=error,
+            context="generation",
+            phase="generate",
+            additional_info={
+                "prompt": prompt[:200],  # Truncate for logging
+                "state_hash": self.state.state_hash() if self.state else None
+            },
+            severity="error"
+        )
+        return "An error occurred during generation"
+
+    def handle_training_error(self, error: Exception, batch_size: int) -> None:
+        """Handle training errors."""
+        self.record_error(
+            error=error,
+            context="training",
+            phase="train_step",
+            additional_info={
+                "batch_size": batch_size,
+                "phase": "training",
+                "state_hash": self.state.state_hash() if self.state else None
+            },
+            severity="error",
+            reraise=True
+        )
+
+    def handle_data_loading_error(self, error: Exception, file_path: str) -> None:
+        """Handle data loading errors."""
+        self.record_error(
+            error=error,
+            context="data_loading",
+            phase="load_training_data",
+            additional_info={
+                "file_path": file_path,
+                "is_error_prompt": True
+            },
+            severity="error"
+        )
+
+    def handle_curiosity_error(self, error: Exception, event_type: str) -> None:
+        """Handle curiosity-related errors."""
+        self.record_error(
+            error=error,
+            context="curiosity",
+            phase=event_type,
+            additional_info={
+                "error_type": "generation_error" if event_type == "question_generation" else "curiosity_error",
+                "state_hash": self.state.state_hash() if self.state else None
+            },
+            severity="error"
+        )
+
     def _default_training_recovery(self, error: Exception, context: str, phase: str) -> None:
         """Default recovery for training errors."""
         self.logger.record({
             "warning": f"Training recovery triggered for {phase}: {str(error)}",
             "timestamp": time.time(),
+            "conversation_id": self._get_conversation_id(),
+            "state_hash": self.state.state_hash() if self.state else None
         })
         return None
 
     def _default_generation_recovery(self, error: Exception, context: str, phase: str) -> str:
         """Default recovery for generation errors."""
-        return "An error occurred during generation."
+        return "An error occurred during generation"
 
     def _default_config_recovery(self, error: Exception, context: str, phase: str) -> None:
         """Default recovery for configuration errors."""
         self.logger.record({
             "warning": f"Using default config values due to error: {str(error)}",
             "timestamp": time.time(),
+            "conversation_id": self._get_conversation_id(),
+            "state_hash": self.state.state_hash() if self.state else None
         })
         return None
 
@@ -275,6 +368,8 @@ class ErrorHandler:
         self.logger.record({
             "warning": f"Returning empty dataset due to error: {str(error)}",
             "timestamp": time.time(),
+            "conversation_id": self._get_conversation_id(),
+            "state_hash": self.state.state_hash() if self.state else None
         })
         return []
 
@@ -283,6 +378,8 @@ class ErrorHandler:
         self.logger.record({
             "warning": f"Disabling cross-attention due to error: {str(error)}",
             "timestamp": time.time(),
+            "conversation_id": self._get_conversation_id(),
+            "state_hash": self.state.state_hash() if self.state else None
         })
         return False
 
