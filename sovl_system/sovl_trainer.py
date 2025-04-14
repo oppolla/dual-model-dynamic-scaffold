@@ -749,26 +749,90 @@ class SOVLTrainer:
         })
 
     def sleep_train(self, log_entries: List[dict]) -> None:
-        """Perform sleep training."""
-        if not self.config.enable_sleep_training or not self._should_gestate(log_entries):
+        """
+        Perform sleep training on dream-generated content.
+        
+        Args:
+            log_entries: List of log entries containing prompts and responses
+        """
+        if not self.config.enable_sleep_training:
+            self.logger({
+                "event": "sleep_training_skipped",
+                "reason": "disabled",
+                "timestamp": time.time(),
+                "conversation_id": getattr(self.state, "conversation_id", "training"),
+                "state_hash": getattr(self.state, "state_hash", None)
+            })
             return
+            
+        if not log_entries:
+            self.logger({
+                "event": "sleep_training_skipped",
+                "reason": "no_log_entries",
+                "timestamp": time.time(),
+                "conversation_id": getattr(self.state, "conversation_id", "training"),
+                "state_hash": getattr(self.state, "state_hash", None)
+            })
+            return
+
+        self.logger({
+            "event": "sleep_training_started",
+            "log_entries_count": len(log_entries),
+            "timestamp": time.time(),
+            "conversation_id": getattr(self.state, "conversation_id", "training"),
+            "state_hash": getattr(self.state, "state_hash", None)
+        })
+
+        # Prepare training batch from log entries
         batch = [
             {"prompt": e["prompt"], "completion": e["response"]}
             for e in log_entries if "prompt" in e and "response" in e
         ]
+        
         if not batch:
+            self.logger({
+                "event": "sleep_training_skipped",
+                "reason": "no_valid_entries",
+                "timestamp": time.time(),
+                "conversation_id": getattr(self.state, "conversation_id", "training"),
+                "state_hash": getattr(self.state, "state_hash", None)
+            })
             return
 
+        # Check if dreaming should occur
         if self.config.enable_dreaming and self.dream_manager.should_dream():
             self.dream_manager.dream(log_entries)
 
+        # Run training with single epoch
         original_epochs = self.config.max_epochs
         self.config.max_epochs = 1
-        self.train(train_data=batch, valid_data=None)
-        self.config.max_epochs = original_epochs
+        try:
+            self.train(train_data=batch, valid_data=None)
+        finally:
+            self.config.max_epochs = original_epochs
+
+        # Update data exposure
         self.lifecycle_manager.data_exposure += sum(len(e["prompt"]) + len(e["response"]) for e in batch)
+        
+        # Reset sleep state
         self._reset_sleep_state()
-        self._trigger_callback("on_sleep_train_complete", batch_size=len(batch), data_exposure=self.lifecycle_manager.data_exposure)
+        
+        # Trigger callback
+        self._trigger_callback(
+            "on_sleep_train_complete",
+            batch_size=len(batch),
+            data_exposure=self.lifecycle_manager.data_exposure
+        )
+        
+        # Log completion
+        self.logger({
+            "event": "sleep_training_completed",
+            "batch_size": len(batch),
+            "data_exposure": self.lifecycle_manager.data_exposure,
+            "timestamp": time.time(),
+            "conversation_id": getattr(self.state, "conversation_id", "training"),
+            "state_hash": getattr(self.state, "state_hash", None)
+        })
 
     def _reset_sleep_state(self) -> None:
         """Reset sleep state."""

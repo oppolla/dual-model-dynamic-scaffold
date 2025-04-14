@@ -749,17 +749,20 @@ class SOVLSystem:
             
         print("\n--- Sleep Training Initiated ---")
         log_entries = self.logger.read()
-        if not log_entries:
-            print("No log data to train on.")
-            return
-
+        
+        # Delegate sleep training to trainer
         self.trainer.sleep_train(log_entries)
+        
+        # Update system state
         self.last_trained = time.time()
         self.logger.clear()
         self.last_weight = self.trainer.get_life_curve_weight()
+        
+        # Update temperament if enabled
         if self.enable_temperament:
             self._update_temperament()
             self.last_temperament_score = self.temperament_score
+            
         print("--- Sleep Training Complete ---")
 
     def has_repetition(self, output_ids, n=3):
