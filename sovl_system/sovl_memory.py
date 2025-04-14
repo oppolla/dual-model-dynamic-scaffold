@@ -9,6 +9,7 @@ from typing import Optional, Dict, List, Tuple, Any, Union
 from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import memory_usage, safe_divide
+import threading
 
 class MemoryManager:
     """
@@ -61,6 +62,18 @@ class MemoryManager:
         # State integration
         self._state = None
         self._hidden_size = None
+
+        # New memory health attributes
+        self.memory_lock = threading.Lock()
+        self.mem_usage_history = []
+        self.dynamic_threshold_base = config_manager.get("memory_config.memory_threshold", 0.8)
+        self.memory_decay_rate = config_manager.get("memory_config.memory_decay_rate", 0.95)
+        self.max_history_size = config_manager.get("memory_config.max_history_size", 100)
+        self.min_batch_size = config_manager.get("memory_config.min_batch_size", 1)
+        self.max_batch_size = config_manager.get("memory_config.max_batch_size", 32)
+        self.initial_batch_size = config_manager.get("memory_config.initial_batch_size", 8)
+        self.batch_size = self.initial_batch_size
+        self.memory_threshold = self.dynamic_threshold_base
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
@@ -212,97 +225,87 @@ class MemoryManager:
             return None
         return mem_stats
 
-    def check_memory_health(self, model_size: float, trainer) -> None:
-        """Reduce GPU memory usage if nearing capacity."""
-        mem_stats = self._get_memory_stats()
-        if not mem_stats:
-            return
-
-        with self._memory_lock:
-            current_mem = mem_stats['allocated'] * (1024 ** 3)
-            total_mem = torch.cuda.get_device_properties(0).total_memory
-            mem_ratio = current_mem / total_mem
-            self._mem_usage_history.append(mem_ratio)
-
-            avg_mem_usage = sum(self._mem_usage_history) / len(self._mem_usage_history) if self._mem_usage_history else mem_ratio
-            dynamic_threshold = min(
-                0.95,
-                max(
-                    0.7,
-                    self._dynamic_threshold_base * (1 + (model_size / total_mem) * 0.1 - avg_mem_usage * 0.2)
+    def check_memory_health(self, model_size: int, trainer: Optional[Trainer] = None):
+        """Autonomically reduce GPU memory usage if approaching capacity."""
+        try:
+            if torch.cuda.is_available():
+                # Get memory stats
+                memory_stats = torch.cuda.memory_stats()
+                current_memory = memory_stats["allocated_bytes.all.current"]
+                total_memory = torch.cuda.get_device_properties(0).total_memory
+                memory_ratio = current_memory / total_memory
+                
+                # Log memory usage
+                self._logger.log_memory_usage(
+                    phase="health_check",
+                    device=self._device,
+                    memory_ratio=memory_ratio,
+                    model_size=model_size
                 )
+                
+                # Update memory usage history
+                with self._memory_lock:
+                    self._mem_usage_history.append(memory_ratio)
+                    if len(self._mem_usage_history) > self.max_history_size:
+                        self._mem_usage_history.pop(0)
+                    
+                    # Calculate dynamic threshold
+                    if len(self._mem_usage_history) > 0:
+                        avg_usage = sum(self._mem_usage_history) / len(self._mem_usage_history)
+                        self.memory_threshold = min(
+                            self.dynamic_threshold_base,
+                            avg_usage * self.memory_decay_rate
+                        )
+                
+                # Check if memory usage exceeds threshold
+                if memory_ratio > self.memory_threshold:
+                    # Reduce batch size if trainer is provided
+                    if trainer is not None:
+                        new_batch_size = max(
+                            self.min_batch_size,
+                            int(self.batch_size * 0.5)
+                        )
+                        if new_batch_size != self.batch_size:
+                            self.batch_size = new_batch_size
+                            trainer.train_batch_size = new_batch_size
+                            self._logger.log_event(
+                                event_type="memory_health",
+                                event_data={
+                                    "action": "reduce_batch_size",
+                                    "new_batch_size": new_batch_size,
+                                    "memory_ratio": memory_ratio,
+                                    "threshold": self.memory_threshold
+                                }
+                            )
+                    
+                    # Clear CUDA cache if memory usage is very high
+                    if memory_ratio > 0.9:
+                        torch.cuda.empty_cache()
+                        self._logger.log_event(
+                            event_type="memory_health",
+                            event_data={
+                                "action": "clear_cache",
+                                "memory_ratio": memory_ratio
+                            }
+                        )
+                
+                return True
+            return False
+        except Exception as e:
+            self._log_error(
+                error_msg=f"Memory health check failed: {str(e)}",
+                error_type="memory_error",
+                stack_trace=traceback.format_exc()
             )
-            lifecycle_stage = safe_divide(
-                getattr(trainer, 'data_exposure', 0),
-                getattr(trainer, 'lora_capacity', 1),
-                default=0.0
-            )
+            return False
 
-            if lifecycle_stage < 0.25 and mem_ratio > dynamic_threshold:
-                actions = {
-                    "memory_pruned": False,
-                    "quantization_changed": False,
-                    "cache_cleared": False,
-                    "batch_size_reduced": False,
-                    "new_batch_size": None
-                }
+    def get_batch_size(self):
+        """Get current batch size."""
+        return self.batch_size
 
-                torch.cuda.empty_cache()
-                actions["cache_cleared"] = True
-
-                with self._state.memory_lock:
-                    if len(self._state.dream_memory) > 0:
-                        original_len = len(self._state.dream_memory)
-                        sorted_mem = sorted(self._state.dream_memory, key=lambda x: x[1], reverse=True)
-                        keep_len = max(1, original_len // 2)
-                        self._state.dream_memory = deque(maxlen=self._state.dream_memory_maxlen)
-                        for tensor, weight in sorted_mem[:keep_len]:
-                            if weight > 0.5:
-                                self._state.append_dream_memory(tensor.detach().cpu(), weight)
-                        if len(self._state.dream_memory) < original_len:
-                            actions["memory_pruned"] = True
-
-                current_batch_size = self._training_config.get("batch_size", 1)
-                if not hasattr(self, '_original_batch_size'):
-                    self._original_batch_size = current_batch_size
-                if current_batch_size > 1:
-                    new_batch_size = max(1, current_batch_size // 2)
-                    self._config_manager.update("training_config.batch_size", new_batch_size)
-                    self._training_config["batch_size"] = new_batch_size
-                    actions["batch_size_reduced"] = True
-                    actions["new_batch_size"] = new_batch_size
-
-                quantization_mode = self._core_config.get("quantization", "fp16")
-                if quantization_mode != "int8":
-                    self._config_manager.update("core_config.quantization", "int8")
-                    self._core_config["quantization"] = "int8"
-                    actions["quantization_changed"] = True
-
-                self._log_event(
-                    "memory_threshold_exceeded",
-                    details={
-                        "current_memory": current_mem,
-                        "total_memory": total_mem,
-                        "memory_pruned": actions["memory_pruned"],
-                        "quantization_changed": actions["quantization_changed"],
-                        "cache_cleared": actions["cache_cleared"],
-                        "batch_size_reduced": actions["batch_size_reduced"],
-                        "new_batch_size": actions["new_batch_size"],
-                        "dynamic_threshold": dynamic_threshold,
-                        "threshold": self.memory_threshold,
-                        "dream_memory_len": len(self._state.dream_memory)
-                    }
-                )
-                print(f"Memory adjusted (GPU: {mem_ratio:.0%}, Threshold: {dynamic_threshold:.2f}) - "
-                      f"Cache Cleared: {actions['cache_cleared']}, Pruned: {actions['memory_pruned']}, "
-                      f"Batch Reduced: {actions['batch_size_reduced']}, Quantized: {actions['quantization_changed']}")
-
-            elif mem_ratio < dynamic_threshold * 0.8 and hasattr(self, '_original_batch_size'):
-                new_batch_size = self._original_batch_size
-                self._config_manager.update("training_config.batch_size", new_batch_size)
-                self._training_config["batch_size"] = new_batch_size
-                print(f"Restored batch size to {new_batch_size}")
-                delattr(self, '_original_batch_size')
+    def reset_batch_size(self):
+        """Reset batch size to initial value."""
+        self.batch_size = self.initial_batch_size
 
     def clear_scaffold_cache(self) -> None:
         """Clear scaffold-related caches safely."""

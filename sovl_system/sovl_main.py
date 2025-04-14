@@ -598,30 +598,8 @@ class SOVLSystem:
             raise
 
     def check_memory_health(self, model_size: int, trainer: Optional[Trainer] = None):
-        """Autonomically reduce GPU memory usage if approaching capacity."""
-        try:
-            if torch.cuda.is_available():
-                # Get memory stats
-                memory_stats = torch.cuda.memory_stats()
-                current_memory = memory_stats["allocated_bytes.all.current"]
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                memory_ratio = current_memory / total_memory
-                
-                # Log memory usage
-                self.logger.log_memory_usage(
-                    phase="health_check",
-                    device=self.device,
-                    memory_ratio=memory_ratio,
-                    model_size=model_size
-                )
-                
-                # ... rest of the method implementation ...
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Memory health check failed: {str(e)}",
-                error_type="memory_error",
-                stack_trace=traceback.format_exc()
-            )
+        """Delegate memory health check to MemoryManager."""
+        return self.memory_manager.check_memory_health(model_size, trainer)
 
     def generate_curiosity_question(self, state: SOVLState, tokenizer: PreTrainedTokenizer,
                                   model: PreTrainedModel, context: str = "",
