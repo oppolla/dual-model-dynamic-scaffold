@@ -11,151 +11,141 @@ class SOVLOrchestrator:
     """
     Orchestrates the initialization, execution, and shutdown of the SOVL system.
 
-    This class is responsible for setting up the ConfigManager, SOVLSystem, and other
-    core components, selecting the execution mode (e.g., CLI), and ensuring clean
-    shutdown with state saving and resource cleanup.
+    Responsible for setting up core components (ConfigManager, SOVLSystem),
+    selecting execution modes (e.g., CLI), and ensuring clean shutdown with
+    state saving and resource cleanup.
     """
-    def __init__(self, config_path: str = "sovl_config.json", log_file: str = "sovl_orchestrator_logs.jsonl"):
+    # Constants for configuration
+    DEFAULT_CONFIG_PATH: str = "sovl_config.json"
+    DEFAULT_LOG_FILE: str = "sovl_orchestrator_logs.jsonl"
+    LOG_MAX_SIZE_MB: int = 10
+    SAVE_PATH_SUFFIX: str = "_final.json"
+
+    def __init__(self, config_path: str = DEFAULT_CONFIG_PATH, log_file: str = DEFAULT_LOG_FILE) -> None:
         """
         Initialize the orchestrator with configuration and logging.
 
         Args:
-            config_path (str): Path to the configuration file.
-            log_file (str): Path to the orchestrator's log file.
+            config_path: Path to the configuration file.
+            log_file: Path to the orchestrator's log file.
+
+        Raises:
+            RuntimeError: If initialization of ConfigManager or SOVLSystem fails.
         """
-        # Initialize logger
-        self.logger = Logger(
-            log_file=log_file,
-            max_size_mb=10,
-            compress_old=True
-        )
-        self.logger.record({
-            "event": "orchestrator_init_start",
-            "config_path": config_path,
-            "timestamp": time.time()
-        })
+        self._initialize_logger(log_file)
+        self._log_event("orchestrator_init_start", {"config_path": config_path})
 
         try:
-            # Initialize ConfigManager
-            self.config_manager = ConfigManager(config_path)
-
-            # Initialize SOVLSystem
-            self.system = SOVLSystem(self.config_manager)
-
-            self.logger.record({
-                "event": "orchestrator_init_success",
-                "timestamp": time.time()
-            })
+            self.config_manager: ConfigManager = self._create_config_manager(config_path)
+            self.system: Optional[SOVLSystem] = self._create_system()
+            self._log_event("orchestrator_init_success")
         except Exception as e:
-            self.logger.record({
-                "error": f"Orchestrator initialization failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+            self._log_error("Orchestrator initialization failed", e)
+            raise RuntimeError(f"Failed to initialize orchestrator: {str(e)}") from e
 
-    def run(self, mode: str = "cli", **kwargs) -> None:
+    def run(self, mode: str = "cli", **kwargs: Any) -> None:
         """
-        Run the system in the specified mode.
+        Execute the system in the specified mode.
 
         Args:
-            mode (str): Execution mode ('cli' supported currently).
+            mode: Execution mode (currently supports 'cli').
             **kwargs: Additional arguments for the execution mode.
 
         Raises:
             ValueError: If an unsupported mode is provided.
-            Exception: For other execution errors, logged appropriately.
+            RuntimeError: If execution fails.
         """
-        self.logger.record({
-            "event": "orchestrator_run_start",
-            "mode": mode,
-            "timestamp": time.time()
-        })
+        self._log_event("orchestrator_run_start", {"mode": mode})
 
         try:
-            if mode == "cli":
-                # Pass config_manager and system to run_cli
-                run_cli(config_manager=self.config_manager, system=self.system, **kwargs)
-            else:
+            mode_handlers: Dict[str, callable] = {
+                "cli": self._run_cli_mode
+            }
+            handler = mode_handlers.get(mode)
+            if handler is None:
                 raise ValueError(f"Unsupported execution mode: {mode}")
-
-            self.logger.record({
-                "event": "orchestrator_run_complete",
-                "mode": mode,
-                "timestamp": time.time()
-            })
+            handler(**kwargs)
+            self._log_event("orchestrator_run_complete", {"mode": mode})
         except Exception as e:
-            self.logger.record({
-                "error": f"Run failed in mode {mode}: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+            self._log_error(f"Run failed in mode {mode}", e)
+            raise RuntimeError(f"Execution failed in mode {mode}: {str(e)}") from e
 
     def shutdown(self) -> None:
         """
         Perform clean shutdown, saving state and releasing resources.
+
+        Raises:
+            RuntimeError: If shutdown fails.
         """
-        self.logger.record({
-            "event": "orchestrator_shutdown_start",
-            "timestamp": time.time()
-        })
+        self._log_event("orchestrator_shutdown_start")
 
         try:
-            if hasattr(self.system, 'save_state'):
-                save_path = self.config_manager.get("controls_config.save_path_prefix", "state") + "_final.json"
-                self.system.save_state(save_path)
-                self.logger.record({
-                    "event": "state_saved",
-                    "save_path": save_path,
-                    "timestamp": time.time()
-                })
-
-            # Clean up system resources
+            self._save_system_state()
             self._cleanup_resources()
-
-            self.logger.record({
-                "event": "orchestrator_shutdown_complete",
-                "status": "clean",
-                "timestamp": time.time()
-            })
+            self._log_event("orchestrator_shutdown_complete", {"status": "clean"})
         except Exception as e:
-            self.logger.record({
-                "error": f"Shutdown failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+            self._log_error("Shutdown failed", e)
+            raise RuntimeError(f"Shutdown failed: {str(e)}") from e
+
+    def _initialize_logger(self, log_file: str) -> None:
+        """Set up the logger for the orchestrator."""
+        self.logger: Logger = Logger(
+            log_file=log_file,
+            max_size_mb=self.LOG_MAX_SIZE_MB,
+            compress_old=True
+        )
+
+    def _create_config_manager(self, config_path: str) -> ConfigManager:
+        """Create and return a ConfigManager instance."""
+        return ConfigManager(config_path)
+
+    def _create_system(self) -> SOVLSystem:
+        """Create and return a SOVLSystem instance."""
+        return SOVLSystem(self.config_manager)
+
+    def _run_cli_mode(self, **kwargs: Any) -> None:
+        """Execute the CLI mode by calling run_cli."""
+        run_cli(config_manager=self.config_manager, system=self.system, **kwargs)
+
+    def _save_system_state(self) -> None:
+        """Save the system state if the system supports it."""
+        if hasattr(self.system, 'save_state'):
+            save_path = self.config_manager.get("controls_config.save_path_prefix", "state") + self.SAVE_PATH_SUFFIX
+            self.system.save_state(save_path)
+            self._log_event("state_saved", {"save_path": save_path})
 
     def _cleanup_resources(self) -> None:
-        """
-        Clean up system resources, including scaffold state and GPU memory.
-        """
+        """Clean up system resources, including scaffold state and GPU memory."""
         try:
             if hasattr(self.system, 'scaffold_manager'):
                 self.system.scaffold_manager.reset_scaffold_state()
-                self.logger.record({
-                    "event": "scaffold_state_reset",
-                    "timestamp": time.time()
-                })
+                self._log_event("scaffold_state_reset")
 
             if hasattr(self.system, 'cleanup'):
                 self.system.cleanup()
-                self.logger.record({
-                    "event": "system_cleanup",
-                    "timestamp": time.time()
-                })
+                self._log_event("system_cleanup")
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                self.logger.record({
-                    "event": "cuda_cache_cleared",
-                    "timestamp": time.time()
-                })
+                self._log_event("cuda_cache_cleared")
         except Exception as e:
-            self.logger.record({
-                "error": f"Resource cleanup failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self._log_error("Resource cleanup failed", e)
             raise
+
+    def _log_event(self, event: str, extra_attrs: Optional[Dict[str, Any]] = None) -> None:
+        """Log an event with optional additional attributes."""
+        log_entry = {
+            "event": event,
+            "timestamp": time.time()
+        }
+        if extra_attrs:
+            log_entry.update(extra_attrs)
+        self.logger.record(log_entry)
+
+    def _log_error(self, message: str, error: Exception) -> None:
+        """Log an error with stack trace."""
+        self.logger.record({
+            "error": f"{message}: {str(error)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
