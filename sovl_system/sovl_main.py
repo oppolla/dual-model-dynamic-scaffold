@@ -802,22 +802,6 @@ class SOVLSystem:
             })
             print(f"Dream params updated: {updates}")
 
-    def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None,
-                          curiosity_boost=None, restless_drop=None, melancholy_noise=None,
-                          conf_feedback_strength=None, temp_smoothing_factor=None, decay_rate=None):
-        """Adjust temperament parameters using the temperament system."""
-        self.temperament_system.adjust_temperament(
-            eager_threshold=eager_threshold,
-            sluggish_threshold=sluggish_threshold,
-            mood_influence=mood_influence,
-            curiosity_boost=curiosity_boost,
-            restless_drop=restless_drop,
-            melancholy_noise=melancholy_noise,
-            conf_feedback_strength=conf_feedback_strength,
-            temp_smoothing_factor=temp_smoothing_factor,
-            decay_rate=decay_rate
-        )
-
     def _update_temperament(self):
         """Update temperament using the temperament system."""
         avg_confidence = safe_divide(
@@ -845,42 +829,46 @@ class SOVLSystem:
             maxlen=self.controls_config.get("temperament_history_maxlen", 5)
         )
 
-    def set_global_blend(self, weight_cap=None, base_temp=None):
-        updates = {}
-        prefix = "controls_config."
-        if weight_cap is not None and 0.5 <= weight_cap <= 1.0:
-            updates[f"{prefix}scaffold_weight_cap"] = weight_cap
-            self.controls_config["scaffold_weight_cap"] = weight_cap
-            self.scaffold_weight = weight_cap
-        if base_temp is not None and 0.5 <= base_temp <= 1.5:
-            updates[f"{prefix}base_temperature"] = base_temp
-        self.state.temperament_history.append(self.state.temperament_score)
-    
-        if self.curiosity_config.get("enable_curiosity", True) and self.curiosity_manager:
-            self.curiosity_manager.update_pressure(
-                temperament=self.state.temperament_score,
-                confidence=avg_confidence,
-                silence_duration=0.0,
-                context_vector=self.state.curiosity.context_vector
-            )
-    
-        label = (
-            "melancholic" if float_lt(self.state.temperament_score, -0.5) else
-            "restless" if float_lt(self.state.temperament_score, 0.0) else
-            "calm" if float_lt(self.state.temperament_score, 0.5) else "curious"
+    def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None,
+                          curiosity_boost=None, restless_drop=None, melancholy_noise=None,
+                          conf_feedback_strength=None, temp_smoothing_factor=None, decay_rate=None):
+        """Adjust temperament parameters using the temperament system."""
+        self.temperament_system.adjust_temperament(
+            eager_threshold=eager_threshold,
+            sluggish_threshold=sluggish_threshold,
+            mood_influence=mood_influence,
+            curiosity_boost=curiosity_boost,
+            restless_drop=restless_drop,
+            melancholy_noise=melancholy_noise,
+            conf_feedback_strength=conf_feedback_strength,
+            temp_smoothing_factor=temp_smoothing_factor,
+            decay_rate=decay_rate
         )
-        self.logger.record({
-            "event": "temperament_updated",
-            "score": self.state.temperament_score,
-            "label": label,
-            "lifecycle_stage": lifecycle_stage,
-            "avg_confidence": avg_confidence,
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        })
-        print(f"Temperament score: {self.state.temperament_score:.3f} ({label}, lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}")
-    
+
+    def set_global_blend(self, weight_cap=None, base_temp=None):
+        """Set global blend parameters."""
+        success = self.config_manager.set_global_blend(weight_cap, base_temp)
+        
+        if success:
+            if weight_cap is not None:
+                self.controls_config["scaffold_weight_cap"] = weight_cap
+                self.scaffold_weight = weight_cap
+            if base_temp is not None:
+                self.controls_config["base_temperature"] = base_temp
+                self.base_temperature = base_temp
+                
+            self.logger.record({
+                "event": "global_blend_updated",
+                "params": {
+                    "scaffold_weight_cap": weight_cap,
+                    "base_temperature": base_temp
+                },
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "state_hash": self.state.state_hash()
+            })
+            print(f"Global blend params updated: weight_cap={weight_cap}, base_temp={base_temp}")
+
     def train_step(self, batch):
         """Execute a single training step with scaffold context."""
         try:

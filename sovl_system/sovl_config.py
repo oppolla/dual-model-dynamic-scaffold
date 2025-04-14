@@ -757,6 +757,169 @@ class ConfigManager:
             })
             return False
 
+    def set_global_blend(self, weight_cap: Optional[float] = None, base_temp: Optional[float] = None) -> bool:
+        """
+        Set global blend parameters for the system.
+
+        Args:
+            weight_cap: Scaffold weight cap (0.5 to 1.0)
+            base_temp: Base temperature (0.5 to 1.5)
+
+        Returns:
+            True if update succeeded, False otherwise
+        """
+        updates = {}
+        prefix = "controls_config."
+        
+        if weight_cap is not None and 0.5 <= weight_cap <= 1.0:
+            updates[f"{prefix}scaffold_weight_cap"] = weight_cap
+            
+        if base_temp is not None and 0.5 <= base_temp <= 1.5:
+            updates[f"{prefix}base_temperature"] = base_temp
+            
+        if updates:
+            return self.update_batch(updates)
+        return True
+
+    def validate_section(self, section: str, required_keys: List[str]) -> bool:
+        """
+        Validate a configuration section and its required keys.
+
+        Args:
+            section: Configuration section name
+            required_keys: List of required keys in the section
+
+        Returns:
+            True if section is valid, False otherwise
+        """
+        try:
+            with self.lock:
+                # Check if section exists
+                if section not in self.store.structured_config:
+                    self.logger.record({
+                        "error": f"Configuration section '{section}' not found",
+                        "timestamp": time.time(),
+                        "conversation_id": "validate"
+                    })
+                    return False
+
+                # Check for required keys
+                missing_keys = [key for key in required_keys if key not in self.store.structured_config[section]]
+                if missing_keys:
+                    self.logger.record({
+                        "error": f"Missing required keys in section '{section}': {', '.join(missing_keys)}",
+                        "timestamp": time.time(),
+                        "conversation_id": "validate"
+                    })
+                    return False
+
+                return True
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to validate section '{section}': {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "validate"
+            })
+            return False
+
+    def tune_parameter(self, section: str, key: str, value: Any, min_value: Any = None, max_value: Any = None) -> bool:
+        """
+        Tune a configuration parameter with validation.
+
+        Args:
+            section: Configuration section name
+            key: Parameter key
+            value: New parameter value
+            min_value: Minimum allowed value
+            max_value: Maximum allowed value
+
+        Returns:
+            True if parameter was updated successfully, False otherwise
+        """
+        try:
+            with self.lock:
+                # Validate value range if min/max provided
+                if min_value is not None and value < min_value:
+                    self.logger.record({
+                        "error": f"Value {value} below minimum {min_value} for {section}.{key}",
+                        "timestamp": time.time(),
+                        "conversation_id": "tune"
+                    })
+                    return False
+                    
+                if max_value is not None and value > max_value:
+                    self.logger.record({
+                        "error": f"Value {value} above maximum {max_value} for {section}.{key}",
+                        "timestamp": time.time(),
+                        "conversation_id": "tune"
+                    })
+                    return False
+
+                # Update the parameter
+                success = self.update(section, key, value)
+                if success:
+                    self.logger.record({
+                        "info": f"Tuned {section}.{key} to {value}",
+                        "timestamp": time.time(),
+                        "conversation_id": "tune"
+                    })
+                return success
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to tune {section}.{key}: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "tune"
+            })
+            return False
+
+    def update_section(self, section: str, updates: Dict[str, Any]) -> bool:
+        """
+        Update a configuration section with new values.
+
+        Args:
+            section: Configuration section name
+            updates: Dictionary of key-value pairs to update
+
+        Returns:
+            True if update successful, False otherwise
+        """
+        try:
+            with self.lock:
+                # Check if section exists
+                if section not in self.store.structured_config:
+                    self.logger.record({
+                        "error": f"Configuration section '{section}' not found",
+                        "timestamp": time.time(),
+                        "conversation_id": "update"
+                    })
+                    return False
+
+                # Update values
+                for key, value in updates.items():
+                    if key in self.store.structured_config[section]:
+                        self.store.structured_config[section][key] = value
+                        self.logger.record({
+                            "action": f"Updated {section}.{key}",
+                            "new_value": str(value),
+                            "timestamp": time.time(),
+                            "conversation_id": "update"
+                        })
+
+                # Save changes
+                self.save_config()
+                return True
+
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to update section '{section}': {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "update"
+            })
+            return False
+
 if __name__ == "__main__":
     from sovl_logger import LoggerConfig
     logger = Logger(LoggerConfig())
