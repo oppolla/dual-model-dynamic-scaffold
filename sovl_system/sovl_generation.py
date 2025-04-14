@@ -508,6 +508,14 @@ class GenerationManager:
         responses = []
 
         try:
+            # Check gestation state
+            if self.state.gestation_state == "gestating":
+                self._log_event(
+                    event="gestation_skip",
+                    data={"reason": "System is in gestation state"}
+                )
+                return "System is currently in gestation state. Please try again later."
+
             generation_params = self._prepare_generation_params(max_new_tokens, scaffold_weight, prompts=prompts, **kwargs)
             for callback in self.generation_callbacks["pre_generate"]:
                 callback(generation_params)
@@ -585,6 +593,16 @@ class GenerationManager:
                                 self.state.sleep_confidence_sum += confidence_score
                                 self.state.sleep_confidence_count += 1
                                 self.state.confidence_history.append(confidence_score)
+                                
+                                # Update gestation state based on confidence
+                                if len(self.state.confidence_history) >= self.controls_config.get("gestation_history_threshold", 100):
+                                    avg_confidence = sum(self.state.confidence_history[-100:]) / 100
+                                    if avg_confidence < self.controls_config.get("gestation_confidence_threshold", 0.3):
+                                        self.state.gestation_state = "gestating"
+                                        self._log_event(
+                                            event="gestation_triggered",
+                                            data={"avg_confidence": avg_confidence}
+                                        )
                         except Exception as e:
                             self._log_error(
                                 error=f"Confidence calculation failed: {str(e)}",
@@ -594,7 +612,18 @@ class GenerationManager:
 
                     seq_ids = self._handle_repetition(seq, seq_ids, outputs)
                     response = self.base_tokenizer.decode(seq_ids, skip_special_tokens=True)
-                    response = self._update_curiosity(prompt, response, confidence_score)
+                    
+                    # Update curiosity and generate questions if needed
+                    if self.curiosity_manager and self.controls_config.get("enable_curiosity", True):
+                        response = self._update_curiosity(prompt, response, confidence_score)
+                        if self.curiosity_manager.should_generate_question():
+                            question = self.curiosity_manager.generate_question(prompt, response)
+                            if question:
+                                self._log_event(
+                                    event="curiosity_question_generated",
+                                    data={"question": question}
+                                )
+                                response += f"\n\nQuestion: {question}"
 
                     self._log_event(
                         event="generation_completed",
