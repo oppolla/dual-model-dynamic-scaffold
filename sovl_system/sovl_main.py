@@ -23,7 +23,7 @@ from sovl_io import (
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
 from sovl_config import ConfigManager
-from sovl_scaffold import inject_cross_attention, CrossAttentionInjector, ScaffoldManager
+from sovl_scaffold import inject_cross_attention, CrossAttentionInjector, ScaffoldManager, ScaffoldTokenMapper, build_scaffold_token_mapping
 from sovl_processor import LogitsProcessor
 from sovl_utils import (
     NumericalGuard,
@@ -451,7 +451,7 @@ class SOVLSystem:
 
         # Initialize token map using ScaffoldManager
         self.scaffold_manager = ScaffoldManager(config_manager, self.logger)
-        self.token_map = self.scaffold_manager.build_token_map(self.base_tokenizer, self.scaffold_tokenizer)
+        self.scaffold_token_mapper = None  # Will be initialized when needed
         self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", self.scaffold_tokenizer.unk_token_id)
      
         # Initialize cross-attention injector
@@ -647,7 +647,7 @@ class SOVLSystem:
                 core_config=self.core_config,
                 cross_attn_config=self.cross_attn_config,
                 lora_config=self.lora_config,
-                token_map=self.token_map,
+                token_map=self.scaffold_token_mapper,
                 device=self.device
             )
         except Exception as e:
@@ -1487,6 +1487,24 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
     
+    def tokenize_and_map(self, prompts, max_length=None):
+        """Tokenize prompts and map to scaffold token space."""
+        if self.scaffold_token_mapper is None:
+            self.scaffold_token_mapper = build_scaffold_token_mapping(
+                self.base_tokenizer,
+                self.scaffold_tokenizer
+            )
+        return self.scaffold_token_mapper.tokenize_and_map(prompts, max_length)
+
+    def _update_token_map_memory(self, prompt, confidence):
+        """Update token map memory based on prompt confidence."""
+        if self.scaffold_token_mapper is None:
+            self.scaffold_token_mapper = build_scaffold_token_mapping(
+                self.base_tokenizer,
+                self.scaffold_tokenizer
+            )
+        self.scaffold_token_mapper.update_token_map_memory(prompt, confidence)
+
     # Main block
     if __name__ == "__main__":
         from sovl_config import ConfigManager
