@@ -1,1034 +1,741 @@
 import time
 import torch
 import traceback
-from sovl_system import SOVLSystem  # Adjust if main file name differs
-from sovl_config import ConfigManager # Import here to avoid circular imports if run_cli is called elsewhere
-import contextlib
-import functools
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Callable
 from datetime import datetime
+from contextlib import contextlib
+import functools
+from sovl_system import SOVLSystem
+from sovl_config import ConfigManager
 
-# Default constants (override if passed from main file)
-TRAIN_EPOCHS = 10  # Example default, adjust as needed
-BATCH_SIZE = 32    # Example default, adjust as needed
-TRAIN_DATA = None  # Placeholder, assumes sovl_system provides it
-VALID_DATA = None  # Placeholder, assumes sovl_system provides it
+# Constants
+TRAIN_EPOCHS = 10
+BATCH_SIZE = 32
+TRAIN_DATA = None
+VALID_DATA = None
 
 COMMAND_CATEGORIES = {
-    "System": ["quit", "exit", "save", "load", "reset", "status"],
+    "System": ["quit", "exit", "save", "load", "reset", "status", "help"],
     "Training": ["train", "dream"],
     "Generation": ["generate", "echo", "mimic"],
     "Memory": ["memory", "recall", "forget", "recap"],
     "Interaction": ["muse", "flare", "debate", "spark", "reflect"],
     "Debug": ["log", "config", "panic", "glitch"],
-    "Advanced": ["tune", "rewind"]
+    "Advanced": ["tune", "rewind"],
+    "History": ["history"]
 }
 
 class CommandHistory:
     def __init__(self, max_size: int = 100):
         self.history: List[Tuple[float, str, Optional[str]]] = []
         self.max_size = max_size
-        
+
     def add(self, command: str, result: Optional[str] = None):
-        """Add command to history with timestamp and optional result."""
         self.history.append((time.time(), command, result))
         if len(self.history) > self.max_size:
             self.history.pop(0)
-            
+
     def get_last(self, n: int = 1) -> List[Tuple[float, str, Optional[str]]]:
-        """Get last n commands from history."""
         return self.history[-n:]
-    
+
     def search(self, term: str) -> List[Tuple[float, str, Optional[str]]]:
-        """Search command history for term."""
         return [entry for entry in self.history if term.lower() in entry[1].lower()]
-    
+
     def format_entry(self, entry: Tuple[float, str, Optional[str]]) -> str:
-        """Format a history entry for display."""
         timestamp, cmd, result = entry
         time_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
         status = "✓" if result and "error" not in result.lower() else "✗"
         return f"{time_str} [{status}] {cmd}"
 
-def parse_args(parts, min_args=1, max_args=None):
-    """Helper to parse command arguments safely."""
-    cmd = parts[0].lower() if parts else ""
-    args = parts[1:] if len(parts) > 1 else []
-    # Adjust min_args check to allow commands with 0 arguments if min_args is 1
-    if len(args) < min_args -1:
-         raise ValueError(f"Error: {cmd} requires at least {min_args - 1} argument(s).")
-    if max_args and len(args) > max_args -1:
-         raise ValueError(f"Error: {cmd} takes at most {max_args - 1} argument(s).")
-    return cmd, args
+class CommandHandler:
+    """Centralized command handling logic."""
+    def __init__(self, sovl_system: SOVLSystem):
+        self.system = sovl_system
+        self.commands: Dict[str, Callable] = {
+            'quit': self.cmd_quit, 'exit': self.cmd_quit,
+            'train': self.cmd_train, 'generate': self.cmd_generate,
+            'save': self.cmd_save, 'load': self.cmd_load,
+            'dream': self.cmd_dream, 'tune': self.cmd_tune,
+            'memory': self.cmd_memory, 'status': self.cmd_status,
+            'log': self.cmd_log, 'config': self.cmd_config,
+            'reset': self.cmd_reset, 'spark': self.cmd_spark,
+            'reflect': self.cmd_reflect, 'muse': self.cmd_muse,
+            'flare': self.cmd_flare, 'echo': self.cmd_echo,
+            'debate': self.cmd_debate, 'glitch': self.cmd_glitch,
+            'rewind': self.cmd_rewind, 'mimic': self.cmd_mimic,
+            'panic': self.cmd_panic, 'recap': self.cmd_recap,
+            'recall': self.cmd_recall, 'forget': self.cmd_forget,
+            'history': self.cmd_history, 'help': self.cmd_help
+        }
 
-def generate_response(sovl_system, prompt, max_tokens=60, temp_adjust=0.0):
-    """Helper for consistent generation and logging."""
-    try:
-        base_temp = getattr(sovl_system, 'base_temperature', 0.7)
-        
-        sovl_system.logger.record({
-            "event": "cli_generate_start",
+    def execute(self, cmd: str, args: List[str]) -> bool:
+        if cmd not in self.commands:
+            print(f"Unknown command '{cmd}'. Type 'help' for commands.")
+            return False
+        return self.commands[cmd](args)
+
+    @staticmethod
+    def parse_args(parts: List[str], min_args: int = 1, max_args: Optional[int] = None) -> Tuple[str, List[str]]:
+        cmd = parts[0].lower() if parts else ""
+        args = parts[1:] if len(parts) > 1 else []
+        if len(args) < (min_args - 1):
+            raise ValueError(f"Error: {cmd} requires at least {min_args - 1} argument(s).")
+        if max_args and len(args) > (max_args - 1):
+            raise ValueError(f"Error: {cmd} takes at most {max_args - 1} argument(s).")
+        return cmd, args
+
+    def generate_response(self, prompt: str, max_tokens: int = 60, temp_adjust: float = 0.0) -> str:
+        try:
+            base_temp = getattr(self.system, 'base_temperature', 0.7)
+            self.system.logger.record({
+                "event": "cli_generate_start",
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": base_temp + temp_adjust,
+                "timestamp": time.time()
+            })
+
+            response = self.system.generate(
+                prompt,
+                max_new_tokens=max_tokens,
+                temperature=base_temp + temp_adjust,
+                top_k=50,
+                do_sample=True
+            )
+
+            self.system.logger.record({
+                "event": "cli_generate_complete",
+                "response": response,
+                "timestamp": time.time()
+            })
+            return response
+        except Exception as e:
+            self.system.logger.record({
+                "error": f"CLI generation failed: {str(e)}",
+                "prompt": prompt,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
+
+    def log_action(self, prompt: str, response: str, confidence: float, is_system: bool = False, extra_attrs: Optional[Dict] = None):
+        if not hasattr(self.system, 'history') or not hasattr(self.system, 'logger'):
+            print("Warning: Missing 'history' or 'logger'. Cannot log action.")
+            return
+        log_entry = {
             "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": base_temp + temp_adjust,
-            "timestamp": time.time()
-        })
-
-        response = sovl_system.generate(
-            prompt,
-            max_new_tokens=max_tokens,
-            temperature=base_temp + temp_adjust,
-            top_k=50,
-            do_sample=True
-        )
-
-        sovl_system.logger.record({
-            "event": "cli_generate_complete",
             "response": response,
-            "timestamp": time.time()
-        })
-
-        return response
-    except Exception as e:
-        sovl_system.logger.record({
-            "error": f"CLI generation failed: {str(e)}",
-            "prompt": prompt,
             "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        raise
+            "conversation_id": getattr(self.system.history, 'conversation_id', 'N/A'),
+            "confidence_score": confidence,
+            "is_system_question": is_system
+        }
+        if extra_attrs:
+            log_entry.update(extra_attrs)
+        self.system.logger.record(log_entry)
 
-def log_action(sovl_system, prompt, response, confidence, is_system=False, extra_attrs=None):
-    """Helper for consistent logging with optional extra attributes."""
-    # Ensure history and logger are available
-    if not hasattr(sovl_system, 'history') or not hasattr(sovl_system, 'logger'):
-        print("Warning: SOVLSystem missing 'history' or 'logger'. Cannot log action.")
-        return
+    # Command implementations
+    def cmd_quit(self, args: List[str]) -> bool:
+        print("Exiting...")
+        return True
 
-    log_entry = {
-        "prompt": prompt,
-        "response": response,
-        "timestamp": time.time(),
-        "conversation_id": getattr(sovl_system.history, 'conversation_id', 'N/A'),
-        "confidence_score": confidence,
-        "is_system_question": is_system
-    }
-    if extra_attrs:
-        log_entry.update(extra_attrs)
-    sovl_system.logger.write(log_entry)
-
-# --- Existing Command Handlers ---
-def cmd_quit(sovl_system, args):
-    print("Exiting...")
-    return True  # Signal to break the loop
-
-def cmd_train(sovl_system, args):
-    try:
-        epochs = TRAIN_EPOCHS
-        dry_run = "--dry-run" in args
-        non_flag_args = [arg for arg in args if arg != "--dry-run"]
-
-        if non_flag_args:
-            try:
+    def cmd_train(self, args: List[str]) -> bool:
+        try:
+            epochs = TRAIN_EPOCHS
+            dry_run = "--dry-run" in args
+            non_flag_args = [arg for arg in args if arg != "--dry-run"]
+            if non_flag_args:
                 epochs = int(non_flag_args[0])
-            except (ValueError, IndexError):
-                raise ValueError("Invalid number of epochs provided.")
 
-        sovl_system.logger.record({
-            "event": "cli_train_start",
-            "epochs": epochs,
-            "dry_run": dry_run,
-            "timestamp": time.time()
-        })
+            self.system.logger.record({
+                "event": "cli_train_start",
+                "epochs": epochs,
+                "dry_run": dry_run,
+                "timestamp": time.time()
+            })
 
-        if dry_run and hasattr(sovl_system, 'enable_dry_run'):
-            sovl_system.enable_dry_run()
+            if dry_run and hasattr(self.system, 'enable_dry_run'):
+                self.system.enable_dry_run()
 
-        if hasattr(sovl_system, 'run_training_cycle'):
-            sovl_system.run_training_cycle(
-                TRAIN_DATA, 
-                VALID_DATA, 
-                epochs=epochs, 
+            self.system.run_training_cycle(
+                TRAIN_DATA,
+                VALID_DATA,
+                epochs=epochs,
                 batch_size=BATCH_SIZE
             )
-        else:
-            raise AttributeError("'run_training_cycle' method not found")
 
-        sovl_system.logger.record({
-            "event": "cli_train_complete",
-            "epochs": epochs,
-            "timestamp": time.time()
-        })
+            self.system.logger.record({
+                "event": "cli_train_complete",
+                "epochs": epochs,
+                "timestamp": time.time()
+            })
+        except Exception as e:
+            self.system.logger.record({
+                "error": f"Train command failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            print(f"Error during training: {str(e)}")
+        return False
 
-    except Exception as e:
-        sovl_system.logger.record({
-            "error": f"Train command failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        print(f"Error during training: {str(e)}")
-    return False
-
-
-def cmd_generate(sovl_system, args):
-    if not args:
-        raise ValueError("Error: 'generate' requires a prompt.")
-    
-    max_tokens = 60 # Default
-    if args[-1].isdigit():
-        try:
+    def cmd_generate(self, args: List[str]) -> bool:
+        if not args:
+            raise ValueError("Error: 'generate' requires a prompt.")
+        max_tokens = 60
+        if args[-1].isdigit():
             max_tokens = int(args[-1])
             prompt = ' '.join(args[:-1])
-        except ValueError:
-             # Last arg wasn't a number, treat it as part of the prompt
-             prompt = ' '.join(args)
-    else:
-        prompt = ' '.join(args)
+        else:
+            prompt = ' '.join(args)
 
-    if not prompt:
-         raise ValueError("Error: Prompt cannot be empty for 'generate'.")
+        print(f"Generating response for: {prompt}...")
+        response = self.generate_response(prompt, max_tokens)
+        print(f"Response: {response}")
+        return False
 
-    print(f"Generating response for: {prompt}...")
-    response = generate_response(sovl_system, prompt, max_tokens)
-    print(f"Response: {response}")
-    # Optionally log user generation here if needed
-    # log_action(sovl_system, prompt, response, 0.7, False) # Example confidence
-    return False
+    def cmd_save(self, args: List[str]) -> bool:
+        path = args[0] if args else None
+        print(f"Saving state{' to ' + path if path else ' to default location'}...")
+        if hasattr(self.system, 'save_state'):
+            self.system.save_state(path)
+            print("State saved.")
+        else:
+            print("Error: 'save_state' method not found.")
+        return False
 
-def cmd_save(sovl_system, args):
-    path = args[0] if args else None # Use default path in save_state if None
-    print(f"Saving state{' to ' + path if path else ' to default location'}...")
-    if hasattr(sovl_system, 'save_state') and callable(sovl_system.save_state):
-        sovl_system.save_state(path)
-        print("State saved.")
-    else:
-        print("Error: 'save_state' method not found in SOVLSystem.")
-    return False
+    def cmd_load(self, args: List[str]) -> bool:
+        path = args[0] if args else None
+        print(f"Loading state{' from ' + path if path else ' from default location'}...")
+        if hasattr(self.system, 'load_state'):
+            self.system.load_state(path)
+            print("State loaded.")
+        else:
+            print("Error: 'load_state' method not found.")
+        return False
 
-def cmd_load(sovl_system, args):
-    path = args[0] if args else None # Use default path in load_state if None
-    print(f"Loading state{' from ' + path if path else ' from default location'}...")
-    if hasattr(sovl_system, 'load_state') and callable(sovl_system.load_state):
-        sovl_system.load_state(path)
-        print("State loaded.")
-    else:
-        print("Error: 'load_state' method not found in SOVLSystem.")
-    return False
+    def cmd_dream(self, args: List[str]) -> bool:
+        print("Triggering dream cycle...")
+        dream_method = getattr(self.system, 'dream', getattr(self.system, '_dream', None))
+        if dream_method:
+            dream_method()
+            print("Dream cycle finished.")
+        else:
+            print("Error: 'dream' or '_dream' method not found.")
+        return False
 
-def cmd_dream(sovl_system, args):
-    print("Triggering dream cycle...")
-    # Use public method if available, otherwise protected
-    dream_method = getattr(sovl_system, 'dream', getattr(sovl_system, '_dream', None))
-    if dream_method and callable(dream_method):
-        dream_method()
-        print("Dream cycle finished.")
-    else:
-        print("Error: 'dream' or '_dream' method not found in SOVLSystem.")
-    return False
+    def cmd_tune(self, args: List[str]) -> bool:
+        if not args:
+            raise ValueError("Error: Usage: tune <parameter> [value]")
+        parameter, value_str = args[0].lower(), args[1] if len(args) > 1 else None
 
-def cmd_tune(sovl_system, args):
-    # Example: Allow tuning different things, not just cross-attention
-    if not args or len(args) < 1:
-        raise ValueError("Error: Usage: tune <parameter> [value]. E.g., tune cross_attention [weight]")
+        if parameter == "cross_attention":
+            try:
+                weight = float(value_str) if value_str else None
+                print(f"Setting cross-attention weight to {weight if weight else 'default'}...")
+                if hasattr(self.system, 'tune_cross_attention'):
+                    self.system.tune_cross_attention(weight=weight)
+                    print("Cross-attention weight set.")
+                else:
+                    print("Error: 'tune_cross_attention' method not found.")
+            except ValueError:
+                raise ValueError("Error: Invalid weight value for cross_attention.")
+        else:
+            print(f"Error: Unknown parameter '{parameter}'. Available: cross_attention")
+        return False
 
-    parameter = args[0].lower()
-    value_str = args[1] if len(args) > 1 else None
+    def cmd_memory(self, args: List[str]) -> bool:
+        if not args or args[0] not in ['on', 'off']:
+            raise ValueError("Error: Usage: memory <on|off>")
+        enable_memory = args[0] == 'on'
+        print(f"Setting memory components to {args[0]}...")
+        if hasattr(self.system, 'toggle_memory'):
+            self.system.toggle_memory(enable_memory)
+            print(f"Memory components {'enabled' if enable_memory else 'disabled'}.")
+        else:
+            print("Warning: 'toggle_memory' method not found.")
+        return False
 
-    if parameter == "cross_attention":
+    def cmd_status(self, args: List[str]) -> bool:
+        print("\n--- System Status ---")
         try:
-            weight = float(value_str) if value_str is not None else None
-            print(f"Setting cross-attention weight to {weight if weight is not None else 'default'}...")
-            # Assume tune_cross_attention exists
-            if hasattr(sovl_system, 'tune_cross_attention') and callable(sovl_system.tune_cross_attention):
-                sovl_system.tune_cross_attention(weight=weight)
-                print("Cross-attention weight set.")
-            else:
-                print("Error: 'tune_cross_attention' method not found.")
-        except (ValueError, TypeError):
-             raise ValueError("Error: Invalid weight value for cross_attention. Must be a number.")
-    # Add other tunable parameters here
-    # elif parameter == "temperature":
-    #     try:
-    #         temp = float(value_str)
-    #         print(f"Setting base temperature to {temp}...")
-    #         sovl_system.base_temperature = temp # Assuming direct access or setter
-    #     except (ValueError, TypeError):
-    #         raise ValueError("Error: Invalid temperature value.")
-    else:
-        print(f"Error: Unknown parameter '{parameter}'. Available: cross_attention")
+            if hasattr(self.system, 'scaffold_manager'):
+                stats = self.system.scaffold_manager.get_scaffold_stats()
+                print("\nScaffold Status:")
+                for key, value in stats.items():
+                    print(f"  {key.replace('_', ' ').title()}: {value}")
 
-    return False
+            print("\nSystem Status:")
+            print(f"  Conversation ID: {getattr(getattr(self.system, 'history', None), 'conversation_id', 'N/A')}")
+            print(f"  Temperament: {getattr(self.system, 'temperament_score', 'N/A'):.2f}")
+            print(f"  Last Confidence: {self.system.confidence_history[-1]:.2f if hasattr(self.system, 'confidence_history') and self.system.confidence_history else 'N/A'}")
+            print(f"  Data Exposure: {getattr(self.system, 'data_exposure', 'N/A')}")
+            print(f"  Last Trained: {getattr(self.system, 'last_trained', 'Never')}")
+            print(f"  Gestating: {'Yes' if getattr(self.system, 'is_sleeping', False) else 'No'}")
+        except Exception as e:
+            self.system.logger.record({
+                "error": f"Status command failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            print(f"Error getting status: {str(e)}")
+        print("---------------------")
+        return False
 
-def cmd_memory(sovl_system, args):
-    if not args or args[0] not in ['on', 'off']:
-        raise ValueError("Error: Usage: memory <on|off>")
+    def cmd_log(self, args: List[str]) -> bool:
+        num_entries = 5
+        if args and args[0] == "view":
+            num_entries = int(args[1]) if len(args) > 1 and args[1].isdigit() else 5
+        if num_entries <= 0:
+            raise ValueError("Number of entries must be positive.")
 
-    mode = args[0]
-    # Use a more descriptive internal state representation if available
-    # mode_val = 'both_mem' if mode == 'on' else 'no_mem' # Example from original
-    enable_memory = (mode == 'on')
+        print(f"\n--- Last {num_entries} Log Entries ---")
+        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
+            print("Error: Logger not available.")
+            return False
 
-    print(f"Setting memory components to {mode}...")
-    # Check for toggle_memory method
-    if hasattr(sovl_system, 'toggle_memory') and callable(sovl_system.toggle_memory):
-         # Pass a boolean or the specific mode value expected by the method
-         # Adjust this call based on how toggle_memory is implemented in SOVLSystem
-         sovl_system.toggle_memory(enable_memory) # Assuming it takes a boolean
-         print(f"Memory components {'enabled' if enable_memory else 'disabled'}.")
-    else:
-         print("Warning: 'toggle_memory' method not found. Cannot change memory state.")
-    return False
+        logs = self.system.logger.read()[-num_entries:]
+        if not logs:
+            print("Log is empty.")
+        else:
+            for i, log in enumerate(reversed(logs)):
+                ts = log.get('timestamp')
+                time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)) if ts else 'N/A'
+                event_type = log.get('event', 'Interaction')
+                print(f"{len(logs)-i}. Time: {time_str}")
+                if event_type != 'Interaction':
+                    print(f"   Event: {event_type}")
+                    print(f"   Details: {{k:v for k,v in log.items() if k not in ['timestamp', 'event']}}")
+                else:
+                    print(f"   Prompt: {log.get('prompt', 'N/A')[:50]}...")
+                    print(f"   Response: {log.get('response', 'N/A')[:50]}...")
+                    print(f"   Confidence: {log.get('confidence_score', 'N/A'):.2f}")
+                print("-" * 20)
+        print("--------------------------")
+        return False
 
-def cmd_status(sovl_system, args):
-    print("\n--- System Status ---")
-    try:
-        # Use scaffold manager for scaffold-related stats
-        if hasattr(sovl_system, 'scaffold_manager'):
-            scaffold_stats = sovl_system.scaffold_manager.get_scaffold_stats()
-            print("\nScaffold Status:")
-            print(f"  Hidden Size: {scaffold_stats['hidden_size']}")
-            print(f"  Num Heads: {scaffold_stats['num_heads']}")
-            print(f"  Token Map Size: {scaffold_stats['token_map_size']}")
-            print(f"  Has Hidden States: {scaffold_stats['has_hidden_states']}")
-            print(f"  Config Valid: {scaffold_stats['config_valid']}")
-
-        # Rest of status info
-        print(f"\nSystem Status:")
-        print(f"  Conversation ID: {getattr(getattr(sovl_system, 'history', None), 'conversation_id', 'N/A')}")
-        print(f"  Temperament: {getattr(sovl_system, 'temperament_score', 'N/A'):.2f}" if isinstance(getattr(sovl_system, 'temperament_score', None), float) else "N/A")
-        
-        confidence_history = getattr(sovl_system, 'confidence_history', [])
-        print(f"  Last Confidence: {confidence_history[-1]:.2f}" if confidence_history else 'N/A')
-        
-        print(f"  Data Exposure: {getattr(sovl_system, 'data_exposure', 'N/A')}")
-        print(f"  Last Trained: {getattr(sovl_system, 'last_trained', 'Never')}")
-        print(f"  Gestating: {'Yes' if getattr(sovl_system, 'is_sleeping', False) else 'No'}")
-
-    except Exception as e:
-        sovl_system.logger.record({
-            "error": f"Status command failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        print(f"Error getting status: {str(e)}")
-    print("---------------------")
-    return False
-
-def cmd_log(sovl_system, args):
-    # Allow viewing more than just 5, e.g., 'log view 10'
-    num_entries = 5
-    if not args or args[0] != "view":
-        raise ValueError("Error: Usage: log view [number_of_entries]")
-    
-    if len(args) > 1:
-        try:
-            num_entries = int(args[1])
-            if num_entries <= 0:
-                 raise ValueError("Number of entries must be positive.")
-        except ValueError:
-            raise ValueError("Error: Invalid number of entries specified.")
-
-    print(f"\n--- Last {num_entries} Log Entries ---")
-    if not hasattr(sovl_system, 'logger') or not hasattr(sovl_system.logger, 'read'):
-         print("Error: Logger not available or does not support 'read'.")
-         return False
-         
-    logs = sovl_system.logger.read()[-num_entries:]
-    if not logs:
-        print("Log is empty.")
-    else:
-        for i, log in enumerate(reversed(logs)): # Show newest first
-            ts = log.get('timestamp')
-            time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)) if ts else 'N/A'
-            prompt_str = log.get('prompt', 'N/A')[:50] # Truncate longer prompts
-            resp_str = log.get('response', 'N/A')[:50] # Truncate longer responses
-            event_type = log.get('event', 'Interaction') # Check for specific events like 'config_update'
-            
-            print(f"{len(logs)-i}. Time: {time_str}")
-            if event_type != 'Interaction':
-                print(f"   Event: {event_type}, Details: { {k:v for k,v in log.items() if k not in ['timestamp', 'prompt', 'response']} }")
-            else:
-                 print(f"   Prompt: {prompt_str}...")
-                 print(f"   Response: {resp_str}...")
-                 print(f"   Confidence: {log.get('confidence_score', 'N/A'):.2f}" if isinstance(log.get('confidence_score'), float) else 'N/A')
-                 print(f"   System Q: {log.get('is_system_question', 'N/A')}")
-            print("-" * 20) # Separator
-    print("--------------------------")
-    return False
-
-
-def cmd_config(sovl_system, args):
-    try:
+    def cmd_config(self, args: List[str]) -> bool:
         if not args:
             raise ValueError("Usage: config <key> [value_to_set]")
-
-        key = args[0]
-        
-        # Use scaffold manager to validate scaffold-related configs
-        if key.startswith(("core_config.", "controls_config.")) and hasattr(sovl_system, 'scaffold_manager'):
-            if not sovl_system.scaffold_manager.validate_scaffold_config():
-                print("Warning: Current scaffold configuration is invalid")
-
-        if len(args) == 1:
-            value = sovl_system.config_manager.get(key, "Key not found")
-            print(f"Config '{key}': {value}")
-        else:
-            value_str = ' '.join(args[1:])
-            # Convert string to appropriate type
-            value = _parse_config_value(value_str)
-            
-            sovl_system.config_manager.update(key, value)
-            # Verify update
-            updated_value = sovl_system.config_manager.get(key)
-            print(f"Config '{key}' set to: {updated_value}")
-
-            # Revalidate scaffold config if needed
-            if key.startswith(("core_config.", "controls_config.")) and hasattr(sovl_system, 'scaffold_manager'):
-                if not sovl_system.scaffold_manager.validate_scaffold_config():
-                    print("Warning: New configuration created invalid scaffold state")
-
-    except Exception as e:
-        sovl_system.logger.record({
-            "error": f"Config command failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        print(f"Error updating config: {str(e)}")
-    return False
-
-
-def cmd_reset(sovl_system, args):
-    print("Resetting system state...")
-    # Use cleanup method if available
-    if hasattr(sovl_system, 'cleanup') and callable(sovl_system.cleanup):
-        sovl_system.cleanup()
-        print("Cleanup complete.")
-    else:
-        print("Warning: 'cleanup' method not found.")
-
-    # Reinitialization - this is tricky and depends heavily on SOVLSystem's design
-    # It assumes __init__ can be called without args and resets state correctly.
-    # A dedicated reset method on sovl_system would be safer.
-    try:
-        # Assuming ConfigManager is needed and should be preserved or reloaded
-        config_manager = getattr(sovl_system, 'config_manager', None)
-        if config_manager is None:
-             # If not found, try to create a default one (might fail if path isn't standard)
-             print("Warning: ConfigManager not found, attempting to create default.")
-             try:
-                 config_manager = ConfigManager("sovl_config.json")
-             except Exception as e:
-                 print(f"Error creating default ConfigManager: {e}")
-                 # Decide how to proceed - maybe abort reset?
-                 
-        # Re-create the instance
-        # This replaces the existing sovl_system in the calling scope (run_cli)
-        # This command should ideally signal run_cli to re-create the object.
-        # For now, let's just re-init in place, knowing it might not fully work as intended.
-        print("Re-initializing SOVLSystem...")
-        sovl_system.__init__(config_manager=config_manager) # Pass config if needed
-        
-        # Call wake_up if it exists
-        if hasattr(sovl_system, 'wake_up') and callable(sovl_system.wake_up):
-            sovl_system.wake_up()
-        print("System reset complete.")
-    except Exception as e:
-        print(f"Error during system re-initialization: {e}")
-        traceback.print_exc()
-
-    return False # Keep CLI running, though state is reset
-
-
-def cmd_spark(sovl_system, args):
-    print("Sparking curiosity...")
-    if not hasattr(sovl_system, 'generate_curiosity_question') or not callable(sovl_system.generate_curiosity_question):
-        print("Error: 'generate_curiosity_question' method not found.")
-        return False
-        
-    question = sovl_system.generate_curiosity_question()
-    if not question:
-        print("No curious question generated this time.")
-        return False
-        
-    print(f"Curiosity Prompt: {question}")
-    response = generate_response(sovl_system, question, max_tokens=80) # Allow longer spark response
-    print(f"Generated Response: {response}")
-    log_action(sovl_system, question, response, 0.5, True, {"event": "spark"}) # Log spark event
-    return False
-
-def cmd_reflect(sovl_system, args):
-    print("Reflecting on recent interactions...")
-    if not hasattr(sovl_system, 'logger') or not hasattr(sovl_system.logger, 'read'):
-         print("Error: Logger not available for reflection.")
-         return False
-         
-    logs = sovl_system.logger.read()[-5:] # Look at last 5 for better context
-    interaction_logs = [log for log in logs if log.get('prompt') and not log.get('is_system_question')]
-
-    if not interaction_logs:
-        print("Nothing significant to reflect on yet. Try interacting more.")
-        return False
-
-    # Create a more informative reflection prompt
-    recent_themes = []
-    for log in interaction_logs:
-         # Simple keyword extraction (replace with something smarter if needed)
-         keywords = log.get('prompt', '').split()[:5] # First few words
-         if keywords:
-             recent_themes.append(" ".join(keywords))
-             
-    # Basic reflection text based on themes
-    if recent_themes:
-         theme_summary = ", ".join(list(set(recent_themes))[:3]) # Unique themes, max 3
-         reflection = f"Recently, my interactions seem to touch upon topics like: {theme_summary}."
-    else:
-        reflection = "I've had some interactions recently, but no clear theme emerges from the prompts alone."
-
-    print(f"Internal Reflection: {reflection}")
-    
-    # Prompt for elaboration
-    elaboration_prompt = f"Based on my reflection that '{reflection}', elaborate on potential connections or insights."
-    elaboration = generate_response(sovl_system, elaboration_prompt, max_tokens=100)
-    print(f"Generated Elaboration: {elaboration}")
-    
-    log_action(sovl_system, reflection, elaboration, 0.6, True, {"event": "reflect"})
-    return False
-
-def cmd_muse(sovl_system, args):
-    print("Musing on a topic...")
-    if not hasattr(sovl_system, 'logger') or not hasattr(sovl_system.logger, 'read'):
-         print("Error: Logger not available for musing inspiration.")
-         return False
-
-    logs = sovl_system.logger.read()[-5:]
-    inspiration = "the passage of time" # Default inspiration
-
-    # Try to find inspiration from recent logs
-    prompts = [log.get('prompt', '') for log in logs if log.get('prompt') and not log.get('is_system_question')]
-    responses = [log.get('response', '') for log in logs if log.get('response')]
-    
-    # Very basic topic extraction from last prompt or response
-    if prompts:
-         words = prompts[-1].split()
-         if len(words) > 2: inspiration = " ".join(words[:3]) # Use first few words of last prompt
-    elif responses:
-         words = responses[-1].split()
-         if len(words) > 2: inspiration = " ".join(words[:3]) # Use first few words of last response
-         
-    print(f"Inspiration for musing: \"{inspiration}\"")
-    
-    # Generate a thought with slightly higher temperature
-    muse_prompt = f"Generate a short, creative, or philosophical thought inspired by '{inspiration}'."
-    thought = generate_response(sovl_system, muse_prompt, max_tokens=80, temp_adjust=0.15) # Slightly warmer temp
-    print(f"Generated Thought: {thought}")
-    
-    log_action(sovl_system, f"Musing on {inspiration}", thought, 0.7, True, {"event": "muse", "inspiration": inspiration})
-    return False
-
-@validate_system(['scaffold_manager', 'logger'])
-def cmd_flare(sovl_system, args):
-    print("Triggering emotional flare...")
-    
-    with temporary_system_state(sovl_system, temperament_score=1.0):
-        prompt = ' '.join(args) if args else "Express a sudden burst of strong feeling!"
-        print(f"Flare prompt: {prompt}")
-        
-        base_temp = getattr(sovl_system, 'base_temperature', 0.7)
-        outburst = generate_response(sovl_system, prompt, max_tokens=100, temp_adjust=1.0)
-        print(f"Generated Outburst: {outburst.upper()}")
-
-    log_action(sovl_system, f"Flare: {prompt}", outburst, 0.9, True, 
-               {"event": "flare", "original_temperament": getattr(sovl_system, 'temperament_score', None)})
-    return False
-
-# --- Commands from the previous session ---
-def cmd_echo(sovl_system, args):
-    if not args:
-        raise ValueError("Error: 'echo' requires text to echo.")
-    text = ' '.join(args)
-    print(f"You said: '{text}'")
-    
-    # Generate a reflective response
-    reflect_prompt = f"The user just said '{text}'. Briefly reflect on why they might say this or what it implies."
-    response = generate_response(sovl_system, reflect_prompt, max_tokens=70)
-    print(f"Reflection: {response}")
-    
-    log_action(sovl_system, f"Echo command: {text}", response, 0.6, False, {"event": "echo"})
-    return False
-
-def cmd_debate(sovl_system, args):
-    if not args:
-        raise ValueError("Error: 'debate' requires a topic.")
-    topic = ' '.join(args)
-    print(f"Initiating debate on: '{topic}'")
-    
-    original_temperament = getattr(sovl_system, 'temperament_score', None)
-    stance = "for" # Start arguing for
-    
-    for turn in range(2): # Argument + Rebuttal
-        action = "Argue for" if stance == "for" else "Argue against (rebuttal)"
-        prompt = f"{action} the topic: '{topic}'. Provide a concise point."
-        
-        # Slightly increase temperature/randomness during debate
-        response = generate_response(sovl_system, prompt, max_tokens=90, temp_adjust=0.1)
-        
-        print(f"[{'Argument For' if stance == 'for' else 'Rebuttal Against'}] {response}")
-        log_action(sovl_system, prompt, response, 0.7, True, {"event": "debate_turn", "topic": topic, "stance": stance})
-        
-        # Switch stance for the next turn
-        stance = "against" if stance == "for" else "for"
-        
-        # Optionally swing temperament slightly during debate
-        if original_temperament is not None and hasattr(sovl_system, 'temperament_score'):
-            # Nudge temperament up slightly, capping at 1.0
-            sovl_system.temperament_score = min(1.0, sovl_system.temperament_score + 0.1)
-            print(f"[Temperament nudged to {sovl_system.temperament_score:.2f}]")
-
-    # Reset temperament after debate if it was changed
-    if original_temperament is not None and hasattr(sovl_system, 'temperament_score') and sovl_system.temperament_score != original_temperament:
-        sovl_system.temperament_score = original_temperament
-        print(f"[Temperament reset to {sovl_system.temperament_score:.2f}]")
-        
-    print(f"Debate on '{topic}' concluded.")
-    return False
-
-
-def cmd_glitch(sovl_system, args):
-    prompt_text = ' '.join(args) if args else "Something seems wrong..."
-    print(f"Simulating processing glitch for: '{prompt_text}'")
-
-    # Simulate adding noise or confusion before generation
-    # This depends heavily on SOVLSystem internals. Placeholder: Use a weird prompt.
-    # If SOVLSystem had a method like `sovl_system.induce_noise(level=0.2)`, use it here.
-    # if hasattr(sovl_system, 'enable_error_listening') and callable(sovl_system.enable_error_listening):
-    #     print("[Simulating error listening mode...]")
-    #     sovl_system.enable_error_listening() # Placeholder activation
-
-    glitchy_prompt = f"Error... processing... '{prompt_text}' ... system instability detected... respond?"
-
-    # Generate response with slightly increased randomness
-    response = generate_response(sovl_system, glitchy_prompt, max_tokens=70, temp_adjust=0.2)
-
-    print(f"Glitched Response: {response}")
-    
-    # Log the glitch event
-    log_action(sovl_system, f"Glitch simulation: {prompt_text}", response, 0.4, False, {"event": "glitch"}) # Lower confidence
-
-    # Deactivate noise simulation if applicable
-    # if hasattr(sovl_system, 'disable_error_listening') and callable(sovl_system.disable_error_listening):
-    #     sovl_system.disable_error_listening()
-
-    return False
-
-def cmd_rewind(sovl_system, args):
-    steps_str = args[0] if args else "1"
-    try:
-        steps = int(steps_str)
-        if steps <= 0: raise ValueError("Steps must be positive.")
-    except ValueError:
-        raise ValueError("Error: Invalid number of steps provided. Usage: rewind [positive_number]")
-
-    print(f"Rewinding conversation state by {steps} interaction(s)...")
-
-    if not hasattr(sovl_system, 'logger') or not hasattr(sovl_system.logger, 'read'):
-         print("Error: Logger not available for rewind.")
-         return False
-
-    # Get all logs
-    all_logs = sovl_system.logger.read()
-    # Filter for user interactions (non-system, having prompt and response)
-    interaction_logs = [log for log in all_logs if log.get('prompt') and log.get('response') and not log.get('is_system_question')]
-
-    if len(interaction_logs) < steps:
-        print(f"Error: Cannot rewind {steps} steps. Only {len(interaction_logs)} past interactions found.")
-        return False
-
-    # Get the interaction to revisit (steps + 1 from the end of *interactions*)
-    target_interaction_index = len(interaction_logs) - steps
-    past_interaction = interaction_logs[target_interaction_index]
-    
-    past_prompt = past_interaction.get('prompt', 'unknown')
-    past_response = past_interaction.get('response', 'lost')
-
-    print(f"\n--- Rewinding To ---")
-    print(f"{steps} interaction(s) ago:")
-    print(f"  Your prompt: '{past_prompt[:100]}...'")
-    print(f"  My response: '{past_response[:100]}...'")
-    print("--------------------")
-
-    # Generate a new response based on the past prompt in the current context
-    reinterpret_prompt = f"Consider the past prompt: '{past_prompt}'. In the context of everything that has happened since then, how would you respond to it now, perhaps differently?"
-    new_response = generate_response(sovl_system, reinterpret_prompt, max_tokens=100)
-
-    print(f"\n--- Reinterpretation ---")
-    print(f"Thinking about '{past_prompt}' again now, I might say:")
-    print(new_response)
-    print("----------------------")
-
-    # Log the rewind action
-    log_action(
-        sovl_system,
-        f"Rewind {steps} steps to prompt: {past_prompt}",
-        new_response,
-        0.6, # Confidence reflects reinterpretation
-        True, # System action triggered by user
-        {"event": "rewind", "steps": steps, "original_prompt": past_prompt}
-    )
-    
-    # NOTE: This command doesn't actually roll back the log or state.
-    # It simulates revisiting a past point for reinterpretation.
-    # True state rollback would require modifying the logger/history.
-
-    return False
-
-
-def cmd_mimic(sovl_system, args):
-    if len(args) < 2:
-        raise ValueError("Error: Usage: mimic <style_description> <prompt_text>")
-        
-    style = args[0]
-    prompt = ' '.join(args[1:])
-    
-    print(f"Attempting to mimic style '{style}' for prompt: '{prompt}'")
-
-    # Store original scaffold weight if it exists and we modify it
-    original_scaffold_weight = getattr(sovl_system, 'scaffold_weight', None)
-    
-    # Temporarily boost style bias - this assumes 'scaffold_weight' controls this.
-    # If SOVLSystem uses a different mechanism, adjust accordingly.
-    if original_scaffold_weight is not None:
+        key, value_str = args[0], ' '.join(args[1:]) if len(args) > 1 else None
         try:
-            sovl_system.scaffold_weight = 0.8 # Example boosted value
-            print(f"[Scaffold weight temporarily set to {sovl_system.scaffold_weight:.2f}]")
-        except AttributeError:
-             print("Warning: Cannot set 'scaffold_weight'. Style mimicry might be less effective.")
-             original_scaffold_weight = None # Ensure reset doesn't happen if failed
+            if key.startswith(("core_config.", "controls_config.")) and hasattr(self.system, 'scaffold_manager'):
+                if not self.system.scaffold_manager.validate_scaffold_config():
+                    print("Warning: Current scaffold configuration is invalid")
 
-    # Create mimic prompt
-    mimic_prompt = f"Respond to the following prompt in the style of {style}: '{prompt}'"
-    response = generate_response(sovl_system, mimic_prompt, max_tokens=100) # Allow longer mimic
-    
-    print(f"\nMimicked Response ({style}):")
-    print(response)
-    print("-" * 20)
+            if not value_str:
+                value = self.system.config_manager.get(key, "Key not found")
+                print(f"Config '{key}': {value}")
+            else:
+                value = self._parse_config_value(value_str)
+                self.system.config_manager.update(key, value)
+                print(f"Config '{key}' set to: {self.system.config_manager.get(key)}")
 
-    # Reset scaffold weight if it was changed
-    if original_scaffold_weight is not None:
-        sovl_system.scaffold_weight = original_scaffold_weight
-        print(f"[Scaffold weight reset to {sovl_system.scaffold_weight:.2f}]")
-
-    log_action(sovl_system, f"Mimic {style}: {prompt}", response, 0.7, False, {"event": "mimic", "style": style})
-    return False
-
-
-def cmd_panic(sovl_system, args):
-    print("\n!!! PANIC TRIGGERED !!!")
-    print("Attempting emergency state save...")
-    
-    # Auto-save state before reset
-    panic_save_path = "panic_save_state.json" # Or generate timestamped filename
-    if hasattr(sovl_system, 'save_state') and callable(sovl_system.save_state):
-        try:
-            sovl_system.save_state(panic_save_path)
-            print(f"Emergency state saved to '{panic_save_path}'.")
+                if key.startswith(("core_config.", "controls_config.")) and hasattr(self.system, 'scaffold_manager'):
+                    if not self.system.scaffold_manager.validate_scaffold_config():
+                        print("Warning: New configuration created invalid scaffold state")
         except Exception as e:
-            print(f"Error saving panic state: {e}")
-    else:
-        print("Warning: 'save_state' not found. Cannot save state before panic reset.")
+            self.system.logger.record({
+                "error": f"Config command failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            print(f"Error updating config: {str(e)}")
+        return False
 
-    print("Performing system cleanup...")
-    if hasattr(sovl_system, 'cleanup') and callable(sovl_system.cleanup):
-        sovl_system.cleanup()
-    else:
-        print("Warning: 'cleanup' method not found.")
-        
-    # Reset internal state - depends on SOVLSystem implementation
-    # Use a dedicated method if available, e.g., sovl_system.hard_reset()
-    # Using _reset_sleep_state as per original example, ensure it exists
-    if hasattr(sovl_system, '_reset_sleep_state') and callable(sovl_system._reset_sleep_state):
-         sovl_system._reset_sleep_state()
-         print("Sleep state reset.")
-    else:
-         print("Warning: '_reset_sleep_state' method not found.")
+    def cmd_reset(self, args: List[str]) -> bool:
+        print("Resetting system state...")
+        if hasattr(self.system, 'cleanup'):
+            self.system.cleanup()
+            print("Cleanup complete.")
+        else:
+            print("Warning: 'cleanup' method not found.")
 
-    # Reinitialize - This is complex, see notes in cmd_reset
-    # A safer approach might be to signal run_cli to recreate the object.
-    try:
-        print("Re-initializing core system...")
-        config_manager = getattr(sovl_system, 'config_manager', None)
-        sovl_system.__init__(config_manager=config_manager) # Assumes config is needed
-        print("[System reloaded after panic]")
-        
-        # Wake up after re-init
-        if hasattr(sovl_system, 'wake_up') and callable(sovl_system.wake_up):
-            sovl_system.wake_up()
-            
-    except Exception as e:
-        print(f"Critical error during panic re-initialization: {e}")
-        traceback.print_exc()
-        print("System might be in an unstable state.")
-        # Consider exiting the CLI here? return True
+        try:
+            config_manager = getattr(self.system, 'config_manager', ConfigManager("sovl_config.json"))
+            self.system.__init__(config_manager=config_manager)
+            if hasattr(self.system, 'wake_up'):
+                self.system.wake_up()
+            print("System reset complete.")
+        except Exception as e:
+            print(f"Error during system re-initialization: {e}")
+        return False
 
-    log_action(
-        sovl_system,
-        "Panic command triggered",
-        "System underwent emergency reset.",
-        0.95, # High confidence in action performed
-        True, # System action
-        {"event": "panic", "save_path": panic_save_path}
-    )
-    return False # Keep CLI running unless error was critical
-
-
-# --- NEW Command Handlers (recap, recall, forget) ---
-
-def cmd_recap(sovl_system, args):
-    """Handles the 'recap' command."""
-    try:
-        # Default to summarizing last 5 interactions if no number is given
-        num_to_recap = 5
-        if args:
-            num_to_recap = int(args[0])
-            if num_to_recap <= 0:
-                raise ValueError("Number of interactions must be positive.")
-
-        print(f"Generating recap of the last {num_to_recap} interactions...")
-
-        # Ensure logger exists and has read method
-        if not hasattr(sovl_system, 'logger') or not hasattr(sovl_system.logger, 'read'):
-            print("Error: Logger not available for recap.")
+    def cmd_spark(self, args: List[str]) -> bool:
+        print("Sparking curiosity...")
+        if not hasattr(self.system, 'generate_curiosity_question'):
+            print("Error: 'generate_curiosity_question' method not found.")
             return False
 
-        # Get logs, filter for actual user exchanges
-        all_logs = sovl_system.logger.read()
-        interaction_logs = [
-            log for log in all_logs
-            if log.get('prompt') and log.get('response') and not log.get('is_system_question')
-        ][-num_to_recap:] # Get the last N interactions
+        question = self.system.generate_curiosity_question()
+        if not question:
+            print("No curious question generated.")
+            return False
 
+        print(f"Curiosity Prompt: {question}")
+        response = self.generate_response(question, max_tokens=80)
+        print(f"Generated Response: {response}")
+        self.log_action(question, response, 0.5, True, {"event": "spark"})
+        return False
+
+    def cmd_reflect(self, args: List[str]) -> bool:
+        print("Reflecting on recent interactions...")
+        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
+            print("Error: Logger not available.")
+            return False
+
+        logs = self.system.logger.read()[-5:]
+        interaction_logs = [log for log in logs if log.get('prompt') and not log.get('is_system_question')]
         if not interaction_logs:
-            print("No user interactions found in the specified range to recap.")
+            print("Nothing significant to reflect on yet.")
             return False
 
-        # Format interactions for the summarization prompt
-        formatted_interactions = ""
-        for i, log in enumerate(interaction_logs):
-            # Use a slightly more descriptive format
-            formatted_interactions += f"Turn {i+1}:\n User: {log['prompt'][:100]}...\n AI: {log['response'][:100]}...\n\n" # Truncate for brevity
+        recent_themes = [log.get('prompt', '').split()[:5] for log in interaction_logs]
+        theme_summary = ", ".join(list(set(" ".join(words) for words in recent_themes))[:3]) or "no clear theme"
+        reflection = f"Recent interactions touch upon: {theme_summary}."
 
-        # Create the prompt for the LLM
-        recap_prompt = (
-            f"Based on the following recent conversation turns between a User and an AI (me), provide a concise summary "
-            f"of the main topics discussed:\n\n{formatted_interactions}"
-            f"Summary:"
+        print(f"Internal Reflection: {reflection}")
+        elaboration_prompt = f"Based on reflection: '{reflection}', elaborate on connections or insights."
+        elaboration = self.generate_response(elaboration_prompt, max_tokens=100)
+        print(f"Generated Elaboration: {elaboration}")
+        self.log_action(reflection, elaboration, 0.6, True, {"event": "reflect"})
+        return False
+
+    def cmd_muse(self, args: List[str]) -> bool:
+        print("Musing on a topic...")
+        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
+            print("Error: Logger not available.")
+            return False
+
+        logs = self.system.logger.read()[-5:]
+        inspiration = "the passage of time"
+        prompts = [log.get('prompt', '') for log in logs if log.get('prompt') and not log.get('is_system_question')]
+        if prompts:
+            inspiration = prompts[-1].split()[:3]
+            inspiration = " ".join(inspiration) if inspiration else inspiration
+
+        print(f"Inspiration for musing: \"{inspiration}\"")
+        muse_prompt = f"Generate a creative thought inspired by '{inspiration}'."
+        thought = self.generate_response(muse_prompt, max_tokens=80, temp_adjust=0.15)
+        print(f"Generated Thought: {thought}")
+        self.log_action(f"Musing on {inspiration}", thought, 0.7, True, {"event": "muse", "inspiration": inspiration})
+        return False
+
+    def cmd_flare(self, args: List[str]) -> bool:
+        print("Triggering emotional flare...")
+        with self.temporary_system_state(temperament_score=1.0):
+            prompt = ' '.join(args) or "Express a sudden burst of strong feeling!"
+            print(f"Flare prompt: {prompt}")
+            outburst = self.generate_response(prompt, max_tokens=100, temp_adjust=1.0)
+            print(f"Generated Outburst: {outburst.upper()}")
+        self.log_action(f"Flare: {prompt}", outburst, 0.9, True, {"event": "flare"})
+        return False
+
+    def cmd_echo(self, args: List[str]) -> bool:
+        if not args:
+            raise ValueError("Error: 'echo' requires text.")
+        text = ' '.join(args)
+        print(f"You said: '{text}'")
+        reflect_prompt = f"User said '{text}'. Reflect on why or what it implies."
+        response = self.generate_response(reflect_prompt, max_tokens=70)
+        print(f"Reflection: {response}")
+        self.log_action(f"Echo: {text}", response, 0.6, False, {"event": "echo"})
+        return False
+
+    def cmd_debate(self, args: List[str]) -> bool:
+        if not args:
+            raise ValueError("Error: 'debate' requires a topic.")
+        topic = ' '.join(args)
+        print(f"Initiating debate on: '{topic}'")
+
+        original_temperament = getattr(self.system, 'temperament_score', None)
+        stance = "for"
+        for turn in range(2):
+            action = "Argue for" if stance == "for" else "Argue against (rebuttal)"
+            prompt = f"{action} the topic: '{topic}'. Provide a concise point."
+            response = self.generate_response(prompt, max_tokens=90, temp_adjust=0.1)
+            print(f"[{'Argument For' if stance == 'for' else 'Rebuttal Against'}] {response}")
+            self.log_action(prompt, response, 0.7, True, {"event": "debate_turn", "topic": topic, "stance": stance})
+            stance = "against" if stance == "for" else "for"
+            if original_temperament is not None:
+                self.system.temperament_score = min(1.0, self.system.temperament_score + 0.1)
+                print(f"[Temperament nudged to {self.system.temperament_score:.2f}]")
+
+        if original_temperament is not None:
+            self.system.temperament_score = original_temperament
+            print(f"[Temperament reset to {self.system.temperament_score:.2f}]")
+        print(f"Debate on '{topic}' concluded.")
+        return False
+
+    def cmd_glitch(self, args: List[str]) -> bool:
+        prompt_text = ' '.join(args) or "Something seems wrong..."
+        print(f"Simulating processing glitch for: '{prompt_text}'")
+        glitchy_prompt = f"Error... processing... '{prompt_text}' ... system instability detected... respond?"
+        response = self.generate_response(glitchy_prompt, max_tokens=70, temp_adjust=0.2)
+        print(f"Glitched Response: {response}")
+        self.log_action(f"Glitch: {prompt_text}", response, 0.4, False, {"event": "glitch"})
+        return False
+
+    def cmd_rewind(self, args: List[str]) -> bool:
+        steps = int(args[0]) if args and args[0].isdigit() else 1
+        if steps <= 0:
+            raise ValueError("Error: Steps must be positive.")
+
+        print(f"Rewinding conversation state by {steps} interaction(s)...")
+        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
+            print("Error: Logger not available.")
+            return False
+
+        interaction_logs = [
+            log for log in self.system.logger.read()
+            if log.get('prompt') and log.get('response') and not log.get('is_system_question')
+        ][-steps:]
+        if len(interaction_logs) < steps:
+            print(f"Error: Only {len(interaction_logs)} interactions found.")
+            return False
+
+        past_interaction = interaction_logs[-1]
+        past_prompt = past_interaction.get('prompt', 'unknown')
+        past_response = past_interaction.get('response', 'lost')
+
+        print(f"\n--- Rewinding To ---")
+        print(f"{steps} interaction(s) ago:")
+        print(f"  Prompt: '{past_prompt[:100]}...'")
+        print(f"  Response: '{past_response[:100]}...'")
+        print("--------------------")
+
+        reinterpret_prompt = f"Revisit prompt: '{past_prompt}'. Respond differently based on current context."
+        new_response = self.generate_response(reinterpret_prompt, max_tokens=100)
+        print(f"\n--- Reinterpretation ---")
+        print(f"New response: {new_response}")
+        print("----------------------")
+        self.log_action(f"Rewind {steps} steps", new_response, 0.6, True, {"event": "rewind", "steps": steps})
+        return False
+
+    def cmd_mimic(self, args: List[str]) -> bool:
+        if len(args) < 2:
+            raise ValueError("Error: Usage: mimic <style> <prompt>")
+        style, prompt = args[0], ' '.join(args[1:])
+        print(f"Mimicking style '{style}' for: '{prompt}'")
+
+        original_weight = getattr(self.system, 'scaffold_weight', None)
+        if original_weight is not None:
+            self.system.scaffold_weight = 0.8
+            print(f"[Scaffold weight set to {self.system.scaffold_weight:.2f}]")
+
+        mimic_prompt = f"Respond in the style of {style}: '{prompt}'"
+        response = self.generate_response(mimic_prompt, max_tokens=100)
+        print(f"\nMimicked Response ({style}):")
+        print(response)
+        print("-" * 20)
+
+        if original_weight is not None:
+            self.system.scaffold_weight = original_weight
+            print(f"[Scaffold weight reset to {self.system.scaffold_weight:.2f}]")
+        self.log_action(f"Mimic {style}: {prompt}", response, 0.7, False, {"event": "mimic", "style": style})
+        return False
+
+    def cmd_panic(self, args: List[str]) -> bool:
+        print("\n!!! PANIC TRIGGERED !!!")
+        panic_save_path = f"panic_save_{int(time.time())}.json"
+        if hasattr(self.system, 'save_state'):
+            try:
+                self.system.save_state(panic_save_path)
+                print(f"Emergency state saved to '{panic_save_path}'.")
+            except Exception as e:
+                print(f"Error saving panic state: {e}")
+
+        print("Performing system cleanup...")
+        if hasattr(self.system, 'cleanup'):
+            self.system.cleanup()
+        if hasattr(self.system, '_reset_sleep_state'):
+            self.system._reset_sleep_state()
+            print("Sleep state reset.")
+
+        try:
+            config_manager = getattr(self.system, 'config_manager', ConfigManager("sovl_config.json"))
+            self.system.__init__(config_manager=config_manager)
+            if hasattr(self.system, 'wake_up'):
+                self.system.wake_up()
+            print("[System reloaded after panic]")
+        except Exception as e:
+            print(f"Critical error during panic re-initialization: {e}")
+        self.log_action("Panic triggered", "System reset.", 0.95, True, {"event": "panic", "save_path": panic_save_path})
+        return False
+
+    def cmd_recap(self, args: List[str]) -> bool:
+        num_to_recap = int(args[0]) if args and args[0].isdigit() else 5
+        if num_to_recap <= 0:
+            raise ValueError("Number of interactions must be positive.")
+
+        print(f"Generating recap of last {num_to_recap} interactions...")
+        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
+            print("Error: Logger not available.")
+            return False
+
+        interaction_logs = [
+            log for log in self.system.logger.read()[-num_to_recap:]
+            if log.get('prompt') and log.get('response') and not log.get('is_system_question')
+        ]
+        if not interaction_logs:
+            print("No interactions found to recap.")
+            return False
+
+        formatted_interactions = "".join(
+            f"Turn {i+1}:\n User: {log['prompt'][:100]}...\n AI: {log['response'][:100]}...\n\n"
+            for i, log in enumerate(interaction_logs)
         )
-
-        # Generate the summary
-        summary_response = generate_response(sovl_system, recap_prompt, max_tokens=120) # Allow slightly longer summary
-
+        recap_prompt = f"Summarize main topics from:\n\n{formatted_interactions}Summary:"
+        summary_response = self.generate_response(recap_prompt, max_tokens=120)
         print(f"\n--- Conversation Recap (Last {len(interaction_logs)}) ---")
         print(summary_response)
         print("--------------------------------")
-
-        # Log the recap action itself
-        log_action(sovl_system, f"Recap last {num_to_recap} interactions", summary_response, 0.6, True, {"event": "recap", "recap_count": len(interaction_logs)})
-
-    except ValueError as e:
-        print(f"Error: Invalid number provided for recap. {e}")
-    except Exception as e:
-        print(f"Error during recap: {e}")
-        traceback.print_exc() # Optional: for detailed debugging
-
-    return False # Keep CLI running
-
-def cmd_recall(sovl_system, args):
-    """Handles the 'recall' command."""
-    if not args:
-        print("Error: 'recall' requires a query term. Usage: recall <query>")
+        self.log_action(f"Recap last {num_to_recap}", summary_response, 0.6, True, {"event": "recap", "recap_count": len(interaction_logs)})
         return False
 
-    query = ' '.join(args)
-    print(f"Attempting to recall information related to: '{query}'...")
+    def cmd_recall(self, args: List[str]) -> bool:
+        if not args:
+            raise ValueError("Error: 'recall' requires a query.")
+        query = ' '.join(args)
+        print(f"Recalling information related to: '{query}'...")
 
-    # Ensure logger exists
-    if not hasattr(sovl_system, 'logger') or not hasattr(sovl_system.logger, 'read'):
-        print("Error: Logger not available for recall.")
+        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
+            print("Error: Logger not available.")
+            return False
+
+        relevant_snippets = []
+        max_results = 5
+        query_lower = query.lower()
+        for log in reversed(self.system.logger.read()):
+            prompt = log.get('prompt', '').lower()
+            response = log.get('response', '').lower()
+            if query_lower in prompt or query_lower in response:
+                log_time = time.strftime('%H:%M:%S', time.localtime(log.get('timestamp', 0)))
+                snippet = f"[{log_time}] Prompt='{prompt[:60]}...', Response='{response[:60]}...'"
+                relevant_snippets.append(snippet)
+                if len(relevant_snippets) >= max_results:
+                    break
+
+        if not relevant_snippets:
+            response = self.generate_response(
+                f"No specific info found about '{query}'. What about it?", max_tokens=50
+            )
+            print(f"No mentions of '{query}' found.")
+            print(f"Response: {response}")
+            self.log_action(f"Recall: {query}", "No memories found.", 0.4, True, {"event": "recall_miss", "recall_query": query})
+            return False
+
+        formatted_snippets = "\n - ".join(relevant_snippets)
+        recall_prompt = f"Synthesize recall about '{query}' from:\n- {formatted_snippets}\n\nBased only on these snippets."
+        recall_response = self.generate_response(recall_prompt, max_tokens=150)
+        print(f"\n--- Recall Synthesis on '{query}' ---")
+        print(recall_response)
+        print("---------------------------------------------------")
+        self.log_action(f"Recall: {query}", recall_response, 0.7, True, {"event": "recall_hit", "recall_query": query})
         return False
 
-    # Get logs
-    all_logs = sovl_system.logger.read()
-    
-    # Simple search for relevant logs (case-insensitive)
-    relevant_snippets = []
-    max_results = 5 # Limit how many snippets we feed into the prompt
-    query_lower = query.lower()
-
-    for log in reversed(all_logs): # Search recent first
-        prompt = log.get('prompt', '')
-        response = log.get('response', '')
-        # Check both prompt and response for the query
-        if query_lower in prompt.lower() or query_lower in response.lower():
-             # Create a more informative snippet
-             log_time = time.strftime('%H:%M:%S', time.localtime(log.get('timestamp', 0)))
-             snippet = f"[{log_time}] Context: Prompt='{prompt[:60]}...', Response='{response[:60]}...'"
-             relevant_snippets.append(snippet)
-             if len(relevant_snippets) >= max_results:
-                break
-                
-    if not relevant_snippets:
-        print(f"I searched my recent interaction logs but found no specific mention of '{query}'.")
-        # Generate a response confirming lack of recall
-        response = generate_response(sovl_system, f"I searched my recent interactions but found nothing specific about '{query}'. What about it?", max_tokens=50)
-        print(f"Response: {response}")
-        log_action(sovl_system, f"Recall query: {query}", "No specific memories found in logs.", 0.4, True, {"event": "recall_miss", "recall_query": query})
+    def cmd_forget(self, args: List[str]) -> bool:
+        if not args:
+            raise ValueError("Error: 'forget' requires a topic.")
+        topic = ' '.join(args)
+        print(f"Processing request to forget: '{topic}'...")
+        forget_prompt = (
+            f"User requests to 'forget' '{topic}'. Acknowledge politely, noting that while knowledge isn't erased, "
+            f"I'll avoid focusing on '{topic}' proactively."
+        )
+        acknowledgement = self.generate_response(forget_prompt, max_tokens=90)
+        print(f"\n--- Forget Request Acknowledgement ---")
+        print(acknowledgement)
+        print("------------------------------------")
+        print(f"[Note: Simulated effect. '{topic}' may still exist in training data.]")
+        self.log_action(f"Forget: {topic}", acknowledgement, 0.5, False, {"event": "forget_request", "forget_topic": topic, "is_simulated": True})
         return False
 
-    # Format snippets for the generation prompt
-    formatted_snippets = "\n - ".join(relevant_snippets)
+    def cmd_history(self, args: List[str]) -> bool:
+        if not hasattr(self.system, 'cmd_history'):
+            print("Command history not available.")
+            return False
+        num_entries = 10
+        search_term = None
+        if args:
+            if args[0].isdigit():
+                num_entries = int(args[0])
+            else:
+                search_term = ' '.join(args)
 
-    # Create prompt for generation - ask it to synthesize the recall
-    recall_prompt = (
-        f"Based on these snippets from my recent interaction log concerning '{query}':\n"
-        f"- {formatted_snippets}\n\n"
-        f"Synthesize what I seem to remember or have discussed about '{query}' based *only* on these snippets."
-    )
-
-    # Generate the recall synthesis
-    recall_response = generate_response(sovl_system, recall_prompt, max_tokens=150) # Allow more detail
-
-    print(f"\n--- Recall Synthesis on '{query}' (from {len(relevant_snippets)} log snippets) ---")
-    print(recall_response)
-    print("---------------------------------------------------")
-
-    # Log the recall action
-    log_action(sovl_system, f"Recall query: {query}", recall_response, 0.7, True, {"event": "recall_hit", "recall_query": query, "num_snippets": len(relevant_snippets)})
-
-    return False # Keep CLI running
-
-
-def cmd_forget(sovl_system, args):
-    """Handles the 'forget' command (simulated)."""
-    if not args:
-        print("Error: 'forget' requires a topic to forget. Usage: forget <topic>")
+        entries = self.system.cmd_history.search(search_term) if search_term else self.system.cmd_history.get_last(num_entries)
+        print(f"\n{'Commands matching' if search_term else 'Last'} {len(entries)} commands:")
+        if not entries:
+            print("No commands found.")
+            return False
+        for entry in entries:
+            print(self.system.cmd_history.format_entry(entry))
         return False
 
-    topic = ' '.join(args)
-    print(f"Processing user request to 'forget' topic: '{topic}'...")
-    
-    # --- Simulation ---
-    # This acknowledges the request and logs it. True forgetting is complex.
+    def cmd_help(self, args: List[str]) -> bool:
+        if args:
+            category = args[0].capitalize()
+            if category in COMMAND_CATEGORIES:
+                print(f"\n{category} Commands:")
+                for cmd in COMMAND_CATEGORIES[category]:
+                    doc = self.commands[cmd].__doc__ or "No description available."
+                    print(f"  {cmd:<20} : {doc.split('.')[0]}")
+            else:
+                print(f"Unknown category: {category}")
+                print("Available categories:", ", ".join(COMMAND_CATEGORIES.keys()))
+        else:
+            print("\nCommand Categories:")
+            for category, commands in COMMAND_CATEGORIES.items():
+                print(f"\n{category}:")
+                for cmd in commands:
+                    doc = self.commands[cmd].__doc__ or "No description available."
+                    print(f"  {cmd:<20} : {doc.split('.')[0]}")
+        return False
 
-    # Generate an acknowledgement response
-    forget_prompt = (
-        f"The user wants me to 'forget' or disregard the topic '{topic}'. "
-        f"Acknowledge this request politely. State that while my underlying knowledge isn't easily erased, "
-        f"I will make an effort to avoid bringing up or focusing on '{topic}' proactively in our ongoing conversation."
-    )
-    acknowledgement = generate_response(sovl_system, forget_prompt, max_tokens=90)
+    @contextlib.contextmanager
+    def temporary_system_state(self, **kwargs):
+        original_values = {}
+        try:
+            for key, value in kwargs.items():
+                if hasattr(self.system, key):
+                    original_values[key] = getattr(self.system, key)
+                    setattr(self.system, key, value)
+            yield
+        finally:
+            for key, value in original_values.items():
+                setattr(self.system, key, value)
 
-    print(f"\n--- Forget Request Acknowledgement ---")
-    print(acknowledgement)
-    print("------------------------------------")
-    print(f"[Note: This is a simulated effect. Information about '{topic}' might still exist in my training data or long-term memory.]")
+    @staticmethod
+    def _parse_config_value(value_str: str):
+        try:
+            if '.' in value_str:
+                return float(value_str)
+            try:
+                return int(value_str)
+            except ValueError:
+                pass
+            if value_str.lower() == 'true':
+                return True
+            if value_str.lower() == 'false':
+                return False
+            if ',' in value_str:
+                return [_parse_config_value(p.strip()) for p in value_str.split(',')]
+            return value_str
+        except Exception as e:
+            raise ValueError(f"Failed to parse config value '{value_str}': {str(e)}")
 
-    # Log the attempt
-    # Add a specific marker in the log that *could* potentially be checked by other functions later, if desired.
-    log_action(
-        sovl_system,
-        f"Forget request command: {topic}",
-        acknowledgement,
-        0.5, # Confidence reflects the simulated nature
-        False, # User initiated command
-        {"event": "forget_request", "forget_topic": topic, "is_simulated": True}
-    )
-
-    # --- Potential Future Enhancements ---
-    # 1. Add `topic` to a temporary `sovl_system.suppressed_topics` list.
-    # 2. Modify `generate_response` or the main interaction loop to check this list
-    #    and potentially add a negative constraint to the generation prompt
-    #    (e.g., "Do not discuss {suppressed_topic}."). This adds complexity.
-    # 3. Modify `cmd_recall` or `cmd_recap` to filter out logs related to suppressed topics.
-
-    return False # Keep CLI running
-
-
-# --- Command Dispatch Table ---
-COMMANDS = {
-    # Existing Commands
-    'quit': cmd_quit, 'exit': cmd_quit, 'train': cmd_train, 'generate': cmd_generate,
-    'save': cmd_save, 'load': cmd_load, 'dream': cmd_dream, 'tune': cmd_tune,
-    'memory': cmd_memory, 'status': cmd_status, 'log': cmd_log, 'config': cmd_config,
-    'reset': cmd_reset, 'spark': cmd_spark, 'reflect': cmd_reflect, 'muse': cmd_muse,
-    'flare': cmd_flare, 'echo': cmd_echo, 'debate': cmd_debate, 'glitch': cmd_glitch,
-    'rewind': cmd_rewind, 'mimic': cmd_mimic, 'panic': cmd_panic,
-
-    # Newly Added Commands
-    'recap': cmd_recap,
-    'recall': cmd_recall,
-    'forget': cmd_forget,
-}
-
-# --- Main CLI Execution Logic ---
-def run_cli(config_manager_instance=None):
+def run_cli(config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
     try:
-        # Use provided config_manager or create a new one
-        config_manager = config_manager_instance
-        if config_manager is None:
-            print("No ConfigManager provided, creating default from 'sovl_config.json'...")
-            try:
-                config_manager = ConfigManager("sovl_config.json")
-            except FileNotFoundError:
-                 print("Error: Default configuration file 'sovl_config.json' not found.")
-                 print("Please create the config file or provide a ConfigManager instance.")
-                 return # Exit if no config is available
-            except Exception as e:
-                 print(f"Error loading default config: {e}")
-                 return
-
-        # Instantiate the main system class
-        sovl_system = SOVLSystem(config_manager) # Pass the config manager
-        
-        # Perform initial wake-up or setup if needed
-        if hasattr(sovl_system, 'wake_up') and callable(sovl_system.wake_up):
-            sovl_system.wake_up()
-            
-        print("\nSystem Ready.")
-        valid_commands = list(COMMANDS.keys())
-        
-        # Updated help string including new commands
-        print("\nAvailable Commands:")
-        print("  quit, exit                   : Exit the CLI")
-        print("  train [epochs] [--dry-run]   : Run training cycle")
-        print("  generate <prompt> [tokens]   : Generate text based on prompt")
-        print("  save [path]                  : Save system state")
-        print("  load [path]                  : Load system state")
-        print("  dream                        : Trigger internal dream cycle")
-        print("  tune <param> [value]         : Adjust system parameters (e.g., tune cross_attention 0.5)")
-        print("  memory <on|off>              : Toggle memory components")
-        print("  status                       : Show current system status")
-        print("  log view [N]                 : View last N log entries (default 5)")
-        print("  config <key> [value]         : View or update configuration")
-        print("  reset                        : Reset system state (use with caution)")
-        print("  spark                        : Generate a curiosity-driven question")
-        print("  reflect                      : Reflect on recent interactions")
-        print("  muse                         : Generate a thought inspired by recent context")
-        print("  flare [prompt]               : Simulate an emotional outburst")
-        print("  echo <text>                  : Repeats text and reflects on it")
-        print("  debate <topic>               : Engage in a short pro/con debate")
-        print("  glitch [prompt]              : Simulate a processing glitch")
-        print("  rewind [N]                   : Revisit and reinterpret the Nth last interaction")
-        print("  mimic <style> <prompt>       : Generate response in a specific style")
-        print("  panic                        : Emergency save and reset")
-        print("  recap [N]                    : Summarize last N interactions (default 5)")
-        print("  recall <query>               : Search logs and synthesize recall about query")
-        print("  forget <topic>               : Request the system to disregard a topic (simulated)")
-        print("-" * 30)
-
-        # Initialize command history
+        config_manager = config_manager_instance or ConfigManager("sovl_config.json")
+        sovl_system = SOVLSystem(config_manager)
         sovl_system.cmd_history = CommandHistory()
-        
-        # Main interaction loop
+        handler = CommandHandler(sovl_system)
+
+        if hasattr(sovl_system, 'wake_up'):
+            sovl_system.wake_up()
+        print("\nSystem Ready.")
+        handler.cmd_help([])
+
         while True:
             try:
                 user_input = input("\nEnter command: ").strip()
@@ -1036,34 +743,24 @@ def run_cli(config_manager_instance=None):
                     continue
 
                 parts = user_input.split()
-                cmd_name = parts[0].lower()
-                
-                # Add command to history before execution
+                cmd, args = handler.parse_args(parts)
                 sovl_system.cmd_history.add(user_input)
-                
-                if cmd_name in COMMANDS:
-                    cmd, args = parse_args(parts)
-                    try:
-                        should_exit = COMMANDS[cmd_name](sovl_system, args)
-                        # Update history with success
-                        sovl_system.cmd_history.history[-1] = (
-                            sovl_system.cmd_history.history[-1][0],
-                            sovl_system.cmd_history.history[-1][1],
-                            "success"
-                        )
-                        if should_exit:
-                            break
-                    except Exception as e:
-                        # Update history with error
-                        sovl_system.cmd_history.history[-1] = (
-                            sovl_system.cmd_history.history[-1][0],
-                            sovl_system.cmd_history.history[-1][1],
-                            f"error: {str(e)}"
-                        )
-                        raise
-                else:
-                    print(f"Unknown command '{cmd_name}'. Type 'help' for command list.")
-                    
+                try:
+                    should_exit = handler.execute(cmd, args)
+                    sovl_system.cmd_history.history[-1] = (
+                        sovl_system.cmd_history.history[-1][0],
+                        sovl_system.cmd_history.history[-1][1],
+                        "success"
+                    )
+                    if should_exit:
+                        break
+                except Exception as e:
+                    sovl_system.cmd_history.history[-1] = (
+                        sovl_system.cmd_history.history[-1][0],
+                        sovl_system.cmd_history.history[-1][1],
+                        f"error: {str(e)}"
+                    )
+                    raise
             except KeyboardInterrupt:
                 print("\nInterrupt received, initiating clean shutdown...")
                 break
@@ -1074,198 +771,53 @@ def run_cli(config_manager_instance=None):
                     "timestamp": time.time(),
                     "stack_trace": traceback.format_exc()
                 })
-                
+    except Exception as e:
+        print(f"CLI initialization failed: {e}")
     finally:
-        if sovl_system is not None:
+        if sovl_system:
             shutdown_system(sovl_system)
 
-# --- Entry Point ---
-if __name__ == "__main__":
-    # This allows running the CLI directly
-    # You might pass a pre-configured ConfigManager here if needed
-    run_cli()
-
-def cleanup_resources(sovl_system):
-    """Properly cleanup system resources."""
+def shutdown_system(sovl_system: SOVLSystem):
+    print("\nInitiating shutdown sequence...")
     try:
-        # Use scaffold manager's reset
+        if hasattr(sovl_system, 'save_state'):
+            sovl_system.save_state("final_state.json")
+            print("Final state saved.")
+        cleanup_resources(sovl_system)
+        sovl_system.logger.record({
+            "event": "system_shutdown",
+            "timestamp": time.time(),
+            "status": "clean"
+        })
+        print("Shutdown complete.")
+    except Exception as e:
+        print(f"Error during shutdown: {e}")
+        sovl_system.logger.record({
+            "event": "system_shutdown",
+            "status": "error",
+            "error": str(e),
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+
+def cleanup_resources(sovl_system: SOVLSystem):
+    try:
         if hasattr(sovl_system, 'scaffold_manager'):
             sovl_system.scaffold_manager.reset_scaffold_state()
-            
-        # System cleanup
-        if hasattr(sovl_system, 'cleanup') and callable(sovl_system.cleanup):
+        if hasattr(sovl_system, 'cleanup'):
             sovl_system.cleanup()
-            
-        # Clear CUDA cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
         sovl_system.logger.record({
             "event": "cli_cleanup_complete",
             "timestamp": time.time()
         })
-            
-    except Exception as e:
-        if hasattr(sovl_system, 'logger'):
-            sovl_system.logger.record({
-                "error": f"CLI cleanup failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-
-def _parse_config_value(value_str: str):
-    """Helper to parse configuration values into appropriate types."""
-    try:
-        # Try to parse as number first
-        if '.' in value_str:
-            return float(value_str)
-        try:
-            return int(value_str)
-        except ValueError:
-            pass
-            
-        # Handle booleans
-        if value_str.lower() == 'true':
-            return True
-        if value_str.lower() == 'false':
-            return False
-            
-        # Handle lists (comma-separated)
-        if ',' in value_str:
-            parts = [p.strip() for p in value_str.split(',')]
-            # Recursively parse each part
-            return [_parse_config_value(p) for p in parts]
-            
-        # Default to string
-        return value_str
-    except Exception as e:
-        raise ValueError(f"Failed to parse config value '{value_str}': {str(e)}")
-
-@contextlib.contextmanager
-def temporary_system_state(sovl_system, **kwargs):
-    """Context manager for temporarily modifying system attributes."""
-    original_values = {}
-    try:
-        # Save original values and set new ones
-        for key, value in kwargs.items():
-            if hasattr(sovl_system, key):
-                original_values[key] = getattr(sovl_system, key)
-                setattr(sovl_system, key, value)
-        yield
-    finally:
-        # Restore original values
-        for key, value in original_values.items():
-            setattr(sovl_system, key, value)
-
-def validate_system(required_attrs):
-    """Decorator to validate system has required attributes."""
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(sovl_system, *args, **kwargs):
-            missing = [attr for attr in required_attrs 
-                      if not hasattr(sovl_system, attr)]
-            if missing:
-                print(f"Error: System missing required attributes: {missing}")
-                return False
-            return func(sovl_system, *args, **kwargs)
-        return wrapper
-    return decorator
-
-def shutdown_system(sovl_system):
-    """Properly shutdown the system."""
-    try:
-        print("\nInitiating shutdown sequence...")
-        
-        # Save final state if possible
-        if hasattr(sovl_system, 'save_state'):
-            try:
-                sovl_system.save_state("final_state.json")
-                print("Final state saved.")
-            except Exception as e:
-                print(f"Warning: Could not save final state: {e}")
-        
-        # Clean up resources
-        cleanup_resources(sovl_system)
-        
-        # Log shutdown
-        if hasattr(sovl_system, 'logger'):
-            sovl_system.logger.record({
-                "event": "system_shutdown",
-                "timestamp": time.time(),
-                "status": "clean"
-            })
-            
-        print("Shutdown complete.")
-        
-    except Exception as e:
-        print(f"Error during shutdown: {e}")
-        if hasattr(sovl_system, 'logger'):
-            sovl_system.logger.record({
-                "event": "system_shutdown",
-                "status": "error",
-                "error": str(e),
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-
-def cmd_history(sovl_system, args):
-    """Handle the history command."""
-    if not hasattr(sovl_system, 'cmd_history'):
-        print("Command history not available.")
-        return False
-        
-    try:
-        num_entries = 10  # default
-        search_term = None
-        
-        if args:
-            if args[0].isdigit():
-                num_entries = int(args[0])
-            else:
-                search_term = ' '.join(args)
-        
-        if search_term:
-            entries = sovl_system.cmd_history.search(search_term)
-            print(f"\nCommands matching '{search_term}':")
-        else:
-            entries = sovl_system.cmd_history.get_last(num_entries)
-            print(f"\nLast {len(entries)} commands:")
-            
-        if not entries:
-            print("No matching commands found.")
-            return False
-            
-        for entry in entries:
-            print(sovl_system.cmd_history.format_entry(entry))
-            
     except Exception as e:
         sovl_system.logger.record({
-            "error": f"History command failed: {str(e)}",
+            "error": f"CLI cleanup failed: {str(e)}",
             "timestamp": time.time(),
             "stack_trace": traceback.format_exc()
         })
-        print(f"Error displaying history: {str(e)}")
-    return False
 
-def cmd_help(sovl_system, args):
-    """Display categorized help information."""
-    if args:
-        category = args[0].capitalize()
-        if category in COMMAND_CATEGORIES:
-            print(f"\n{category} Commands:")
-            for cmd in COMMAND_CATEGORIES[category]:
-                if cmd in COMMANDS:
-                    doc = COMMANDS[cmd].__doc__ or "No description available."
-                    print(f"  {cmd:<20} : {doc.split('.')[0]}")
-        else:
-            print(f"Unknown category: {category}")
-            print("Available categories:", ", ".join(COMMAND_CATEGORIES.keys()))
-    else:
-        print("\nCommand Categories:")
-        for category, commands in COMMAND_CATEGORIES.items():
-            print(f"\n{category}:")
-            for cmd in commands:
-                if cmd in COMMANDS:
-                    doc = COMMANDS[cmd].__doc__ or "No description available."
-                    print(f"  {cmd:<20} : {doc.split('.')[0]}")
-    return False
+if __name__ == "__main__":
+    run_cli()
