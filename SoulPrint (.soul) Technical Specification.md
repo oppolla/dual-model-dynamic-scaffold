@@ -148,6 +148,12 @@ Description: > |
 ```
 - Optional.
 
+- `Metadata`: [String] Technical parameters shaping speech, max 200 characters, multiline with > |.
+``` 
+Metadata: > |
+  temperature: 0.7, curiosity: high
+```
+
 - `Size`: [Integer] Approximate file size in bytes, max 10 characters, regex ^\d{1,10}$.
 - Example: Size: 300000
 - Description: Records the file’s size to flag parsing issues or truncation, supporting dynamic updates (e.g., appending Echoes). Optional for flexibility.
