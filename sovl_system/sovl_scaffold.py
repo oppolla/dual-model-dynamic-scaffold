@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 import torch.nn.functional as F
-from typing import List, Optional, Tuple, Union, Dict
+from typing import List, Optional, Tuple, Union, Dict, Any
 from collections import defaultdict
 import time
 import traceback
@@ -700,6 +700,7 @@ class CrossAttentionInjector:
         self.lock = Lock()
         self.scaffold_proj = None
         self.scaffold_unk_id = config_manager.get("controls_config.scaffold_unk_id", 0)
+        self.error_handler = ErrorHandler(config_manager, logger)
 
     def inject(
         self,
@@ -735,7 +736,7 @@ class CrossAttentionInjector:
                     )
                 
                 # Verify injection
-                if not self._verify_injection(base_model, layer_indices):
+                if not self.verify_injection(base_model, layer_indices, base_model.config):
                     for name, param in base_model.named_parameters():
                         if name in original_state:
                             param.data.copy_(original_state[name])
@@ -931,11 +932,84 @@ class CrossAttentionInjector:
         except Exception:
             return False
 
-    def _verify_injection(self, model: nn.Module, layer_indices: List[int]) -> bool:
-        """Verify that cross-attention layers were properly injected."""
+    def verify_injection(self, model: nn.Module, expected_layers: List[int], base_config: Any) -> bool:
+        """
+        Verify that cross-attention layers were properly injected.
+
+        Args:
+            model: The model to verify
+            expected_layers: List of expected layer indices
+            base_config: Base model configuration for dimension validation
+
+        Returns:
+            bool: True if verification succeeds, False otherwise
+        """
         try:
-            return all(self._verify_single_layer(model, idx) for idx in layer_indices)
-        except Exception:
+            expected_layers = set(expected_layers)
+            found_layers = set()
+
+            # Scan model for cross-attention layers
+            for name, module in model.named_modules():
+                if "cross_attention" in name.lower():
+                    try:
+                        # Extract layer index from module name
+                        parts = name.split('.')
+                        if len(parts) >= 3 and parts[0] == 'transformer' and parts[1] == 'h':
+                            layer_idx = int(parts[2])
+                            found_layers.add(layer_idx)
+                    except (ValueError, IndexError):
+                        continue
+                    
+            # Log verification results
+            self.logger.record({
+                "event": "cross_attention_verification",
+                "expected_layers": list(expected_layers),
+                "found_layers": list(found_layers),
+                "timestamp": time.time()
+            })
+
+            # Check if all expected layers were found
+            if not expected_layers.issubset(found_layers):
+                missing_layers = expected_layers - found_layers
+                self.logger.record({
+                    "warning": f"Missing cross-attention layers: {missing_layers}",
+                    "timestamp": time.time()
+                })
+                return False
+
+            # Verify layer dimensions and structure
+            for layer_idx in expected_layers:
+                try:
+                    layer = model.transformer.h[layer_idx]
+                    if not hasattr(layer, 'cross_attention'):
+                        self.logger.record({
+                            "warning": f"Layer {layer_idx} missing cross_attention attribute",
+                            "timestamp": time.time()
+                        })
+                        return False
+
+                    # Verify dimensions match
+                    if layer.cross_attention.hidden_size != base_config.hidden_size:
+                        self.logger.record({
+                            "warning": f"Layer {layer_idx} dimension mismatch",
+                            "timestamp": time.time()
+                        })
+                        return False
+
+                    # Verify attention heads match
+                    if layer.cross_attention.num_attention_heads != base_config.num_attention_heads:
+                        self.logger.record({
+                            "warning": f"Layer {layer_idx} attention heads mismatch",
+                            "timestamp": time.time()
+                        })
+                        return False
+                except Exception as e:
+                    self.error_handler.handle_cross_attention_error(e, layer_idx)
+                    return False
+
+            return True
+        except Exception as e:
+            self.error_handler.handle_cross_attention_error(e)
             return False
 
     def save_state(self, path: str, state_dict: dict):

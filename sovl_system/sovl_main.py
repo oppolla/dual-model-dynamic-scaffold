@@ -481,78 +481,6 @@ class SOVLSystem:
             })
             return False
 
-    def _verify_cross_attention_injection(self) -> bool:
-        """Verify that cross-attention layers were properly injected."""
-        try:
-            # Check if expected layers exist
-            cross_attn_layers = self.core_config.get("cross_attn_layers", [])
-            expected_layers = set(cross_attn_layers)
-            found_layers = set()
-
-            # Scan model for cross-attention layers
-            for name, module in self.base_model.named_modules():
-                if "cross_attention" in name.lower():
-                    try:
-                        # Extract layer index from module name
-                        parts = name.split('.')
-                        if len(parts) >= 3 and parts[0] == 'transformer' and parts[1] == 'h':
-                            layer_idx = int(parts[2])
-                            found_layers.add(layer_idx)
-                    except (ValueError, IndexError):
-                        continue
-                    
-            # Log verification results
-            self.logger.record({
-                "event": "cross_attention_verification",
-                "expected_layers": list(expected_layers),
-                "found_layers": list(found_layers),
-                "timestamp": time.time()
-            })
-
-            # Check if all expected layers were found
-            if not expected_layers.issubset(found_layers):
-                missing_layers = expected_layers - found_layers
-                self.logger.record({
-                    "warning": f"Missing cross-attention layers: {missing_layers}",
-                    "timestamp": time.time()
-                })
-                return False
-
-            # Verify layer dimensions and structure
-            for layer_idx in expected_layers:
-                try:
-                    layer = self.base_model.transformer.h[layer_idx]
-                    if not hasattr(layer, 'cross_attention'):
-                        self.logger.record({
-                            "warning": f"Layer {layer_idx} missing cross_attention attribute",
-                            "timestamp": time.time()
-                        })
-                        return False
-
-                    # Verify dimensions match
-                    if layer.cross_attention.hidden_size != self.base_config.hidden_size:
-                        self.logger.record({
-                            "warning": f"Layer {layer_idx} dimension mismatch",
-                            "timestamp": time.time()
-                        })
-                        return False
-
-                    # Verify attention heads match
-                    if layer.cross_attention.num_attention_heads != self.base_config.num_attention_heads:
-                        self.logger.record({
-                            "warning": f"Layer {layer_idx} attention heads mismatch",
-                            "timestamp": time.time()
-                        })
-                        return False
-                except Exception as e:
-                    self.error_handler.handle_cross_attention_error(e, layer_idx)
-                    return False
-
-            return True
-        except Exception as e:
-            self.error_handler.handle_cross_attention_error(e)
-            return False
-
     def _insert_cross_attention(self):
         """Inject cross-attention layers using the scaffold injector."""
         if not self.cross_attn_config.get("enable_cross_attention", True):
@@ -574,6 +502,16 @@ class SOVLSystem:
                 token_map=self.scaffold_token_mapper,
                 device=self.device
             )
+
+            # Verify the injection
+            expected_layers = self.core_config.get("cross_attn_layers", [])
+            if not self.cross_attention_injector.verify_injection(
+                self.base_model,
+                expected_layers,
+                self.base_config
+            ):
+                raise ValueError("Cross-attention layer verification failed")
+
         except Exception as e:
             self.error_handler.handle_cross_attention_error(e)
 
