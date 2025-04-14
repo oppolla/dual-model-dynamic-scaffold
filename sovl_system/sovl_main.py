@@ -42,6 +42,7 @@ from sovl_temperament import TemperamentConfig, TemperamentSystem
 from sovl_memory import MemoryManager
 from sovl_manager import ModelManager
 from sovl_generation import GenerationManager
+from sovl_tuner import SOVLTuner
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Wrapper for backward compatibility"""
@@ -434,6 +435,14 @@ class SOVLSystem:
             curiosity_manager=self.curiosity_manager
         )
 
+        self.tuner = SOVLTuner(
+            config_manager=self.config_manager,
+            logger=self.logger,
+            curiosity_manager=self.curiosity_manager,
+            trainer=self.trainer,
+            cross_attention_injector=self.cross_attention_injector
+        )
+
     def _validate_config(self):
         """Validate required configuration keys and layer settings."""
         config_snapshot = OrderedDict(sorted(self.config_manager.get_state()["config"].items()))
@@ -639,36 +648,6 @@ class SOVLSystem:
             )
             return None
 
-    def tune_curiosity(self, enable=None, spontaneous_threshold=None, response_threshold=None, pressure_threshold=None,
-                       pressure_drop=None, silence_threshold=None, question_cooldown=None, queue_maxlen=None,
-                       weight_ignorance=None, weight_novelty=None, max_new_tokens=None, base_temperature=None,
-                       temperament_influence=None, top_k=None, attention_weight=None, question_timeout=None):
-        """Tune curiosity parameters using the state's curiosity manager."""
-        self.state.curiosity.tune_curiosity(
-            pressure=pressure_threshold,
-            decay_rate=pressure_drop,
-            question_timeout=question_timeout
-        )
-        updates = {
-            'enable': enable,
-            'spontaneous_threshold': spontaneous_threshold,
-            'response_threshold': response_threshold,
-            'pressure_threshold': pressure_threshold,
-            'pressure_drop': pressure_drop,
-            'silence_threshold': silence_threshold,
-            'question_cooldown': question_cooldown,
-            'queue_maxlen': queue_maxlen,
-            'weight_ignorance': weight_ignorance,
-            'weight_novelty': weight_novelty,
-            'max_new_tokens': max_new_tokens,
-            'base_temperature': base_temperature,
-            'temperament_influence': temperament_influence,
-            'top_k': top_k,
-            'attention_weight': attention_weight,
-            'question_timeout': question_timeout
-        }
-        self.curiosity_manager.tune_curiosity(**{k: v for k, v in updates.items() if v is not None})
-
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
         self.state.update_data_exposure(data_exposure)
         self.logger.record({
@@ -727,57 +706,6 @@ class SOVLSystem:
                 state_hash=self.state.state_hash()
             )
 
-    def tune_dream(self, swing_var=None, lifecycle_delta=None, temperament_on=None, noise_scale=None,
-                   memory_weight=None, memory_maxlen=None, prompt_weight=None, novelty_boost=None,
-                   memory_decay=None, prune_threshold=None):
-        updates = {}
-        prefix = "controls_config."
-        if swing_var is not None and 0.05 <= swing_var <= 0.2:
-            updates[f"{prefix}dream_swing_var"] = swing_var
-            self.controls_config["dream_swing_var"] = swing_var
-        if lifecycle_delta is not None and 0.05 <= lifecycle_delta <= 0.2:
-            updates[f"{prefix}dream_lifecycle_delta"] = lifecycle_delta
-            self.controls_config["dream_lifecycle_delta"] = lifecycle_delta
-        if temperament_on is not None:
-            updates[f"{prefix}dream_temperament_on"] = bool(temperament_on)
-            self.controls_config["dream_temperament_on"] = bool(temperament_on)
-        if noise_scale is not None and 0.01 <= noise_scale <= 0.1:
-            updates[f"{prefix}dream_noise_scale"] = noise_scale
-            self.controls_config["dream_noise_scale"] = noise_scale
-        if memory_weight is not None and 0 <= memory_weight <= 0.5:
-            updates[f"{prefix}dream_memory_weight"] = memory_weight
-            self.controls_config["dream_memory_weight"] = memory_weight
-            self.trainer.config.dream_memory_weight = memory_weight
-        if memory_maxlen is not None and 5 <= memory_maxlen <= 20:
-            updates[f"{prefix}dream_memory_maxlen"] = memory_maxlen
-            self.controls_config["dream_memory_maxlen"] = memory_maxlen
-            self.state.dream_memory_maxlen = memory_maxlen
-            self.state.dream_memory = deque(self.state.dream_memory, maxlen=memory_maxlen)
-        if prompt_weight is not None and 0 <= prompt_weight <= 1:
-            updates[f"{prefix}dream_prompt_weight"] = prompt_weight
-            self.controls_config["dream_prompt_weight"] = prompt_weight
-        if novelty_boost is not None and 0 <= novelty_boost <= 0.05:
-            updates[f"{prefix}dream_novelty_boost"] = novelty_boost
-            self.controls_config["dream_novelty_boost"] = novelty_boost
-        if memory_decay is not None and 0 <= memory_decay <= 1:
-            updates[f"{prefix}dream_memory_decay"] = memory_decay
-            self.controls_config["dream_memory_decay"] = memory_decay
-        if prune_threshold is not None and 0 <= prune_threshold <= 1:
-            updates[f"{prefix}dream_prune_threshold"] = prune_threshold
-            self.controls_config["dream_prune_threshold"] = prune_threshold
-
-        if updates:
-            self.config_manager.update_batch(updates)
-            self.config_manager.save_config()
-            self.logger.record({
-                "event": "tune_dream",
-                "params": updates,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Dream params updated: {updates}")
-
     def _update_temperament(self):
         """Update temperament using the temperament system."""
         avg_confidence = safe_divide(
@@ -804,46 +732,6 @@ class SOVLSystem:
             list(self.temperament_system._history),
             maxlen=self.controls_config.get("temperament_history_maxlen", 5)
         )
-
-    def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None,
-                          curiosity_boost=None, restless_drop=None, melancholy_noise=None,
-                          conf_feedback_strength=None, temp_smoothing_factor=None, decay_rate=None):
-        """Adjust temperament parameters using the temperament system."""
-        self.temperament_system.adjust_temperament(
-            eager_threshold=eager_threshold,
-            sluggish_threshold=sluggish_threshold,
-            mood_influence=mood_influence,
-            curiosity_boost=curiosity_boost,
-            restless_drop=restless_drop,
-            melancholy_noise=melancholy_noise,
-            conf_feedback_strength=conf_feedback_strength,
-            temp_smoothing_factor=temp_smoothing_factor,
-            decay_rate=decay_rate
-        )
-
-    def set_global_blend(self, weight_cap=None, base_temp=None):
-        """Set global blend parameters."""
-        success = self.config_manager.set_global_blend(weight_cap, base_temp)
-        
-        if success:
-            if weight_cap is not None:
-                self.controls_config["scaffold_weight_cap"] = weight_cap
-                self.scaffold_weight = weight_cap
-            if base_temp is not None:
-                self.controls_config["base_temperature"] = base_temp
-                self.base_temperature = base_temp
-                
-            self.logger.record({
-                "event": "global_blend_updated",
-                "params": {
-                    "scaffold_weight_cap": weight_cap,
-                    "base_temperature": base_temp
-                },
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Global blend params updated: weight_cap={weight_cap}, base_temp={base_temp}")
 
     def train_step(self, batch):
         """Execute a single training step with scaffold context."""
