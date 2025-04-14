@@ -443,8 +443,9 @@ Non-AI: Adaptable for humans/fictional entities.
 8. Example File
 text
 
-# Soulprint
-Creator: Sovl (xAI)
+```
+Soulprint
+Creator: AN
 Created: 2025-04-14T09:00Z
 Language: en
 Consent: true
@@ -502,4 +503,4 @@ Hash: sha256:abc123...
 
 [X-Custom]
   X-Mood: Playful
-
+```
