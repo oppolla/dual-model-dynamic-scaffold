@@ -14,7 +14,6 @@ class MemoryManager:
     """
     Comprehensive memory management module for the SOVL system, handling token maps,
     dream memory, conversation history, scaffold context, and GPU memory health.
-    Designed for robust integration with sovl_main.py and future modularization.
     """
     def __init__(self, config_manager, device: torch.device, logger: Logger):
         self.config_manager = config_manager
