@@ -359,3 +359,59 @@ class TemperamentSystem:
             "lifecycle_stage": lifecycle_stage,
             "timestamp": time.time()
         })
+
+    @synchronized("_lock")
+    def compute_and_update(self, sleep_confidence_sum: float, sleep_confidence_count: int,
+                         data_exposure: float, lora_capacity: float,
+                         curiosity_pressure: Optional[float] = None) -> None:
+        """
+        Compute averages and update temperament state.
+
+        Args:
+            sleep_confidence_sum: Sum of sleep confidence scores
+            sleep_confidence_count: Number of sleep confidence scores
+            data_exposure: Current data exposure
+            lora_capacity: LoRA capacity
+            curiosity_pressure: Optional curiosity pressure (0.0-1.0)
+        """
+        try:
+            # Calculate average confidence
+            avg_confidence = safe_divide(
+                sleep_confidence_sum,
+                sleep_confidence_count,
+                default=0.5
+            )
+            
+            # Calculate lifecycle stage
+            lifecycle_stage = safe_divide(
+                data_exposure,
+                lora_capacity,
+                default=0.0
+            )
+            
+            # Update temperament
+            self.update_temperament(
+                confidence=avg_confidence,
+                lifecycle_stage=lifecycle_stage,
+                time_since_last=None,  # TODO: Add time tracking
+                curiosity_pressure=curiosity_pressure
+            )
+            
+            # Log the update
+            self._logger.record({
+                "event": "temperament_computed",
+                "avg_confidence": avg_confidence,
+                "lifecycle_stage": lifecycle_stage,
+                "curiosity_pressure": curiosity_pressure,
+                "new_score": self._score,
+                "mood_label": self.mood_label,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            self._logger.record({
+                "error": f"Temperament computation failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise

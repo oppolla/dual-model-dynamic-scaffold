@@ -598,32 +598,32 @@ class SOVLSystem:
                 state_hash=self.state.state_hash()
             )
 
-    def _update_temperament(self):
-        """Update temperament using the temperament system."""
-        avg_confidence = safe_divide(
-            self.state.sleep_confidence_sum,
-            self.state.sleep_confidence_count,
-            default=0.5
-        )
-        lifecycle_stage = safe_divide(
-            self.trainer.data_exposure,
-            self.trainer.lora_capacity,
-            default=0.0
-        )
-
-        self.temperament_system.update_temperament(
-            confidence=avg_confidence,
-            lifecycle_stage=lifecycle_stage,
-            time_since_last=None,  # TODO: Add time tracking
-            curiosity_pressure=self.curiosity_manager.pressure if self.curiosity_manager else None
-        )
-
-        # Update state with new temperament score
-        self.state.temperament_score = self.temperament_system.score
-        self.state.temperament_history = deque(
-            list(self.temperament_system._history),
-            maxlen=self.controls_config.get("temperament_history_maxlen", 5)
-        )
+    def _update_temperament(self) -> None:
+        """Update temperament based on current state."""
+        try:
+            # Get current state values
+            sleep_confidence_sum = self.state.sleep_confidence_sum
+            sleep_confidence_count = self.state.sleep_confidence_count
+            data_exposure = self.state.data_exposure
+            lora_capacity = self.state.lora_capacity
+            curiosity_pressure = self.curiosity_manager.get_pressure()
+            
+            # Compute and update temperament
+            self.temperament_system.compute_and_update(
+                sleep_confidence_sum=sleep_confidence_sum,
+                sleep_confidence_count=sleep_confidence_count,
+                data_exposure=data_exposure,
+                lora_capacity=lora_capacity,
+                curiosity_pressure=curiosity_pressure
+            )
+            
+            # Sync state with new temperament
+            self.state.temperament_score = self.temperament_system.score
+            self.state.mood_label = self.temperament_system.mood_label
+            
+        except Exception as e:
+            self.logger.error(f"Failed to update temperament: {str(e)}")
+            raise
 
     def train_step(self, batch: List[dict], dry_run: bool = False, dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
         """
