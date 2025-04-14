@@ -15,6 +15,9 @@ from sovl_config import ConfigManager, ConfigSchema
 from sovl_state import SOVLState
 from sovl_utils import safe_execute, NumericalGuard
 
+
+""" This is the future plugin manager of the SOVL System"""
+
 class PluginError(Exception):
     """Base exception for plugin-related errors."""
     pass
