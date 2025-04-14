@@ -490,6 +490,67 @@ class TrainingManager:
         metrics["loss"] = avg_loss
         return avg_loss, metrics
 
+class TrainingCallbacks:
+    """Handles training-related callbacks and logging."""
+    def __init__(self, trainer: 'SOVLTrainer'):
+        self.trainer = trainer
+        self.logger = trainer.logger
+        self.state = trainer.state
+
+    def on_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
+        """Handle training completion event."""
+        if self.state:
+            self.state.update_data_exposure(data_exposure)
+        self.logger({
+            "event": "training_complete",
+            "epoch": epoch,
+            "avg_loss": avg_loss,
+            "data_exposure": data_exposure,
+            "timestamp": time.time(),
+            "conversation_id": getattr(self.state, "conversation_id", "training"),
+            "state_hash": getattr(self.state, "state_hash", None)
+        })
+
+    def on_gestation_complete(self, batch_size: int, avg_loss: float):
+        """Handle gestation completion event."""
+        if self.state:
+            self.state.update_gestation_metrics(batch_size, avg_loss)
+        self.logger({
+            "event": "gestation_complete",
+            "batch_size": batch_size,
+            "avg_loss": avg_loss,
+            "timestamp": time.time(),
+            "conversation_id": getattr(self.state, "conversation_id", "training"),
+            "state_hash": getattr(self.state, "state_hash", None)
+        })
+
+    def on_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
+        """Handle dream completion event."""
+        if self.state:
+            self.state.update_dream_metrics(dream_prompt, is_novel, memory_count)
+        self.logger({
+            "event": "dream_complete",
+            "dream_prompt": dream_prompt,
+            "is_novel": is_novel,
+            "memory_count": memory_count,
+            "timestamp": time.time(),
+            "conversation_id": getattr(self.state, "conversation_id", "training"),
+            "state_hash": getattr(self.state, "state_hash", None)
+        })
+
+    def on_sleep_train_complete(self, batch_size: int, data_exposure: float):
+        """Handle sleep training completion event."""
+        if self.state:
+            self.state.update_sleep_metrics(batch_size, data_exposure)
+        self.logger({
+            "event": "sleep_train_complete",
+            "batch_size": batch_size,
+            "data_exposure": data_exposure,
+            "timestamp": time.time(),
+            "conversation_id": getattr(self.state, "conversation_id", "training"),
+            "state_hash": getattr(self.state, "state_hash", None)
+        })
+
 class SOVLTrainer:
     """Main trainer class coordinating training, dreaming, and lifecycle management."""
     def __init__(
@@ -513,12 +574,16 @@ class SOVLTrainer:
         self.best_valid_loss = float("inf")
         self.patience = 0
         self.scaffold_context = None
-        self.callbacks = {
-            "on_training_complete": None,
-            "on_gestation_complete": None,
-            "on_dream_complete": None,
-            "on_sleep_train_complete": None
-        }
+        
+        # Initialize callbacks
+        self.callbacks = TrainingCallbacks(self)
+        
+        # Register default callbacks
+        self.register_callback("on_training_complete", self.callbacks.on_training_complete)
+        self.register_callback("on_gestation_complete", self.callbacks.on_gestation_complete)
+        self.register_callback("on_dream_complete", self.callbacks.on_dream_complete)
+        self.register_callback("on_sleep_train_complete", self.callbacks.on_sleep_train_complete)
+        
         self.gestation_state = {"is_gestating": False, "progress": 0, "batch": [], "total_loss": 0.0, "steps": 0}
         self.sleep_state = {"progress": 0, "batch": [], "total_loss": 0.0, "steps": 0}
 

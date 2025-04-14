@@ -364,30 +364,6 @@ class SOVLSystem:
         )
         self.trainer.memory_check = self.check_memory_health
 
-        # Register callbacks
-        def log_curiosity_event(event_name: str, details: dict):
-            log_entry = {
-                "event": event_name,
-                "details": details,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            }
-            self.logger.record(log_entry)
-
-        self.trainer.register_callback("on_training_complete", lambda epoch, loss, exposure: log_curiosity_event(
-            "training_complete", {"epoch": epoch, "avg_loss": loss, "data_exposure": exposure}
-        ))
-        self.trainer.register_callback("on_gestation_complete", lambda batch_size, loss: log_curiosity_event(
-            "gestation_complete", {"batch_size": batch_size, "avg_loss": loss}
-        ))
-        self.trainer.register_callback("on_dream_complete", lambda prompt, novel, count: log_curiosity_event(
-            "dream_complete", {"dream_prompt": prompt, "is_novel": novel, "memory_count": count}
-        ))
-        self.trainer.register_callback("on_sleep_train_complete", lambda batch_size, exposure: log_curiosity_event(
-            "sleep_train_complete", {"batch_size": batch_size, "data_exposure": exposure}
-        ))
-
         # Initialize token map using ScaffoldManager
         self.scaffold_manager = ScaffoldManager(config_manager, self.logger)
         self.scaffold_token_mapper = None  # Will be initialized when needed
