@@ -1,15 +1,21 @@
 from typing import Optional, Dict, Any, Callable
 import traceback
 import time
-from collections import defaultdict
-import json
-import os
+from collections import defaultdict, deque
 from threading import Lock
 from sovl_logger import Logger
 from sovl_state import SOVLState
 from sovl_config import ConfigManager
 
 class ErrorHandler:
+    """Handles error logging, recovery, and monitoring for the SOVL system."""
+
+    _DEFAULT_CONFIG = {
+        "error_handling.max_history_per_error": 10,
+        "error_handling.critical_threshold": 5,
+        "error_handling.warning_threshold": 10,
+    }
+
     def __init__(
         self,
         config_manager: ConfigManager,
@@ -17,7 +23,7 @@ class ErrorHandler:
         error_log_file: str = "sovl_errors.jsonl",
         max_error_log_size_mb: int = 10,
         compress_old: bool = True,
-        state: Optional[SOVLState] = None
+        state: Optional[SOVLState] = None,
     ):
         """
         Initialize the error handler with configuration and logging dependencies.
@@ -36,42 +42,91 @@ class ErrorHandler:
         self.error_logger = Logger(
             log_file=error_log_file,
             max_size_mb=max_error_log_size_mb,
-            compress_old=compress_old
+            compress_old=compress_old,
         )
         self.lock = Lock()
         self.error_counts = defaultdict(int)
-        self.error_history = defaultdict(list)
-        self.max_history_per_error = config_manager.get(
-            "error_handling.max_history_per_error", 10, expected_type=int
+        self.error_history = defaultdict(lambda: deque(maxlen=self._get_max_history_per_error()))
+        self.severity_thresholds = self._load_severity_thresholds()
+        self.recovery_strategies = self._initialize_recovery_strategies()
+        self._validate_config()
+
+    def _get_max_history_per_error(self) -> int:
+        """Retrieve the maximum history per error type with a default fallback."""
+        return self.config_manager.get(
+            "error_handling.max_history_per_error",
+            self._DEFAULT_CONFIG["error_handling.max_history_per_error"],
+            expected_type=int,
         )
-        self.severity_thresholds = {
-            "critical": config_manager.get("error_handling.critical_threshold", 5, expected_type=int),
-            "warning": config_manager.get("error_handling.warning_threshold", 10, expected_type=int),
+
+    def _load_severity_thresholds(self) -> Dict[str, int]:
+        """Load severity thresholds from configuration with defaults."""
+        return {
+            "critical": self.config_manager.get(
+                "error_handling.critical_threshold",
+                self._DEFAULT_CONFIG["error_handling.critical_threshold"],
+                expected_type=int,
+            ),
+            "warning": self.config_manager.get(
+                "error_handling.warning_threshold",
+                self._DEFAULT_CONFIG["error_handling.warning_threshold"],
+                expected_type=int,
+            ),
         }
-        self.recovery_strategies = {
+
+    def _initialize_recovery_strategies(self) -> Dict[str, Callable]:
+        """Initialize recovery strategies for different contexts."""
+        return {
             "training": self._default_training_recovery,
             "generation": self._default_generation_recovery,
             "config_validation": self._default_config_recovery,
             "data_loading": self._default_data_recovery,
             "cross_attention": self._default_cross_attention_recovery,
         }
-        self._validate_config()
 
-    def _validate_config(self):
-        """Validate error handling configuration."""
-        required_keys = [
-            "error_handling.max_history_per_error",
-            "error_handling.critical_threshold",
-            "error_handling.warning_threshold",
+    def _validate_config(self) -> None:
+        """Validate required error handling configuration keys."""
+        required_keys = list(self._DEFAULT_CONFIG.keys())
+        missing_keys = [
+            key for key in required_keys if not self.config_manager.has(key)
         ]
-        try:
-            self.config_manager.validate_keys(required_keys)
-        except KeyError as e:
+        if missing_keys:
             self.logger.record({
-                "warning": f"Missing error handling config key: {str(e)}",
+                "warning": f"Missing error handling config keys: {', '.join(missing_keys)}",
                 "timestamp": time.time(),
-                "conversation_id": self.state.conversation_id if self.state else "init",
+                "conversation_id": self._get_conversation_id(),
             })
+
+    def _get_conversation_id(self) -> str:
+        """Get conversation ID from state or return default."""
+        return self.state.conversation_id if self.state else "init"
+
+    def _build_log_entry(
+        self,
+        error: Exception,
+        context: str,
+        phase: str,
+        conversation_id: str,
+        additional_info: Optional[Dict[str, Any]],
+        severity: str,
+    ) -> Dict[str, Any]:
+        """Build a standardized log entry for an error."""
+        error_type = type(error).__name__
+        state_hash = self.state.state_hash() if self.state else None
+        log_entry = {
+            "error": str(error),
+            "type": error_type,
+            "context": context,
+            "phase": phase,
+            "timestamp": time.time(),
+            "conversation_id": conversation_id,
+            "stack_trace": traceback.format_exc(),
+            "severity": severity,
+            "state_hash": state_hash,
+        }
+        if additional_info:
+            log_entry.update(additional_info)
+        return log_entry
 
     def record_error(
         self,
@@ -81,7 +136,7 @@ class ErrorHandler:
         conversation_id: str = "unknown",
         additional_info: Optional[Dict[str, Any]] = None,
         severity: str = "error",
-        reraise: bool = False
+        reraise: bool = False,
     ) -> None:
         """
         Record an error with context and log it.
@@ -97,43 +152,28 @@ class ErrorHandler:
         """
         with self.lock:
             error_type = type(error).__name__
-            error_msg = str(error)
             self.error_counts[error_type] += 1
-            state_hash = self.state.state_hash() if self.state else None
 
-            log_entry = {
-                "error": error_msg,
-                "type": error_type,
-                "context": context,
-                "phase": phase,
-                "timestamp": time.time(),
-                "conversation_id": conversation_id,
-                "stack_trace": traceback.format_exc(),
-                "severity": severity,
-                "state_hash": state_hash,
-            }
-            if additional_info:
-                log_entry.update(additional_info)
+            log_entry = self._build_log_entry(
+                error, context, phase, conversation_id, additional_info, severity
+            )
 
             # Update error history
             self.error_history[error_type].append(log_entry)
-            if len(self.error_history[error_type]) > self.max_history_per_error:
-                self.error_history[error_type].pop(0)
 
-            # Log to error-specific logger
+            # Log to error-specific and main loggers
             self.error_logger.record(log_entry)
-            # Log to main logger with severity
             self.logger.record({
-                severity: error_msg,
+                severity: log_entry["error"],
                 "context": context,
                 "phase": phase,
-                "timestamp": time.time(),
+                "timestamp": log_entry["timestamp"],
                 "conversation_id": conversation_id,
                 "error_type": error_type,
             })
 
-            # Check if error exceeds severity threshold
-            if self.error_counts[error_type] >= self.severity_thresholds.get("critical", 5):
+            # Check for critical errors
+            if self.error_counts[error_type] >= self.severity_thresholds["critical"]:
                 self._handle_critical_error(error_type, context, phase)
 
             if reraise:
@@ -141,20 +181,20 @@ class ErrorHandler:
 
     def handle_error(
         self,
-        error: Exception,
+        error: Optional[Exception],
         context: str,
         phase: str,
         recovery_fn: Optional[Callable] = None,
         default_recovery_value: Any = None,
         conversation_id: str = "unknown",
         additional_info: Optional[Dict[str, Any]] = None,
-        severity: str = "error"
+        severity: str = "error",
     ) -> Any:
         """
         Handle an error by logging it and applying a recovery strategy.
 
         Args:
-            error: The exception instance.
+            error: The exception instance (None if executing recovery_fn directly).
             context: Context of the error.
             phase: Specific phase.
             recovery_fn: Custom recovery function to execute.
@@ -166,19 +206,23 @@ class ErrorHandler:
         Returns:
             Result of the recovery function or default_recovery_value.
         """
-        self.record_error(
-            error=error,
-            context=context,
-            phase=phase,
-            conversation_id=conversation_id,
-            additional_info=additional_info,
-            severity=severity,
+        if error:
+            self.record_error(
+                error=error,
+                context=context,
+                phase=phase,
+                conversation_id=conversation_id,
+                additional_info=additional_info,
+                severity=severity,
+            )
+
+        # Select recovery function
+        recovery_fn = recovery_fn or self.recovery_strategies.get(
+            context, lambda e, c, p: default_recovery_value
         )
 
-        # Apply recovery strategy
-        recovery_fn = recovery_fn or self.recovery_strategies.get(context, lambda e, c, p: default_recovery_value)
         try:
-            return recovery_fn(error, context, phase)
+            return recovery_fn(error or Exception("No error provided"), context, phase)
         except Exception as recovery_error:
             self.record_error(
                 error=recovery_error,
@@ -186,19 +230,18 @@ class ErrorHandler:
                 phase=f"{phase}_recovery",
                 conversation_id=conversation_id,
                 severity="critical",
-                additional_info={"original_error": str(error)},
+                additional_info={"original_error": str(error) if error else None},
             )
             return default_recovery_value
 
-    def _handle_critical_error(self, error_type: str, context: str, phase: str):
+    def _handle_critical_error(self, error_type: str, context: str, phase: str) -> None:
         """Handle critical errors that exceed thresholds."""
         self.logger.record({
             "critical": f"Error type {error_type} exceeded threshold in {context}/{phase}",
             "timestamp": time.time(),
-            "conversation_id": self.state.conversation_id if self.state else "init",
+            "conversation_id": self._get_conversation_id(),
             "error_count": self.error_counts[error_type],
         })
-        # Example: Trigger system pause or reset
         if self.state:
             self.state.is_sleeping = True
             self.logger.record({
@@ -250,11 +293,12 @@ class ErrorHandler:
                 "total_errors": sum(self.error_counts.values()),
                 "error_types": dict(self.error_counts),
                 "recent_errors": {
-                    error_type: history[-5:] for error_type, history in self.error_history.items()
+                    error_type: list(history)[-5:]
+                    for error_type, history in self.error_history.items()
                 },
             }
 
-    def clear_error_history(self):
+    def clear_error_history(self) -> None:
         """Clear error counts and history."""
         with self.lock:
             self.error_counts.clear()
