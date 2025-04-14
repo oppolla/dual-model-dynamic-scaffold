@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Callable, Union, Tuple
+from typing import List, Optional, Callable, Union, Tuple, Dict, Any
 import torch
 import torch.nn.functional as F
 import time
@@ -61,6 +61,19 @@ class TrainingConfig:
     dream_temperament_on: bool = True
     confidence_history_maxlen: int = 5
     temperament_history_maxlen: int = 5
+    curiosity_weight_ignorance: float = 0.0
+    curiosity_weight_novelty: float = 1.0
+    curiosity_pressure_threshold: float = 0.9
+    curiosity_pressure_drop: float = 0.5
+    curiosity_novelty_threshold_spontaneous: float = 0.5
+    curiosity_novelty_threshold_response: float = 1.0
+    curiosity_silence_threshold: float = 5.0
+    curiosity_question_cooldown: float = 30.0
+    curiosity_queue_maxlen: int = 5
+    curiosity_max_new_tokens: int = 12
+    curiosity_base_temperature: float = 0.5
+    curiosity_temperament_influence: float = 0.6
+    curiosity_top_k: int = 10
 
     def __post_init__(self):
         if self.metrics_to_track is None:
@@ -82,6 +95,19 @@ class TrainingConfig:
         assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
         assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
         assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
+        assert 0.5 <= self.curiosity_novelty_threshold_spontaneous <= 1.0, "Spontaneous threshold must be in [0.5, 1.0]"
+        assert 0.5 <= self.curiosity_novelty_threshold_response <= 1.0, "Response threshold must be in [0.5, 1.0]"
+        assert 0.5 <= self.curiosity_pressure_threshold <= 0.9, "Pressure threshold must be in [0.5, 0.9]"
+        assert 0.1 <= self.curiosity_pressure_drop <= 0.5, "Pressure drop must be in [0.1, 0.5]"
+        assert 5.0 <= self.curiosity_silence_threshold <= 60.0, "Silence threshold must be in [5.0, 60.0]"
+        assert 30.0 <= self.curiosity_question_cooldown <= 120.0, "Question cooldown must be in [30.0, 120.0]"
+        assert 5 <= self.curiosity_queue_maxlen <= 20, "Queue maxlen must be in [5, 20]"
+        assert 0.0 <= self.curiosity_weight_ignorance <= 1.0, "Ignorance weight must be in [0.0, 1.0]"
+        assert 0.0 <= self.curiosity_weight_novelty <= 1.0, "Novelty weight must be in [0.0, 1.0]"
+        assert 5 <= self.curiosity_max_new_tokens <= 12, "Max new tokens must be in [5, 12]"
+        assert 0.5 <= self.curiosity_base_temperature <= 1.5, "Base temperature must be in [0.5, 1.5]"
+        assert 0.1 <= self.curiosity_temperament_influence <= 0.6, "Temperament influence must be in [0.1, 0.6]"
+        assert 10 <= self.curiosity_top_k <= 50, "Top k must be in [10, 50]"
 
 @dataclass 
 class DreamMemoryConfig:
@@ -234,6 +260,56 @@ class SOVLTrainer:
         self.sleep_total_loss = 0.0
         self.sleep_steps = 0
 
+        # Initialize training configuration
+        self.training_config = {
+            "learning_rate": config.learning_rate,
+            "grad_accum_steps": config.grad_accum_steps,
+            "weight_decay": 0.01,
+            "total_steps": 1000,  # Placeholder, computed dynamically
+            "max_grad_norm": 1.0,
+            "use_amp": (device.type == "cuda"),
+            "max_patience": config.max_patience,
+            "batch_size": config.batch_size,
+            "max_epochs": config.max_epochs,
+            "validate_every_n_steps": 100,
+            "checkpoint_interval": 1000,
+            "checkpoint_path": "checkpoints/sovl_trainer",
+            "scheduler_type": "linear",
+            "cosine_min_lr": 1e-6,
+            "warmup_ratio": 0.1,
+            "dropout_rate": config.dropout_rate,
+            "max_seq_length": config.max_seq_length,
+            "metrics_to_track": ["loss", "accuracy", "confidence"],
+            "enable_gestation": config.enable_gestation,
+            "enable_sleep_training": config.enable_sleep_training,
+            "enable_lifecycle_weighting": config.enable_lifecycle_weighting,
+            "lifecycle_capacity_factor": config.lifecycle_capacity_factor,
+            "lifecycle_curve": config.lifecycle_curve,
+            "sleep_conf_threshold": config.sleep_conf_threshold,
+            "sleep_log_min": config.sleep_log_min,
+            "accumulation_steps": config.accumulation_steps,
+            "exposure_gain_eager": config.exposure_gain_eager,
+            "exposure_gain_default": config.exposure_gain_default,
+            "dream_memory_weight": config.dream_memory_weight,
+            "enable_dreaming": config.enable_dreaming,
+            "repetition_n": 3,
+            "sigmoid_scale": config.sigmoid_scale,
+            "sigmoid_shift": config.sigmoid_shift,
+            "curiosity_weight_ignorance": config.curiosity_weight_ignorance,
+            "curiosity_weight_novelty": config.curiosity_weight_novelty,
+            "curiosity_pressure_threshold": config.curiosity_pressure_threshold,
+            "curiosity_pressure_drop": config.curiosity_pressure_drop,
+            "curiosity_novelty_threshold_spontaneous": config.curiosity_novelty_threshold_spontaneous,
+            "curiosity_novelty_threshold_response": config.curiosity_novelty_threshold_response,
+            "curiosity_silence_threshold": config.curiosity_silence_threshold,
+            "curiosity_question_cooldown": config.curiosity_question_cooldown,
+            "curiosity_queue_maxlen": config.curiosity_queue_maxlen,
+            "curiosity_max_new_tokens": config.curiosity_max_new_tokens,
+            "curiosity_base_temperature": config.curiosity_base_temperature,
+            "curiosity_temperament_influence": config.curiosity_temperament_influence,
+            "curiosity_top_k": config.curiosity_top_k
+        }
+
         # Callback system for trainer events
         self.callbacks = {
             "on_training_complete": None,
@@ -344,114 +420,83 @@ class SOVLTrainer:
 
     def train_step(
         self,
-        batch: dict,
-        scaffold_context: Optional[torch.Tensor] = None,
-        grad_clip: bool = True,
-        loss_weight_fn: Optional[Callable] = None,
-        dry_run: bool = False,
-        memory_check: Optional[Callable] = None
-    ) -> Tuple[Optional[float], Optional[float]]:
-        """Robust training step with error handling and validation."""
-        # Input validation
-        required_keys = {"input_ids", "attention_mask", "labels", "prompt"}
-        if not all(k in batch for k in required_keys):
-            self.logger({
-                "event": "invalid_batch",
-                "missing_keys": str(required_keys - set(batch.keys())),
-                "timestamp": time.time()
-            })
-            return None, None
-
+        batch: Dict[str, torch.Tensor],
+        scaffold_context: Optional[Dict[str, torch.Tensor]] = None,
+        accumulation_steps: int = 1
+    ) -> Dict[str, float]:
+        """
+        Execute a single training step with optional scaffold context.
+        
+        Args:
+            batch: Dictionary containing input tensors
+            scaffold_context: Optional scaffold context for the training step
+            accumulation_steps: Number of gradient accumulation steps
+            
+        Returns:
+            Dictionary containing loss and other metrics
+        """
         try:
-            # Memory check if provided
-            if memory_check:
-                memory_check()
-
-            # Device setup
-            device = self.device
-            self.scaffold_context = scaffold_context.to(device) if scaffold_context is not None else None
-
-            # Dry run validation
-            if dry_run:
-                with torch.no_grad():
-                    self.model.eval()
-                    with torch.autocast(
-                        device_type=device.type,
-                        dtype=torch.float16 if self.config.use_amp else torch.bfloat16
-                    ):
-                        inputs = {
-                            "input_ids": batch["input_ids"].to(device),
-                            "attention_mask": batch["attention_mask"].to(device)
-                        }
-                        outputs = self.model(**inputs)
-                        loss = self.loss_fn(outputs.logits, batch["labels"].to(device))
-                    return float(loss.item()), None
-
-            # Main training
+            # Set model to training mode
             self.model.train()
-            with torch.autocast(
-                device_type=device.type,
-                dtype=torch.float16 if self.config.use_amp else torch.bfloat16
-            ):
-                # Forward pass
-                inputs = {
-                    "input_ids": batch["input_ids"].to(device),
-                    "attention_mask": batch["attention_mask"].to(device)
-                }
-                outputs = self.model(**inputs)
-
-                # Loss calculation
-                labels = batch["labels"].to(device)
-                loss = self.loss_fn(outputs.logits, labels)
-
-                # Loss validation
-                if torch.isnan(loss) or torch.isinf(loss):
-                    raise ValueError(f"Invalid loss value: {loss.item()}")
-
-                # Weight application
-                weight = float(loss_weight_fn(batch)) if loss_weight_fn else 1.0
-                safe_weight = min(max(weight, 0.5), 2.0)  # Clamped to reasonable range
-                loss *= safe_weight
-
-                if self.config.enable_lifecycle_weighting:
-                    lifecycle_weight = min(self.get_life_curve_weight(), 1.0)
-                    loss *= lifecycle_weight
-
-            # Backward pass
-            (loss / self.config.grad_accum_steps).backward()
-
-            # Gradient update
-            if (self.global_step + 1) % self.config.grad_accum_steps == 0:
-                if grad_clip:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=self.config.max_grad_norm
-                    )
+            
+            # Move batch to device
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            
+            # Prepare scaffold context if provided
+            if scaffold_context:
+                scaffold_context = {k: v.to(self.device) for k, v in scaffold_context.items()}
+            
+            # Forward pass with scaffold context
+            with torch.cuda.amp.autocast(enabled=self.training_config["use_amp"]):
+                outputs = self.model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    scaffold_context=scaffold_context
+                )
+                
+                # Calculate loss
+                loss = self.loss_fn(outputs.logits, batch["labels"])
+                
+                # Apply lifecycle weighting if enabled
+                if self.training_config["enable_lifecycle_weighting"]:
+                    weight = self.loss_weight_fn(self.global_step)
+                    loss = loss * weight
+            
+            # Backward pass with gradient accumulation
+            loss = loss / accumulation_steps
+            loss.backward()
+            
+            # Step optimizer if accumulation is complete
+            if (self.global_step + 1) % accumulation_steps == 0:
+                # Clip gradients
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.training_config["max_grad_norm"]
+                )
+                
+                # Step optimizer and scheduler
                 self.optimizer.step()
                 if self.scheduler:
                     self.scheduler.step()
                 self.optimizer.zero_grad()
-
-            # Metrics calculation
-            confidence = None
-            if not dry_run and ("accuracy" in self.config.metrics_to_track 
-                               or "confidence" in self.config.metrics_to_track):
-                with torch.no_grad():
-                    probs = torch.softmax(outputs.logits, dim=-1)
-                    confidence = float(torch.max(probs, dim=-1).values.mean())
-
+            
+            # Update global step
             self.global_step += 1
-            return float(loss.item()), confidence
-
+            
+            # Calculate metrics
+            metrics = {
+                "loss": loss.item() * accumulation_steps,
+                "learning_rate": self.optimizer.param_groups[0]["lr"]
+            }
+            
+            # Log metrics
+            self.logger(f"Training step {self.global_step}: loss={metrics['loss']:.4f}, lr={metrics['learning_rate']:.6f}")
+            
+            return metrics
+            
         except Exception as e:
-            self.logger({
-                "event": "train_step_failed",
-                "error": str(e),
-                "step": self.global_step,
-                "timestamp": time.time()
-            })
-            self.optimizer.zero_grad()
-            return None, None
+            self.logger(f"Error in training step: {str(e)}")
+            raise
 
     def validate(self, data: Union[List[dict], 'DataLoader'], scaffold_provider: Optional[Callable] = None) -> Tuple[float, dict]:
         """Validate model on provided data, returning loss and metrics."""
@@ -1146,37 +1191,101 @@ class SOVLTrainer:
         assert 0.1 <= self.curiosity_temperament_influence <= 0.6, "Temperament influence must be in [0.1, 0.6]"
         assert 10 <= self.curiosity_top_k <= 50, "Top k must be in [10, 50]"
 
-def collate_batch(batch: List[dict], pad_token_id: int, max_seq_length: int, tokenizer) -> dict:
-    """Collate batch of prompt-completion pairs into tensors."""
-    prompts = [item["prompt"] for item in batch]
-    completions = [item["completion"] for item in batch]
-    full_texts = [p + c for p, c in zip(prompts, completions)]
-
-    encodings = tokenizer(
-        full_texts,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=max_seq_length
-    )
-    input_ids = encodings["input_ids"]
-    attention_mask = encodings["attention_mask"]
-
-    labels = input_ids.clone()
-    labels[labels == pad_token_id] = -100
-    prompt_encodings = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=max_seq_length
-    )
-    prompt_mask = prompt_encodings["attention_mask"]
-    labels = torch.where(prompt_mask.bool(), -100, input_ids)
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
-        "prompt": prompts
-    }
+    def run_training_cycle(
+        self,
+        train_data: List[Dict[str, torch.Tensor]],
+        validation_data: Optional[List[Dict[str, torch.Tensor]]] = None,
+        scaffold_provider: Optional[Callable] = None,
+        max_epochs: Optional[int] = None,
+        early_stopping_patience: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Run a complete training cycle with optional validation and early stopping.
+        
+        Args:
+            train_data: List of training batches
+            validation_data: Optional list of validation batches
+            scaffold_provider: Optional function to provide scaffold context
+            max_epochs: Optional override for maximum number of epochs
+            early_stopping_patience: Number of epochs to wait before early stopping
+            
+        Returns:
+            Dictionary containing training results and metrics
+        """
+        try:
+            # Initialize training state
+            best_val_loss = float('inf')
+            epochs_without_improvement = 0
+            training_history = []
+            
+            # Determine number of epochs
+            num_epochs = max_epochs or self.training_config["max_epochs"]
+            
+            # Training loop
+            for epoch in range(num_epochs):
+                epoch_metrics = {
+                    "train_loss": 0.0,
+                    "val_loss": float('inf'),
+                    "learning_rate": self.optimizer.param_groups[0]["lr"]
+                }
+                
+                # Training phase
+                self.model.train()
+                for batch in train_data:
+                    # Get scaffold context if provider is available
+                    scaffold_context = None
+                    if scaffold_provider:
+                        scaffold_context = scaffold_provider(batch)
+                    
+                    # Training step
+                    step_metrics = self.train_step(
+                        batch=batch,
+                        scaffold_context=scaffold_context,
+                        accumulation_steps=self.training_config["grad_accum_steps"]
+                    )
+                    
+                    # Update epoch metrics
+                    epoch_metrics["train_loss"] += step_metrics["loss"]
+                
+                # Calculate average training loss
+                epoch_metrics["train_loss"] /= len(train_data)
+                
+                # Validation phase if validation data is provided
+                if validation_data:
+                    val_loss = self.validate(validation_data, scaffold_provider)
+                    epoch_metrics["val_loss"] = val_loss
+                    
+                    # Early stopping check
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        epochs_without_improvement = 0
+                    else:
+                        epochs_without_improvement += 1
+                        if epochs_without_improvement >= early_stopping_patience:
+                            self.logger(f"Early stopping triggered after {epoch + 1} epochs")
+                            break
+                
+                # Log epoch metrics
+                self.logger(f"Epoch {epoch + 1}/{num_epochs}: "
+                          f"train_loss={epoch_metrics['train_loss']:.4f}, "
+                          f"val_loss={epoch_metrics['val_loss']:.4f}, "
+                          f"lr={epoch_metrics['learning_rate']:.6f}")
+                
+                # Store epoch metrics
+                training_history.append(epoch_metrics)
+                
+                # Call training callbacks
+                for callback in self.training_callbacks:
+                    callback(epoch, epoch_metrics)
+            
+            # Return training results
+            return {
+                "training_history": training_history,
+                "best_val_loss": best_val_loss,
+                "final_epoch": len(training_history),
+                "early_stopped": epochs_without_improvement >= early_stopping_patience
+            }
+            
+        except Exception as e:
+            self.logger(f"Error in training cycle: {str(e)}")
+            raise
