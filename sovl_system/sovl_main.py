@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -454,41 +454,32 @@ class SOVLSystem:
             cross_attention_injector=self.cross_attention_injector
         )
 
-    def _validate_config(self):
-        """Validate required configuration keys and layer settings."""
-        config_snapshot = OrderedDict(sorted(self.config_manager.get_state()["config"].items()))
+    def _validate_config(self, model_config: Optional[Any] = None) -> bool:
+        """
+        Validate system configuration.
+
+        Args:
+            model_config: Optional model configuration for layer validation
+
+        Returns:
+            bool: True if validation succeeds, False otherwise
+        """
         try:
-            self.config_manager.validate_keys([
-                "core_config.base_model_name",
-                "core_config.scaffold_model_name",
-                "training_config.learning_rate",
-                "curiosity_config.enable_curiosity",
-                "cross_attn_config.memory_weight"
-            ])
-            cross_attn_layers = self.core_config.get("cross_attn_layers", [5, 7])
-            if not isinstance(cross_attn_layers, list):
-                raise ValueError("core_config.cross_attn_layers must be a list!")
-            if not self.core_config.get("use_dynamic_layers", False):
-                base_config = AutoConfig.from_pretrained(self.core_config["base_model_name"])
-                invalid_layers = [l for l in cross_attn_layers if not (0 <= l < base_config.num_hidden_layers)]
-                if invalid_layers:
-                    raise ValueError(f"Invalid cross_attn_layers: {invalid_layers} for {base_config.num_hidden_layers} layers.")
-            if self.core_config.get("layer_selection_mode", "balanced") == "custom":
-                custom_layers = self.core_config.get("custom_layers", [])
-                base_config = AutoConfig.from_pretrained(self.core_config["base_model_name"])
-                invalid_custom = [l for l in custom_layers if not (0 <= l < base_config.num_hidden_layers)]
-                if invalid_custom:
-                    raise ValueError(f"Invalid custom_layers: {invalid_custom} for {self.core_config['base_model_name']}")
-            self.logger.record({
-                "event": "config_validation",
-                "status": "success",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "config_snapshot": config_snapshot,
-                "state_hash": self.state.state_hash() if hasattr(self, "state") else None
-            })
+            # Delegate validation to ConfigManager
+            if not self.config_manager.validate_config(model_config):
+                return False
+
+            # Additional system-specific validation can be added here if needed
+            return True
+
         except Exception as e:
-            self.error_handler.handle_config_validation_error(e, config_snapshot)
+            self.logger.record({
+                "error": f"Configuration validation failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": "validate"
+            })
+            return False
 
     def _verify_cross_attention_injection(self) -> bool:
         """Verify that cross-attention layers were properly injected."""
