@@ -1,7 +1,7 @@
 import torch
 import time
 from collections import deque
-from typing import Optional, Dict, Any, List, Union, Callable
+from typing import Optional, Dict, Any, List, Union, Callable, Tuple
 import contextlib
 import traceback
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -11,22 +11,8 @@ from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
 
 class GenerationManager:
-    """Manages text generation, scaffold integration, and memory handling for the SOVL system.
-
-    Args:
-        config_manager: Configuration manager instance.
-        base_model (AutoModelForCausalLM): Primary language model.
-        scaffolds (List[AutoModelForCausalLM]): List of scaffold models for cross-attention.
-        base_tokenizer (AutoTokenizer): Tokenizer for the base model.
-        scaffold_tokenizer (AutoTokenizer): Tokenizer for the scaffold model.
-        state (SOVLState): System state manager.
-        logger (Logger): Logger for general events.
-        error_logger (Logger): Logger for errors.
-        cross_attention_injector: Injector for cross-attention layers.
-        scaffold_manager: Manager for scaffold token mapping.
-        temperament: Temperament system for parameter adjustments.
-        curiosity_manager: Curiosity manager for question generation (optional).
-    """
+    """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
+    
     def __init__(
         self,
         config_manager: Any,
@@ -42,6 +28,8 @@ class GenerationManager:
         temperament: Any,
         curiosity_manager: Any = None,
     ):
+        """Initialize GenerationManager with configuration and model components."""
+        # Core components
         self.config_manager = config_manager
         self.base_model = base_model
         self.scaffolds = scaffolds
@@ -55,116 +43,101 @@ class GenerationManager:
         self.temperament = temperament
         self.curiosity_manager = curiosity_manager
 
-        # Cache config sections
-        self.controls_config = config_manager.get_section("controls_config")
-        self.curiosity_config = config_manager.get_section("curiosity_config")
-        self.training_config = config_manager.get_section("training_config")
+        # Configuration sections
+        self._load_config_sections()
 
-        # Initialize parameters
+        # Device and memory settings
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", scaffold_tokenizer.unk_token_id)
         self.use_token_map_memory = self.controls_config.get("use_token_map_memory", True)
         self.dynamic_cross_attn_mode = self.controls_config.get("dynamic_cross_attn_mode", None)
 
-        # Generation parameters
+        # Generation settings
         self.max_retries = self.controls_config.get("max_generation_retries", 3)
         self.memory_threshold = self.controls_config.get("memory_threshold", 0.85)
-        self.generation_callbacks = {
+        self.generation_callbacks: Dict[str, List[Callable]] = {
             "pre_generate": [],
             "post_generate": []
-        }  # Callbacks for extensibility
+        }
 
-    def register_callback(self, stage: str, callback: Callable):
-        """Register a callback for generation stages.
+    def _load_config_sections(self) -> None:
+        """Load configuration sections from config manager."""
+        self.controls_config = self.config_manager.get_section("controls_config")
+        self.curiosity_config = self.config_manager.get_section("curiosity_config")
+        self.training_config = self.config_manager.get_section("training_config")
 
-        Args:
-            stage (str): Stage to attach callback ('pre_generate' or 'post_generate').
-            callback (Callable): Function to call during the stage.
-        """
+    def register_callback(self, stage: str, callback: Callable) -> None:
+        """Register a callback for generation stages."""
         if stage in self.generation_callbacks:
             self.generation_callbacks[stage].append(callback)
         else:
-            self.error_logger.record({
-                "error": f"Invalid callback stage: {stage}",
-                "timestamp": time.time(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Invalid callback stage: {stage}",
+                context="register_callback"
+            )
 
     def check_memory_health(self) -> bool:
-        """Check GPU memory health and clean up if necessary.
+        """Check GPU memory usage and clean up if necessary."""
+        if not torch.cuda.is_available():
+            return True
 
-        Returns:
-            bool: True if memory is within safe limits, False otherwise.
-        """
         try:
-            if torch.cuda.is_available():
-                memory_stats = torch.cuda.memory_stats()
-                current_memory = memory_stats["allocated_bytes.all.current"]
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                memory_ratio = current_memory / total_memory
-                self.logger.record({
-                    "event": "memory_health_check",
+            memory_stats = torch.cuda.memory_stats()
+            current_memory = memory_stats["allocated_bytes.all.current"]
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            memory_ratio = current_memory / total_memory
+
+            self._log_event(
+                event="memory_health_check",
+                data={
                     "memory_ratio": memory_ratio,
                     "current_memory": current_memory,
-                    "total_memory": total_memory,
-                    "timestamp": time.time(),
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash(),
-                })
-                if memory_ratio > self.memory_threshold:
-                    torch.cuda.empty_cache()
-                    self.logger.record({
-                        "event": "memory_cleanup",
-                        "reason": "threshold_exceeded",
-                        "timestamp": time.time(),
-                        "conversation_id": self.state.history.conversation_id,
-                        "state_hash": self.state.state_hash(),
-                    })
-                    return False
-                return True
+                    "total_memory": total_memory
+                }
+            )
+
+            if memory_ratio > self.memory_threshold:
+                torch.cuda.empty_cache()
+                self._log_event(
+                    event="memory_cleanup",
+                    data={"reason": "threshold_exceeded"}
+                )
+                return False
             return True
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Memory health check failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Memory health check failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="check_memory_health"
+            )
             return False
 
     def _handle_error_prompt(self, error_msg: str, temp_history: ConversationHistory) -> str:
-        """Generate a response to a system error with retry mechanism.
+        """Generate a response to a system error with retry mechanism."""
+        original_history = self.state.history
+        self.state.history = ConversationHistory(
+            maxlen=self.controls_config.get("conversation_history_maxlen", 10)
+        )
 
-        Args:
-            error_msg (str): Description of the error.
-            temp_history (ConversationHistory): Temporary history to restore after handling.
-
-        Returns:
-            str: Error response or fallback message.
-        """
         try:
-            self.state.history = ConversationHistory(maxlen=self.controls_config.get("conversation_history_maxlen", 10))
             for attempt in range(self.max_retries):
                 try:
                     response = self.generate(
-                        f"System error detected: {error_msg} What happened?",
+                        prompt=f"System error detected: {error_msg} What happened?",
                         max_new_tokens=self.curiosity_config.get("max_new_tokens", 60),
                         temperature=self.controls_config.get("base_temperature", 0.7) + 0.2 * (attempt + 1),
                         top_k=self.curiosity_config.get("top_k", 50),
                         do_sample=True,
                     )
-                    self.logger.record({
-                        "prompt": f"System error detected: {error_msg} What happened?",
-                        "response": response,
-                        "timestamp": time.time(),
-                        "conversation_id": self.state.history.conversation_id,
-                        "is_error_prompt": True,
-                        "confidence_score": 0.5,
-                        "attempt": attempt + 1,
-                        "state_hash": self.state.state_hash(),
-                    })
+                    self._log_event(
+                        event="error_prompt_handled",
+                        data={
+                            "prompt": f"System error detected: {error_msg} What happened?",
+                            "response": response,
+                            "attempt": attempt + 1,
+                            "confidence_score": 0.5
+                        }
+                    )
                     return response
                 except torch.cuda.OutOfMemoryError:
                     if attempt < self.max_retries - 1:
@@ -172,38 +145,25 @@ class GenerationManager:
                         continue
                     raise
                 except Exception as e:
-                    self.error_logger.record({
-                        "error": f"Error handling prompt attempt {attempt + 1}: {str(e)}",
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc(),
-                        "conversation_id": self.state.history.conversation_id,
-                        "state_hash": self.state.state_hash(),
-                    })
+                    self._log_error(
+                        error=f"Error handling prompt attempt {attempt + 1}: {str(e)}",
+                        stack_trace=traceback.format_exc(),
+                        context="handle_error_prompt"
+                    )
                     if attempt == self.max_retries - 1:
                         raise
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Failed to handle error prompt: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Failed to handle error prompt: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="handle_error_prompt"
+            )
+            return "Unable to process error prompt after retries."
         finally:
-            self.state.history = temp_history
-        return "Unable to process error prompt after retries."
+            self.state.history = original_history
 
     def has_repetition(self, output_ids: torch.Tensor, n: int = 3, threshold: float = 0.9) -> bool:
-        """Check for repetition in generated output with similarity threshold.
-
-        Args:
-            output_ids (torch.Tensor): Generated token IDs.
-            n (int): Length of sequence to check for repetition.
-            threshold (float): Cosine similarity threshold for near-repetitions.
-
-        Returns:
-            bool: True if repetition is detected, False otherwise.
-        """
+        """Check for repetition in generated output."""
         try:
             ids = output_ids.tolist()
             special_ids = {
@@ -213,46 +173,46 @@ class GenerationManager:
                 self.base_tokenizer.unk_token_id,
             }
             filtered = [i for i in ids if i not in special_ids]
+
             for i in range(len(filtered) - 2 * n):
-                seq1 = filtered[i : i + n]
-                seq2 = filtered[i + n : i + 2 * n]
+                seq1 = filtered[i: i + n]
+                seq2 = filtered[i + n: i + 2 * n]
                 if len(seq1) == len(seq2) and seq1 == seq2:
                     return True
                 if len(seq1) == len(seq2):
-                    embeddings1 = self.base_model.get_input_embeddings()(torch.tensor(seq1, device=self.device))
-                    embeddings2 = self.base_model.get_input_embeddings()(torch.tensor(seq2, device=self.device))
-                    similarity = torch.cosine_similarity(embeddings1.mean(dim=0), embeddings2.mean(dim=0), dim=0)
+                    embeddings1 = self.base_model.get_input_embeddings()(
+                        torch.tensor(seq1, device=self.device)
+                    )
+                    embeddings2 = self.base_model.get_input_embeddings()(
+                        torch.tensor(seq2, device=self.device)
+                    )
+                    similarity = torch.cosine_similarity(
+                        embeddings1.mean(dim=0), embeddings2.mean(dim=0), dim=0
+                    )
                     if similarity > threshold:
                         return True
             return False
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Repetition check failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Repetition check failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="has_repetition"
+            )
             return False
 
-    def tokenize_and_map(self, prompts: Union[str, List[str]], max_length: Optional[int] = None, padding: str = 'max_length') -> Dict[str, torch.Tensor]:
-        """Tokenize prompts and map to scaffold tokens with batch processing.
-
-        Args:
-            prompts (Union[str, List[str]]): Input prompt(s) to tokenize.
-            max_length (Optional[int]): Maximum sequence length.
-            padding (str): Padding strategy for tokenization.
-
-        Returns:
-            Dict[str, torch.Tensor]: Dictionary with input_ids and attention_mask.
-        """
+    def tokenize_and_map(
+        self,
+        prompts: Union[str, List[str]],
+        max_length: Optional[int] = None,
+        padding: str = 'max_length'
+    ) -> Dict[str, torch.Tensor]:
+        """Tokenize prompts and map to scaffold tokens."""
         try:
             max_length = max_length or self.training_config.get("max_seq_length", 128)
-            if isinstance(prompts, str):
-                prompts = [prompts]
+            prompts = [prompts] if isinstance(prompts, str) else prompts
 
             batch_size = self.training_config.get("batch_size", 1)
-            input_batches = [prompts[i : i + batch_size] for i in range(0, len(prompts), batch_size)]
+            input_batches = [prompts[i: i + batch_size] for i in range(0, len(prompts), batch_size)]
             all_input_ids = []
             all_attention_masks = []
 
@@ -265,7 +225,9 @@ class GenerationManager:
                     max_length=max_length,
                 ).to(self.device)
                 scaffold_input_ids = self.scaffold_manager.map_sequence(inputs.input_ids)
-                scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
+                scaffold_attention_mask = (
+                    scaffold_input_ids != self.scaffold_tokenizer.pad_token_id
+                ).int()
                 all_input_ids.append(scaffold_input_ids)
                 all_attention_masks.append(scaffold_attention_mask)
 
@@ -274,26 +236,20 @@ class GenerationManager:
                 'attention_mask': torch.cat(all_attention_masks, dim=0),
             }
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Tokenization failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Tokenization failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="tokenize_and_map"
+            )
             raise
 
     def get_scaffold_hidden_states(self, scaffold_inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Get hidden states from scaffold model with optimized memory usage.
-
-        Args:
-            scaffold_inputs (Dict[str, torch.Tensor]): Input tensors for scaffold model.
-
-        Returns:
-            torch.Tensor: Hidden states from the scaffold model.
-        """
+        """Get hidden states from scaffold model."""
         try:
-            with torch.autocast(device_type=self.device.type, dtype=torch.float16 if self.device.type == 'cuda' else torch.bfloat16):
+            with torch.autocast(
+                device_type=self.device.type,
+                dtype=torch.float16 if self.device.type == 'cuda' else torch.bfloat16
+            ):
                 scaffold_outputs = self.scaffolds[0](
                     **{k: v for k, v in scaffold_inputs.items() if k in ['input_ids', 'attention_mask']},
                     output_hidden_states=True,
@@ -305,18 +261,16 @@ class GenerationManager:
                 )
                 return hidden_states.detach()
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Scaffold hidden states failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Scaffold hidden states failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="get_scaffold_hidden_states"
+            )
             raise
 
     @contextlib.contextmanager
     def _scaffold_context(self, scaffold_hidden_states: torch.Tensor):
-        """Manage scaffold context with safe tensor handling and memory monitoring."""
+        """Manage scaffold context with memory monitoring."""
         try:
             with self.state.memory_lock:
                 if torch.cuda.is_available():
@@ -328,8 +282,8 @@ class GenerationManager:
         finally:
             self._clear_scaffold_cache()
 
-    def _clear_scaffold_cache(self):
-        """Clear scaffold-related caches safely with memory optimization."""
+    def _clear_scaffold_cache(self) -> None:
+        """Clear scaffold-related caches with memory optimization."""
         with self.state.memory_lock:
             try:
                 if hasattr(self, '_temp_scaffold_context') and self._temp_scaffold_context is not None:
@@ -353,28 +307,19 @@ class GenerationManager:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-                self.logger.record({
-                    "event": "scaffold_cache_cleared",
-                    "timestamp": time.time(),
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash(),
-                })
+                self._log_event(
+                    event="scaffold_cache_cleared",
+                    data={}
+                )
             except Exception as e:
-                self.error_logger.record({
-                    "error": f"Failed to clear scaffold cache: {str(e)}",
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc(),
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash(),
-                })
+                self._log_error(
+                    error=f"Failed to clear scaffold cache: {str(e)}",
+                    stack_trace=traceback.format_exc(),
+                    context="clear_scaffold_cache"
+                )
 
-    def _update_token_map_memory(self, prompt: str, confidence: float):
-        """Update token map weights with validation.
-
-        Args:
-            prompt (str): Input prompt to update token map.
-            confidence (float): Confidence score for the generation.
-        """
+    def _update_token_map_memory(self, prompt: str, confidence: float) -> None:
+        """Update token map weights."""
         if not self.use_token_map_memory:
             return
         try:
@@ -385,24 +330,14 @@ class GenerationManager:
                 memory_decay_rate=self.controls_config.get("memory_decay_rate", 0.95),
             )
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Token map update failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Token map update failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="update_token_map_memory"
+            )
 
     def prepare_for_training(self, batch: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Prepare data for training (placeholder for training integration).
-
-        Args:
-            batch (List[Dict[str, str]]): Batch of training data.
-
-        Returns:
-            Dict[str, Any]: Prepared data for training.
-        """
-        # Placeholder for training-related preprocessing
+        """Prepare data for training."""
         try:
             prompts = [item['prompt'] for item in batch]
             scaffold_inputs = self.tokenize_and_map(prompts)
@@ -412,65 +347,183 @@ class GenerationManager:
                 "prompts": prompts
             }
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Training preparation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_error(
+                error=f"Training preparation failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="prepare_for_training"
+            )
             raise
 
-    @torch.no_grad()
-    def generate(self, prompts: Union[str, List[str]], max_new_tokens: int = 50, scaffold_weight: Optional[float] = None, **kwargs) -> Union[str, List[str]]:
-        """Generate response(s) for the given prompt(s) with enhanced error handling and efficiency.
+    def _log_event(self, event: str, data: Dict[str, Any]) -> None:
+        """Log an event with common metadata."""
+        self.logger.record({
+            "event": event,
+            **data,
+            "timestamp": time.time(),
+            "conversation_id": self.state.history.conversation_id,
+            "state_hash": self.state.state_hash(),
+        })
 
-        Args:
-            prompts (Union[str, List[str]]): Input prompt(s) to generate responses for.
-            max_new_tokens (int): Maximum number of new tokens to generate.
-            scaffold_weight (Optional[float]): Weight for scaffold influence.
-            **kwargs: Additional generation parameters (temperature, top_k, do_sample, etc.).
+    def _log_error(self, error: str, context: str, stack_trace: Optional[str] = None) -> None:
+        """Log an error with common metadata."""
+        self.error_logger.record({
+            "error": error,
+            "context": context,
+            "timestamp": time.time(),
+            "stack_trace": stack_trace or traceback.format_exc(),
+            "conversation_id": self.state.history.conversation_id,
+            "state_hash": self.state.state_hash(),
+        })
 
-        Returns:
-            Union[str, List[str]]: Generated response(s).
-        """
-        single_prompt = isinstance(prompts, str)
-        if single_prompt:
-            prompts = [prompts]
+    def _prepare_generation_params(self, max_new_tokens: int, scaffold_weight: Optional[float], **kwargs) -> Dict[str, Any]:
+        """Prepare and validate generation parameters."""
+        return {
+            "max_new_tokens": max_new_tokens or self.curiosity_config.get("max_new_tokens", 50),
+            "scaffold_weight": scaffold_weight,
+            "temperature": kwargs.get("temperature", self.controls_config.get("base_temperature", 0.7)),
+            "top_k": kwargs.get("top_k", self.curiosity_config.get("top_k", 30)),
+            "do_sample": kwargs.get("do_sample", False),
+            "prompt_count": 1 if isinstance(kwargs.get("prompts"), str) else len(kwargs.get("prompts", [])),
+        }
 
-        responses = []
-        generated_ids = []
+    def _compute_dynamic_factor(self) -> Optional[torch.Tensor]:
+        """Compute dynamic cross-attention factor based on configuration."""
+        if not self.controls_config.get("enable_dynamic_cross_attention", False) or not self.dynamic_cross_attn_mode:
+            return None
+
         try:
-            max_new_tokens = max_new_tokens or self.curiosity_config.get("max_new_tokens", 50)
-            generation_params = {
-                "prompt_count": len(prompts),
-                "max_new_tokens": max_new_tokens,
-                "scaffold_weight": scaffold_weight,
-                "temperature": kwargs.get("temperature", self.controls_config.get("base_temperature", 0.7)),
-                "top_k": kwargs.get("top_k", self.curiosity_config.get("top_k", 30)),
-                "do_sample": kwargs.get("do_sample", False),
-            }
+            last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
+            if self.dynamic_cross_attn_mode == 'confidence':
+                return torch.tensor(last_conf, device=self.device, dtype=torch.float)
+            elif self.dynamic_cross_attn_mode == 'temperament':
+                return torch.tensor(self.temperament.score, device=self.device, dtype=torch.float)
+            return None
+        except Exception as e:
+            self._log_error(
+                error=f"Failed to compute dynamic factor: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="compute_dynamic_factor"
+            )
+            return None
+
+    def _prepare_dream_memory(self) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
+        """Prepare dream memory tensors if available."""
+        dream_memory_info = {"used": False, "tensor_count": 0, "shapes": []}
+        memory_tensors = None
+        dream_memory_weight = self.controls_config.get("dream_memory_weight", 0.1)
+
+        if self.state.dream_memory and dream_memory_weight > 0:
+            try:
+                with self.state.memory_lock:
+                    dream_tensors, dream_weights = zip(*self.state.dream_memory)
+                    dream_memory_info["tensor_count"] = len(dream_tensors)
+                    dream_memory_info["shapes"] = [list(t.shape) for t in dream_tensors]
+                    for tensor in dream_tensors:
+                        if tensor.shape[-1] != self.state.hidden_size:
+                            raise ValueError(
+                                f"Dream tensor shape {tensor.shape} mismatches hidden_size {self.state.hidden_size}"
+                            )
+                    dream_tensors = torch.stack([t.detach().to(self.device) for t in dream_tensors])
+                    dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=self.device)
+                    memory_tensors = torch.sum(dream_tensors * dream_weights.unsqueeze(-1), dim=0) / dream_weights.sum()
+                    dream_memory_info["used"] = True
+            except Exception as e:
+                dream_memory_info["error"] = str(e)
+                self._log_error(
+                    error=f"Dream memory preparation failed: {str(e)}",
+                    stack_trace=traceback.format_exc(),
+                    context="prepare_dream_memory"
+                )
+
+        return memory_tensors, dream_memory_info
+
+    def _handle_repetition(self, seq: torch.Tensor, seq_ids: List[int], outputs: Any) -> List[int]:
+        """Handle detected repetition in generated sequence."""
+        if self.controls_config.get("enable_repetition_check", True) and self.has_repetition(seq):
+            original_text = self.base_tokenizer.decode(seq_ids, skip_special_tokens=True)
+            for j in range(len(seq_ids) - 6):
+                if all(seq_ids[j + k] == seq_ids[j + k + 3] for k in range(3)):
+                    seq_ids = seq_ids[:j + 3]
+                    break
+            self._log_event(
+                event="repetition_detected",
+                data={
+                    "original_text": original_text,
+                    "truncated_at": j + 3
+                }
+            )
+        return seq_ids
+
+    def _update_curiosity(self, prompt: str, response: str, confidence_score: float) -> str:
+        """Update curiosity system and append questions if needed."""
+        if not self.curiosity_config.get("enable_curiosity", True) or not self.curiosity_manager:
+            return response
+
+        try:
+            self.state.curiosity.prune_old_questions(self.curiosity_config.get("question_timeout", 3600.0))
+            self.curiosity_manager.update_pressure(
+                self.temperament.score,
+                confidence_score,
+                0.0,
+                self.state.curiosity.context_vector,
+            )
+            if self.curiosity_manager.should_erupt():
+                question = self.curiosity_manager.generate_question(
+                    state=self.state,
+                    tokenizer=self.base_tokenizer,
+                    model=self.scaffolds[0],
+                    prompt=prompt,
+                )
+                if question and isinstance(question, str) and question.strip():
+                    response += f" {question}"
+                    self.state.curiosity.update_question_history(question, time.time())
+                    self._log_event(
+                        event="curiosity_question",
+                        data={
+                            "prompt": question,
+                            "response": "",
+                            "confidence_score": 0.0,
+                            "is_system_question": True
+                        }
+                    )
+        except Exception as e:
+            self._log_error(
+                error=f"Curiosity eruption failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="update_curiosity"
+            )
+        return response
+
+    @torch.no_grad()
+    def generate(
+        self,
+        prompts: Union[str, List[str]],
+        max_new_tokens: int = 50,
+        scaffold_weight: Optional[float] = None,
+        **kwargs
+    ) -> Union[str, List[str]]:
+        """Generate response(s) for the given prompt(s)."""
+        single_prompt = isinstance(prompts, str)
+        prompts = [prompts] if single_prompt else prompts
+        responses = []
+
+        try:
+            generation_params = self._prepare_generation_params(max_new_tokens, scaffold_weight, prompts=prompts, **kwargs)
             for callback in self.generation_callbacks["pre_generate"]:
                 callback(generation_params)
 
-            self.logger.record({
-                "event": "generation_initiated",
-                "params": generation_params,
-                "timestamp": time.time(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_event(event="generation_initiated", data={"params": generation_params})
 
             if not self.check_memory_health():
-                self.logger.record({
-                    "warning": "Memory health check failed, attempting cleanup",
-                    "timestamp": time.time(),
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash(),
-                })
+                self._log_event(
+                    event="memory_warning",
+                    data={"warning": "Memory health check failed, attempting cleanup"}
+                )
 
             start_time = time.time()
-            base_inputs = self.base_tokenizer(prompts, return_tensors='pt', padding=True, truncation=True).to(self.device)
+            base_inputs = self.base_tokenizer(
+                prompts, return_tensors='pt', padding=True, truncation=True
+            ).to(self.device)
             input_ids = base_inputs['input_ids']
             input_lengths = base_inputs['attention_mask'].sum(dim=1)
 
@@ -483,57 +536,16 @@ class GenerationManager:
             )
             kwargs['temperature'] = temperature
 
-            dynamic_factor = None
-            if self.controls_config.get("enable_dynamic_cross_attention", False) and self.dynamic_cross_attn_mode:
-                try:
-                    last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
-                    if self.dynamic_cross_attn_mode == 'confidence':
-                        dynamic_factor = torch.tensor(last_conf, device=self.device, dtype=torch.float)
-                    elif self.dynamic_cross_attn_mode == 'temperament':
-                        dynamic_factor = torch.tensor(self.temperament.score, device=self.device, dtype=torch.float)
-                except Exception as e:
-                    self.logger.record({
-                        "warning": f"Failed to compute dynamic factor: {str(e)}",
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc(),
-                        "conversation_id": self.state.history.conversation_id,
-                        "state_hash": self.state.state_hash(),
-                    })
-
-            memory_tensors = None
-            dream_memory_info = {"used": False, "tensor_count": 0, "shapes": []}
-            dream_memory_weight = self.controls_config.get("dream_memory_weight", 0.1)
-            if self.state.dream_memory and dream_memory_weight > 0:
-                try:
-                    with self.state.memory_lock:
-                        dream_tensors, dream_weights = zip(*self.state.dream_memory)
-                        dream_memory_info["tensor_count"] = len(dream_tensors)
-                        dream_memory_info["shapes"] = [list(t.shape) for t in dream_tensors]
-                        for tensor in dream_tensors:
-                            if tensor.shape[-1] != self.state.hidden_size:
-                                raise ValueError(f"Dream tensor shape {tensor.shape} mismatches hidden_size {self.state.hidden_size}")
-                        dream_tensors = torch.stack([t.detach().to(self.device) for t in dream_tensors])
-                        dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=self.device)
-                        memory_tensors = torch.sum(dream_tensors * dream_weights.unsqueeze(-1), dim=0) / dream_weights.sum()
-                        dream_memory_info["used"] = True
-                except Exception as e:
-                    self.logger.record({
-                        "warning": f"Dream memory preparation failed: {str(e)}",
-                        "timestamp": time.time(),
-                        "dream_memory_len": len(self.state.dream_memory),
-                        "dream_tensor_shapes": [tuple(t.shape) for t, _ in self.state.dream_memory] if self.state.dream_memory else [],
-                        "state_hash": self.state.state_hash(),
-                    })
-                    dream_memory_info["error"] = str(e)
+            dynamic_factor = self._compute_dynamic_factor()
+            memory_tensors, dream_memory_info = self._prepare_dream_memory()
 
             with self._scaffold_context(scaffold_hidden_states):
                 self.cross_attention_injector.set_influence(model=self.base_model, weight=scaffold_weight)
-                chunk_size = self.training_config.get("generation_chunk_size", 512)
                 for attempt in range(self.max_retries):
                     try:
                         outputs = self.base_model.generate(
                             input_ids,
-                            max_new_tokens=max_new_tokens,
+                            max_new_tokens=generation_params["max_new_tokens"],
                             pad_token_id=self.base_tokenizer.pad_token_id,
                             eos_token_id=self.base_tokenizer.eos_token_id,
                             temperature=temperature * (1 + 0.1 * attempt),
@@ -541,7 +553,7 @@ class GenerationManager:
                             output_scores=True,
                             scaffold_context=scaffold_hidden_states,
                             memory_tensors=memory_tensors,
-                            memory_weight=dream_memory_weight,
+                            memory_weight=self.controls_config.get("dream_memory_weight", 0.1),
                             dynamic_factor=dynamic_factor,
                             **kwargs,
                         )
@@ -553,13 +565,11 @@ class GenerationManager:
                             continue
                         raise
                     except Exception as e:
-                        self.error_logger.record({
-                            "error": f"Generation attempt {attempt + 1} failed: {str(e)}",
-                            "timestamp": time.time(),
-                            "stack_trace": traceback.format_exc(),
-                            "conversation_id": self.state.history.conversation_id,
-                            "state_hash": self.state.state_hash(),
-                        })
+                        self._log_error(
+                            error=f"Generation attempt {attempt + 1} failed: {str(e)}",
+                            stack_trace=traceback.format_exc(),
+                            context="generate"
+                        )
                         if attempt == self.max_retries - 1:
                             raise
 
@@ -567,6 +577,7 @@ class GenerationManager:
                     prompt = prompts[i]
                     seq_ids = seq[input_length:].tolist()
                     confidence_score = 0.5
+
                     if self.controls_config.get("enable_confidence_tracking", True):
                         try:
                             confidence_score = calculate_confidence(outputs.scores, seq_ids)
@@ -575,79 +586,26 @@ class GenerationManager:
                                 self.state.sleep_confidence_count += 1
                                 self.state.confidence_history.append(confidence_score)
                         except Exception as e:
-                            self.logger.record({
-                                "warning": f"Confidence calculation failed: {str(e)}",
-                                "timestamp": time.time(),
-                                "stack_trace": traceback.format_exc(),
-                                "conversation_id": self.state.history.conversation_id,
-                                "state_hash": self.state.state_hash(),
-                            })
-
-                    if self.controls_config.get("enable_repetition_check", True) and self.has_repetition(seq):
-                        original_text = self.base_tokenizer.decode(seq_ids, skip_special_tokens=True)
-                        for j in range(len(seq_ids) - 6):
-                            if all(seq_ids[j + k] == seq_ids[j + k + 3] for k in range(3)):
-                                seq_ids = seq_ids[:j + 3]
-                                break
-                        self.logger.record({
-                            "warning": "Repetition detected",
-                            "original_text": original_text,
-                            "truncated_at": j + 3,
-                            "timestamp": time.time(),
-                            "conversation_id": self.state.history.conversation_id,
-                            "state_hash": self.state.state_hash(),
-                        })
-
-                    response = self.base_tokenizer.decode(seq_ids, skip_special_tokens=True)
-
-                    if self.curiosity_config.get("enable_curiosity", True) and self.curiosity_manager:
-                        try:
-                            self.state.curiosity.prune_old_questions(self.curiosity_config.get("question_timeout", 3600.0))
-                            self.curiosity_manager.update_pressure(
-                                self.temperament.score,
-                                confidence_score,
-                                0.0,
-                                self.state.curiosity.context_vector,
+                            self._log_error(
+                                error=f"Confidence calculation failed: {str(e)}",
+                                stack_trace=traceback.format_exc(),
+                                context="generate_confidence"
                             )
-                            if self.curiosity_manager.should_erupt():
-                                q = self.curiosity_manager.generate_question(
-                                    state=self.state,
-                                    tokenizer=self.base_tokenizer,
-                                    model=self.scaffolds[0],
-                                    prompt=prompt,
-                                )
-                                if q and isinstance(q, str) and q.strip():
-                                    response += f" {q}"
-                                    self.state.curiosity.update_question_history(q, time.time())
-                                    self.logger.record({
-                                        "prompt": q,
-                                        "response": "",
-                                        "timestamp": time.time(),
-                                        "conversation_id": self.state.history.conversation_id,
-                                        "confidence_score": 0.0,
-                                        "is_system_question": True,
-                                        "state_hash": self.state.state_hash(),
-                                    })
-                        except Exception as e:
-                            self.logger.record({
-                                "warning": f"Curiosity eruption failed: {str(e)}",
-                                "timestamp": time.time(),
-                                "stack_trace": traceback.format_exc(),
-                                "conversation_id": self.state.history.conversation_id,
-                                "state_hash": self.state.state_hash(),
-                            })
 
-                    log_entry = {
-                        "prompt": prompt,
-                        "response": response,
-                        "timestamp": start_time,
-                        "conversation_id": self.state.history.conversation_id,
-                        "confidence_score": confidence_score,
-                        "generation_params": generation_params,
-                        "dream_memory_info": dream_memory_info,
-                        "state_hash": self.state.state_hash(),
-                    }
-                    self.logger.record(log_entry)
+                    seq_ids = self._handle_repetition(seq, seq_ids, outputs)
+                    response = self.base_tokenizer.decode(seq_ids, skip_special_tokens=True)
+                    response = self._update_curiosity(prompt, response, confidence_score)
+
+                    self._log_event(
+                        event="generation_completed",
+                        data={
+                            "prompt": prompt,
+                            "response": response,
+                            "confidence_score": confidence_score,
+                            "generation_params": generation_params,
+                            "dream_memory_info": dream_memory_info
+                        }
+                    )
                     self.state.history.add_message(prompt, response)
 
                     if self.use_token_map_memory:
@@ -662,73 +620,54 @@ class GenerationManager:
             return responses[0] if single_prompt else responses
 
         except torch.cuda.OutOfMemoryError as oom:
-            error_details = {
-                "error": "CUDA out of memory",
-                "type": "OOM",
-                "prompt": prompts[0][:200] if prompts else "",
-                "timestamp": time.time(),
-                "memory_stats": {
-                    "allocated": torch.cuda.memory_allocated(),
-                    "reserved": torch.cuda.memory_reserved(),
-                    "max_allocated": torch.cuda.max_memory_allocated(),
-                } if torch.cuda.is_available() else None,
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            }
-            self.error_logger.record(error_details)
+            self._log_error(
+                error="CUDA out of memory",
+                context="generate_oom",
+                stack_trace=traceback.format_exc(),
+                additional_data={
+                    "type": "OOM",
+                    "prompt": prompts[0][:200] if prompts else "",
+                    "memory_stats": {
+                        "allocated": torch.cuda.memory_allocated(),
+                        "reserved": torch.cuda.memory_reserved(),
+                        "max_allocated": torch.cuda.max_memory_allocated(),
+                    } if torch.cuda.is_available() else None
+                }
+            )
             torch.cuda.empty_cache()
 
             if self.controls_config.get("enable_error_listening", True):
-                try:
-                    return self._handle_error_prompt("GPU memory error occurred", self.state.history)
-                except Exception as e:
-                    self.error_logger.record({
-                        "error": f"Failed to handle OOM error: {str(e)}",
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc(),
-                        "conversation_id": self.state.history.conversation_id,
-                        "state_hash": self.state.state_hash(),
-                    })
-                    return "System is low on memory - please try a shorter prompt"
+                return self._handle_error_prompt("GPU memory error occurred", self.state.history)
             return "System is low on memory - please try a shorter prompt"
 
         except Exception as e:
-            error_details = {
-                "error": str(e),
-                "type": type(e).__name__,
-                "prompt": prompts[0][:200] if prompts else "",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            }
-            self.error_logger.record(error_details)
+            self._log_error(
+                error=f"Generation error: {str(e)}",
+                context="generate",
+                stack_trace=traceback.format_exc(),
+                additional_data={
+                    "type": type(e).__name__,
+                    "prompt": prompts[0][:200] if prompts else ""
+                }
+            )
 
             if self.controls_config.get("enable_error_listening", True):
                 try:
                     return self._handle_error_prompt(f"Generation error: {str(e)}", self.state.history)
                 except Exception as inner_e:
-                    self.error_logger.record({
-                        "error": f"Failed to handle generation error: {str(inner_e)}",
-                        "original_error": str(e),
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc(),
-                        "conversation_id": self.state.history.conversation_id,
-                        "state_hash": self.state.state_hash(),
-                    })
+                    self._log_error(
+                        error=f"Failed to handle generation error: {str(inner_e)}",
+                        context="generate_error_handling",
+                        stack_trace=traceback.format_exc(),
+                        additional_data={"original_error": str(e)}
+                    )
             return "An error occurred during generation"
 
         finally:
-            if generated_ids:
+            if 'generated_ids' in locals():
                 del generated_ids
             if 'outputs' in locals():
                 del outputs
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            self.logger.record({
-                "event": "generate_cleanup",
-                "timestamp": time.time(),
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash(),
-            })
+            self._log_event(event="generate_cleanup", data={})
