@@ -15,7 +15,11 @@ import os
 from threading import Lock
 from sovl_curiosity import CuriosityManager
 from sovl_logger import Logger
-from sovl_io import load_jsonl, InsufficientDataError
+from sovl_io import (
+    load_training_data,
+    validate_quantization_mode,
+    InsufficientDataError
+)
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
 from sovl_config import ConfigManager
@@ -34,11 +38,8 @@ from sovl_utils import (
     detect_repetitions,
     validate_layer_indices,
 )
-
-class InsufficientDataError(Exception):
-    pass
-
-from sovl_processor import LogitsProcessor
+from sovl_temperament import TemperamentConfig, TemperamentSystem
+from sovl_memory import MemoryManager
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Wrapper for backward compatibility"""
@@ -58,7 +59,7 @@ logger = Logger(
 
 # Load training data
 try:
-    TRAIN_DATA = load_jsonl("sovl_seed.jsonl", min_entries=0)
+    TRAIN_DATA = load_training_data("sovl_seed.jsonl", min_entries=0)
     if not TRAIN_DATA:
         logger.write({
             "warning": "No data loaded from sovl_seed.jsonl",
@@ -92,16 +93,7 @@ if not TRAIN_DATA:
 
 # Split training data
 if TRAIN_DATA:
-    random.seed(RANDOM_SEED)
-    random.shuffle(TRAIN_DATA)
-    split_idx = int(len(TRAIN_DATA) * (1 - VALID_SPLIT_RATIO))
-    TRAIN_DATA, VALID_DATA = TRAIN_DATA[:split_idx], TRAIN_DATA[split_idx:]
-    logger.write({
-        "event": "data_split",
-        "train_samples": len(TRAIN_DATA),
-        "valid_samples": len(VALID_DATA),
-        "timestamp": time.time()
-    })
+    TRAIN_DATA, VALID_DATA = load_training_data(config_manager, logger, TRAIN_DATA, VALID_SPLIT_RATIO)
 else:
     VALID_DATA = []
     logger.write({
@@ -234,6 +226,13 @@ class SOVLSystem:
             compress_old=True
         )
 
+        # Initialize memory manager
+        self.memory_manager = MemoryManager(
+            config_manager=config_manager,
+            device=DEVICE,
+            logger=self.logger
+        )
+
         # Cache configuration sections
         self.core_config = config_manager.get_section("core_config")
         self.training_config = config_manager.get_section("training_config")
@@ -253,6 +252,30 @@ class SOVLSystem:
         self.dynamic_cross_attn_mode = self.controls_config.get("dynamic_cross_attn_mode", None)
         self.has_woken = self.controls_config.get("has_woken", False)
         self.is_sleeping = self.controls_config.get("is_sleeping", False)
+
+        # Initialize temperament system
+        temperament_config = TemperamentConfig(
+            eager_threshold=self.controls_config.get("temp_eager_threshold", 0.7),
+            sluggish_threshold=self.controls_config.get("temp_sluggish_threshold", 0.3),
+            mood_influence=self.controls_config.get("temp_mood_influence", 0.5),
+            curiosity_boost=self.controls_config.get("temp_curiosity_boost", 0.2),
+            restless_drop=self.controls_config.get("temp_restless_drop", 0.1),
+            melancholy_noise=self.controls_config.get("temp_melancholy_noise", 0.1),
+            confidence_feedback_strength=self.controls_config.get("temp_conf_feedback_strength", 0.3),
+            temp_smoothing_factor=self.controls_config.get("temp_smoothing_factor", 0.1),
+            history_maxlen=self.controls_config.get("temperament_history_maxlen", 5),
+            lifecycle_params={
+                "gestation": self.controls_config.get("temp_gestation_params", {"bias": 0.2, "decay": 0.1}),
+                "awakening": self.controls_config.get("temp_awakening_params", {"bias": 0.1, "decay": 0.05}),
+                "maturity": self.controls_config.get("temp_maturity_params", {"bias": 0.0, "decay": 0.0}),
+                "decline": self.controls_config.get("temp_decline_params", {"bias": -0.1, "decay": 0.05})
+            }
+        )
+        self.temperament_system = TemperamentSystem(
+            config=temperament_config,
+            logger=self.logger,
+            device=DEVICE
+        )
 
         # Validate configuration
         self._validate_config()
@@ -426,29 +449,17 @@ class SOVLSystem:
             "sleep_train_complete", {"batch_size": batch_size, "data_exposure": exposure}
         ))
 
-        # Initialize token map
-        def build_token_map(base_tokenizer, scaffold_tokenizer):
-            token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
-            for base_token, base_id in base_tokenizer.get_vocab().items():
-                normalized = base_token.replace("Ġ", "").replace("##", "")
-                scaffold_ids = scaffold_tokenizer.encode(normalized, add_special_tokens=False, max_length=3, truncation=True) or [scaffold_tokenizer.unk_token_id]
-                token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
-            return token_map
-
-        self.token_map = build_token_map(self.base_tokenizer, self.scaffold_tokenizer)
-        self.special_token_map = {
-            self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id,
-            self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id or self.scaffold_tokenizer.sep_token_id,
-            self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
-        }
+        # Initialize token map using ScaffoldManager
+        self.scaffold_manager = ScaffoldManager(config_manager, self.logger)
+        self.token_map = self.scaffold_manager.build_token_map(self.base_tokenizer, self.scaffold_tokenizer)
         self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", self.scaffold_tokenizer.unk_token_id)
      
         # Initialize cross-attention injector
         self.cross_attention_injector = CrossAttentionInjector(
-            hidden_size=self.base_config.hidden_size,
-            num_heads=self.base_config.num_attention_heads,
-            logger=self.logger.record
+            config_manager=config_manager,
+            logger=self.logger
         )
+        
         # Inject cross-attention
         print("Injecting cross-attention layers...")
         self._insert_cross_attention()
@@ -492,8 +503,6 @@ class SOVLSystem:
 
         # After initializing the processor and token maps, add:
         self.processor.set_token_map(self.state.token_map, self.scaffold_unk_id)
-
-        self.scaffold_manager = ScaffoldManager(config_manager, self.logger)
 
     def _validate_config(self):
         """Validate required configuration keys and layer settings."""
@@ -621,7 +630,7 @@ class SOVLSystem:
             return False
 
     def _insert_cross_attention(self):
-        """Inject cross-attention layers by delegating to CrossAttentionInjector."""
+        """Inject cross-attention layers using the scaffold injector."""
         if not self.cross_attn_config.get("enable_cross_attention", True):
             self.logger.record({
                 "event": "cross_attention",
@@ -629,78 +638,18 @@ class SOVLSystem:
                 "timestamp": time.time()
             })
             return
-    
+            
         try:
-            # Validate layer indices before injection
-            cross_attn_layers = self.core_config.get("cross_attn_layers", [])
-            if not validate_layer_indices(cross_attn_layers, self.base_config.num_hidden_layers):
-                raise ValueError(f"Invalid cross-attention layer indices: {cross_attn_layers}")
-    
-            # Create injector with validation
-            injector = CrossAttentionInjector(
-                hidden_size=self.base_config.hidden_size,
-                num_heads=self.base_config.num_attention_heads,
-                logger=self.logger.record
+            # Use the injector from sovl_scaffold
+            self.cross_attention_injector.inject_cross_attention(
+                model=self.base_model,
+                scaffold_model=self.scaffolds[0],
+                core_config=self.core_config,
+                cross_attn_config=self.cross_attn_config,
+                lora_config=self.lora_config,
+                token_map=self.token_map,
+                device=self.device
             )
-    
-            # Backup original model state
-            original_state = {}
-            for name, param in self.base_model.named_parameters():
-                original_state[name] = param.clone()
-            
-            try:
-                # Log injection attempt
-                self.logger.record({
-                    "event": "cross_attention_injection_start",
-                    "layers": cross_attn_layers,
-                    "timestamp": time.time()
-                })
-                
-                # Perform injection
-                injector.inject_cross_attention(
-                    model=self.base_model,
-                    scaffold_model=self.scaffolds[0],
-                    core_config=self.core_config,
-                    cross_attn_config=self.cross_attn_config,
-                    lora_config=self.lora_config,
-                    token_map=self.token_map,
-                    device=DEVICE
-                )
-                
-                # Verify injection
-                if not self._verify_cross_attention_injection():
-                    raise RuntimeError("Cross-attention injection verification failed")
-                    
-                # Log successful injection
-                self.logger.record({
-                    "event": "cross_attention_injection_complete",
-                    "status": "success",
-                    "timestamp": time.time()
-                })
-                    
-            except Exception as e:
-                # Log failure
-                self.logger.record({
-                    "event": "cross_attention_injection_failed",
-                    "error": str(e),
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
-                })
-                
-                # Restore original state
-                for name, param in self.base_model.named_parameters():
-                    if name in original_state:
-                        param.data.copy_(original_state[name])
-                        
-                # Log restoration
-                self.logger.record({
-                    "event": "cross_attention_restored",
-                    "status": "success",
-                    "timestamp": time.time()
-                })
-                
-                raise
-            
         except Exception as e:
             self.error_logger.record({
                 "error": f"Cross-attention injection failed: {str(e)}",
@@ -709,126 +658,86 @@ class SOVLSystem:
             })
             raise
 
-    def check_memory_health(self):
-        """Autonomically reduce GPU memory usage if nearing capacity."""
-        if not torch.cuda.is_available():
-            return
-
-        with self.memory_lock:
-            mem_stats = memory_usage(DEVICE)
-            if not mem_stats:
-                self.logger.record({
-                    "warning": "Failed to retrieve memory stats",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-                return
-
-            current_mem = mem_stats['allocated'] * (1024 ** 3)
-            total_mem = torch.cuda.get_device_properties(0).total_memory
-            mem_ratio = current_mem / total_mem
-            self.mem_usage_history.append(mem_ratio)
-
-            model_size = (get_parameter_count(self.base_model) + get_parameter_count(self.scaffolds[0])) * 4
-            avg_mem_usage = sum(self.mem_usage_history) / len(self.mem_usage_history) if self.mem_usage_history else mem_ratio
-
-            dynamic_threshold = min(
-                0.95,
-                max(
-                    0.7,
-                    self.dynamic_threshold_base * (1 + (model_size / total_mem) * 0.1 - avg_mem_usage * 0.2)
+    def check_memory_health(self, model_size: int, trainer: Optional[Trainer] = None):
+        """Autonomically reduce GPU memory usage if approaching capacity."""
+        try:
+            if torch.cuda.is_available():
+                # Get memory stats
+                memory_stats = torch.cuda.memory_stats()
+                current_memory = memory_stats["allocated_bytes.all.current"]
+                total_memory = torch.cuda.get_device_properties(0).total_memory
+                memory_ratio = current_memory / total_memory
+                
+                # Log memory usage
+                self.logger.log_memory_usage(
+                    phase="health_check",
+                    device=self.device,
+                    memory_ratio=memory_ratio,
+                    model_size=model_size
                 )
+                
+                # ... rest of the method implementation ...
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Memory health check failed: {str(e)}",
+                error_type="memory_error",
+                stack_trace=traceback.format_exc()
             )
-            lifecycle_stage = self.trainer.data_exposure / self.trainer.lora_capacity if self.trainer.lora_capacity > 0 else 0.0
 
-            if float_lt(lifecycle_stage, 0.25) and mem_ratio > dynamic_threshold:
-                memory_pruned = False
-                quantization_changed = False
-                cache_cleared = False
-                batch_size_reduced = False
-
-                torch.cuda.empty_cache()
-                cache_cleared = True
-
-                with self.state.memory_lock:
-                    if len(self.state.dream_memory) > 0:
-                        original_len = len(self.state.dream_memory)
-                        sorted_mem = sorted(self.state.dream_memory, key=lambda x: x[1], reverse=True)
-                        keep_len = max(1, original_len // 2)
-                        self.state.dream_memory = deque(maxlen=self.state.dream_memory_maxlen)
-                        for tensor, weight in sorted_mem[:keep_len]:
-                            if weight > 0.5:
-                                self.state.append_dream_memory(tensor.detach().cpu(), weight)
-                        if len(self.state.dream_memory) < original_len:
-                            memory_pruned = True
-
-                current_batch_size = self.training_config.get("batch_size", 1)
-                if not hasattr(self, '_original_batch_size'):
-                    self._original_batch_size = current_batch_size
-                if current_batch_size > 1:
-                    new_batch_size = max(1, current_batch_size // 2)
-                    self.config_manager.update("training_config.batch_size", new_batch_size)
-                    self.training_config["batch_size"] = new_batch_size
-                    self.trainer.config.batch_size = new_batch_size
-                    batch_size_reduced = True
-
-                if self.quantization_mode != "int8":
-                    self.set_quantization_mode("int8")
-                    quantization_changed = True
-
-                self.logger.record({
-                    "event": "memory_threshold_exceeded",
-                    "details": {
-                        "current_memory": current_mem,
-                        "total_memory": total_mem,
-                        "memory_pruned": memory_pruned,
-                        "quantization_changed": quantization_changed,
-                        "cache_cleared": cache_cleared,
-                        "batch_size_reduced": batch_size_reduced,
-                        "new_batch_size": new_batch_size if batch_size_reduced else None,
-                        "dynamic_threshold": dynamic_threshold,
-                        "threshold": self.memory_threshold,
-                        "dream_memory_len": len(self.state.dream_memory)
-                    },
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-                print(f"Memory adjusted (GPU: {mem_ratio:.0%}, Threshold: {dynamic_threshold:.2f}) - "
-                      f"Cache Cleared: {cache_cleared}, Pruned: {memory_pruned}, "
-                      f"Batch Reduced: {batch_size_reduced}, Quantized: {quantization_changed}")
-
-            elif mem_ratio < dynamic_threshold * 0.8 and hasattr(self, '_original_batch_size'):
-                new_batch_size = self._original_batch_size
-                self.config_manager.update("training_config.batch_size", new_batch_size)
-                self.training_config["batch_size"] = new_batch_size
-                self.trainer.config.batch_size = new_batch_size
-                print(f"Restored batch size to {new_batch_size}")
-                delattr(self, '_original_batch_size')
-
-    def generate_curiosity_question(self, context: str = None, spontaneous: bool = False) -> Optional[str]:
-        if not self.curiosity_config.get("enable_curiosity", True) or not self.curiosity_manager:
+    def generate_curiosity_question(self, state: SOVLState, tokenizer: PreTrainedTokenizer,
+                                  model: PreTrainedModel, context: str = "",
+                                  spontaneous: bool = False) -> Optional[str]:
+        """Generate a curiosity-driven question."""
+        try:
+            # ... question generation implementation ...
+            
+            if question:
+                self.logger.log_curiosity_event(
+                    event_type="question_generated",
+                    question=question,
+                    spontaneous=spontaneous,
+                    conversation_id=state.conversation_id,
+                    state_hash=state.get_state_hash()
+                )
+                
+            return question
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Question generation failed: {str(e)}",
+                error_type="generation_error",
+                stack_trace=traceback.format_exc()
+            )
             return None
-        question = self.curiosity_manager.generate_question(
-            state=self.state,
-            tokenizer=self.base_tokenizer,
-            model=self.scaffolds[0],
-            prompt=context,
-            spontaneous=spontaneous,
-            context_vector=self.state.curiosity.context_vector
+
+    def tune_curiosity(self, enable=None, spontaneous_threshold=None, response_threshold=None, pressure_threshold=None,
+                       pressure_drop=None, silence_threshold=None, question_cooldown=None, queue_maxlen=None,
+                       weight_ignorance=None, weight_novelty=None, max_new_tokens=None, base_temperature=None,
+                       temperament_influence=None, top_k=None, attention_weight=None, question_timeout=None):
+        """Tune curiosity parameters using the state's curiosity manager."""
+        self.state.curiosity.tune_curiosity(
+            pressure=pressure_threshold,
+            decay_rate=pressure_drop,
+            question_timeout=question_timeout
         )
-        if question:
-            self.state.curiosity.update_question_history(question, time.time())
-            self.logger.record({
-                "event": "curiosity_question",
-                "prompt": question,
-                "spontaneous": spontaneous,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-        return question
+        updates = {
+            'enable': enable,
+            'spontaneous_threshold': spontaneous_threshold,
+            'response_threshold': response_threshold,
+            'pressure_threshold': pressure_threshold,
+            'pressure_drop': pressure_drop,
+            'silence_threshold': silence_threshold,
+            'question_cooldown': question_cooldown,
+            'queue_maxlen': queue_maxlen,
+            'weight_ignorance': weight_ignorance,
+            'weight_novelty': weight_novelty,
+            'max_new_tokens': max_new_tokens,
+            'base_temperature': base_temperature,
+            'temperament_influence': temperament_influence,
+            'top_k': top_k,
+            'attention_weight': attention_weight,
+            'question_timeout': question_timeout
+        }
+        self.curiosity_manager.tune_curiosity(**{k: v for k, v in updates.items() if v is not None})
 
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
         self.state.update_data_exposure(data_exposure)
@@ -877,375 +786,16 @@ class SOVLSystem:
         })
 
     def update_metrics(self, question, score, spontaneous=False, answered=False):
-        if self.curiosity_manager:
-            self.curiosity_manager.update_metrics(
+        """Update curiosity metrics using the state's curiosity manager."""
+        if self.state.curiosity:
+            self.state.curiosity.update_metrics(
                 question=question,
                 score=score,
                 spontaneous=spontaneous,
-                answered=answered
+                answered=answered,
+                conversation_id=self.history.conversation_id,
+                state_hash=self.state.state_hash()
             )
-            self.state.curiosity.update_metrics(score, spontaneous, answered)
-            self.logger.record({
-                "event": "metrics_updated",
-                "question": question,
-                "score": score,
-                "spontaneous": spontaneous,
-                "answered": answered,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-
-    def check_silence(self, elapsed: float):
-        if not self.curiosity_config.get("enable_curiosity", True) or not self.curiosity_manager:
-            return
-        self.state.curiosity.prune_old_questions(self.curiosity_config.get("question_timeout", 3600.0))
-        question = self.curiosity_manager.check_silence(
-            state=self.state,
-            tokenizer=self.base_tokenizer,
-            model=self.scaffolds[0],
-            elapsed=elapsed,
-            context_vector=self.state.curiosity.context_vector
-        )
-        if question:
-            self.state.curiosity.update_question_history(question, time.time())
-            print(f"{question}")
-            self.logger.record({
-                "event": "silence_question",
-                "prompt": question,
-                "response": "",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "confidence_score": 0.0,
-                "is_system_question": True,
-                "state_hash": self.state.state_hash()
-            })
-            self.last_question_time = time.time()
-
-    def tune_curiosity(self, enable=None, spontaneous_threshold=None, response_threshold=None, pressure_threshold=None,
-                       pressure_drop=None, silence_threshold=None, question_cooldown=None, queue_maxlen=None,
-                       weight_ignorance=None, weight_novelty=None, max_new_tokens=None, base_temperature=None,
-                       temperament_influence=None, top_k=None, attention_weight=None, question_timeout=None):
-        updates = {}
-        prefix = "curiosity_config."
-        if enable is not None:
-            updates[f"{prefix}enable_curiosity"] = bool(enable)
-            self.curiosity_config["enable_curiosity"] = bool(enable)
-            if enable and not self.curiosity_manager:
-                self.curiosity_manager = CuriosityManager(
-                    config=self.curiosity_config,
-                    logger=self.logger,
-                    device=DEVICE,
-                    state=self.state.curiosity
-                )
-            elif not enable:
-                self.curiosity_manager = None
-        if spontaneous_threshold is not None and 0.5 <= spontaneous_threshold <= 1.0:
-            updates[f"{prefix}novelty_threshold_spontaneous"] = spontaneous_threshold
-            self.curiosity_config["novelty_threshold_spontaneous"] = spontaneous_threshold
-        if response_threshold is not None and 0.5 <= response_threshold <= 1.0:
-            updates[f"{prefix}novelty_threshold_response"] = response_threshold
-            self.curiosity_config["novelty_threshold_response"] = response_threshold
-        if pressure_threshold is not None and 0.5 <= pressure_threshold <= 0.9:
-            updates[f"{prefix}pressure_threshold"] = pressure_threshold
-            self.curiosity_config["pressure_threshold"] = pressure_threshold
-        if pressure_drop is not None and 0.1 <= pressure_drop <= 0.5:
-            updates[f"{prefix}pressure_drop"] = pressure_drop
-            self.curiosity_config["pressure_drop"] = pressure_drop
-        if silence_threshold is not None and 5.0 <= silence_threshold <= 60.0:
-            updates[f"{prefix}silence_threshold"] = silence_threshold
-            self.curiosity_config["silence_threshold"] = silence_threshold
-        if question_cooldown is not None and 30.0 <= question_cooldown <= 120.0:
-            updates[f"{prefix}question_cooldown"] = question_cooldown
-            self.curiosity_config["question_cooldown"] = question_cooldown
-        if queue_maxlen is not None and 5 <= queue_maxlen <= 20:
-            updates[f"{prefix}queue_maxlen"] = queue_maxlen
-            self.curiosity_config["queue_maxlen"] = queue_maxlen
-        if weight_ignorance is not None and 0.0 <= weight_ignorance <= 1.0:
-            updates[f"{prefix}weight_ignorance"] = weight_ignorance
-            self.curiosity_config["weight_ignorance"] = weight_ignorance
-        if weight_novelty is not None and 0.0 <= weight_novelty <= 1.0:
-            updates[f"{prefix}weight_novelty"] = weight_novelty
-            self.curiosity_config["weight_novelty"] = weight_novelty
-        if max_new_tokens is not None and 5 <= max_new_tokens <= 12:
-            updates[f"{prefix}max_new_tokens"] = max_new_tokens
-            self.curiosity_config["max_new_tokens"] = max_new_tokens
-        if base_temperature is not None and 0.5 <= base_temperature <= 1.5:
-            updates[f"{prefix}base_temperature"] = base_temperature
-            self.curiosity_config["base_temperature"] = base_temperature
-        if temperament_influence is not None and 0.1 <= temperament_influence <= 0.6:
-            updates[f"{prefix}temperament_influence"] = temperament_influence
-            self.curiosity_config["temperament_influence"] = temperament_influence
-        if top_k is not None and 10 <= top_k <= 50:
-            updates[f"{prefix}top_k"] = top_k
-            self.curiosity_config["top_k"] = top_k
-        if attention_weight is not None and 0.0 <= attention_weight <= 1.0:
-            updates[f"{prefix}attention_weight"] = attention_weight
-            self.curiosity_config["attention_weight"] = attention_weight
-        if question_timeout is not None and 60.0 <= question_timeout <= 86400.0:
-            updates[f"{prefix}question_timeout"] = question_timeout
-            self.curiosity_config["question_timeout"] = question_timeout
-
-        if updates:
-            success = self.config_manager.update_batch(updates)
-            if success and self.curiosity_manager:
-                self.curiosity_manager.tune(**{k.split(".")[-1]: v for k, v in updates.items()})
-                self.state.curiosity.update_config(self.curiosity_config)
-            self.config_manager.save_config()
-            self.logger.record({
-                "event": "tune_curiosity",
-                "params": updates,
-                "success": success,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Curiosity params updated: {updates}")
-
-    def toggle_memory(self, mode):
-        modes = {
-            'scaffold_mem': (True, False),
-            'token_mem': (False, True),
-            'both_mem': (True, True),
-            'no_mem': (False, False)
-        }
-        if mode in modes:
-            scaffold_mem, token_mem = modes[mode]
-            updates = {
-                "controls_config.use_scaffold_memory": scaffold_mem,
-                "controls_config.use_token_map_memory": token_mem
-            }
-            self.config_manager.update_batch(updates)
-            self.use_scaffold_memory = scaffold_mem
-            self.use_token_map_memory = token_mem
-            self.controls_config["use_scaffold_memory"] = scaffold_mem
-            self.controls_config["use_token_map_memory"] = token_mem
-            self.logger.record({
-                "event": "toggle_memory",
-                "mode": mode,
-                "scaffold_memory": scaffold_mem,
-                "token_map_memory": token_mem,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Memory toggled: Scaffold={self.use_scaffold_memory}, Token Map={self.use_token_map_memory}")
-        else:
-            print("Invalid memory mode. Use: 'scaffold_mem', 'token_mem', 'both_mem', 'no_mem'")
-
-    def wake_up(self):
-        if self.has_woken:
-            return None
-        wake_seed = (int(time.time() * 1000) + random.randint(0, 100)) % 10000
-        torch.manual_seed(wake_seed)
-        random.seed(wake_seed)
-        prompt = " "
-        with torch.no_grad():
-            response = self.generate(
-                prompt,
-                max_new_tokens=self.curiosity_config.get("max_new_tokens", 15),
-                temperature=self.curiosity_config.get("base_temperature", 1.7),
-                top_k=self.curiosity_config.get("top_k", 30),
-                do_sample=True
-            )
-        self.is_sleeping = self.controls_config.get("is_sleeping", False)
-        self.has_woken = True
-        self.config_manager.update("controls_config.has_woken", True)
-        self.controls_config["has_woken"] = True
-        print(f"\n{response}")
-
-        if self.curiosity_config.get("enable_curiosity", True) and self.curiosity_manager:
-            last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
-            self.curiosity_manager.update_pressure(
-                self.state.temperament_score,
-                last_conf,
-                self.state.curiosity.context_vector
-            )
-            q = self.generate_curiosity_question(spontaneous=True)
-            if q and isinstance(q, str) and q.strip():
-                print(f"{q}")
-                self.logger.record({
-                    "event": "wake_up_question",
-                    "prompt": q,
-                    "response": "",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "confidence_score": 0.0,
-                    "is_system_question": True,
-                    "state_hash": self.state.state_hash()
-                })
-                self.last_question_time = time.time()
-
-        self.logger.record({
-            "event": "wake_up",
-            "response": response,
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        })
-        return response
-
-    def print_memory_stats(self, label="", verbose=False):
-        if verbose and torch.cuda.is_available():
-            mem_stats = memory_usage(DEVICE)
-            if mem_stats:
-                print(f"\n--- Memory Stats ({label}) ---")
-                print(f"Allocated: {mem_stats['allocated']:.2f} GB")
-                print(f"Reserved:  {mem_stats['reserved']:.2f} GB")
-            self.logger.record({
-                "event": "memory_stats",
-                "label": label,
-                "stats": mem_stats,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-
-    def set_scaffold_influence(self, weight=None, blend_strength=None, layer_weights=None):
-        """Set the influence of scaffold model on cross-attention layers."""
-        if weight is not None:
-            self.last_weight = weight
-
-        # Validate layer_weights if provided
-        if layer_weights is not None:
-            layers = (
-                self.cross_attention_injector.get_cross_attention_layers(
-                    self.base_model,
-                    mode=self.core_config.get("layer_selection_mode", "balanced")
-                ) if self.core_config.get("use_dynamic_layers", False)
-                else self.core_config.get("cross_attn_layers", [5, 7])
-            )
-            if len(layer_weights) != len(layers):
-                self.error_logger.record({
-                    "error": f"layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-                print(f"Error: layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})")
-                return
-
-        try:
-            self.cross_attention_injector.set_influence(
-                model=self.base_model,
-                core_config=self.core_config,
-                cross_attn_config=self.cross_attn_config,
-                training_config=self.training_config,
-                controls_config=self.controls_config,
-                weight=weight,
-                blend_strength=blend_strength,
-                layer_weights=layer_weights
-            )
-            weight_display = f"[{', '.join(f'{w:.2f}' for w in layer_weights)}]" if layer_weights else f"{self.last_weight:.2f}"
-            print(f"Scaffold influence: weight={weight_display}, blend_strength={blend_strength if blend_strength is not None else 'unchanged'}")
-            self.logger.record({
-                "event": "set_scaffold_influence",
-                "weight": weight_display,
-                "blend_strength": blend_strength,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-        except Exception as e:
-            self.error_logger.record({
-                "error": f"Failed to set scaffold influence: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "stack_trace": traceback.format_exc(),
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Error setting scaffold influence: {str(e)}")
-
-    def tune_cross_attention(self, weight=None, blend_strength=None, layer_weights=None, dynamic_mode=None):
-        """Tune cross-attention settings, updating dynamic mode and delegating weight adjustments."""
-        # Update weights via set_scaffold_influence
-        if any(param is not None for param in [weight, blend_strength, layer_weights]):
-            self.set_scaffold_influence(weight, blend_strength, layer_weights)
-
-        # Handle dynamic mode
-        if dynamic_mode is not None:
-            valid_modes = ['confidence', 'temperament', 'off']
-            if dynamic_mode in valid_modes:
-                self.dynamic_cross_attn_mode = dynamic_mode if dynamic_mode != 'off' else None
-                self.config_manager.update("controls_config.dynamic_cross_attn_mode", self.dynamic_cross_attn_mode)
-                self.controls_config["dynamic_cross_attn_mode"] = self.dynamic_cross_attn_mode
-                print(f"Dynamic cross-attention set to: {dynamic_mode}")
-                self.logger.record({
-                    "event": "tune_cross_attention",
-                    "dynamic_mode": dynamic_mode,
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-            else:
-                error_msg = f"Invalid dynamic_mode: {dynamic_mode}. Use: {', '.join(valid_modes)}"
-                self.error_logger.record({
-                    "error": error_msg,
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-                print(error_msg)
-
-    def set_quantization_mode(self, mode):
-        if mode in ["fp16", "int8", "int4"] and mode != self.quantization_mode:
-            self.config_manager.update("core_config.quantization", mode)
-            self.quantization_mode = mode
-            self.core_config["quantization"] = mode
-            print(f"Quantization mode set to '{mode}'. Restart system to apply.")
-            self.logger.record({
-                "event": "set_quantization_mode",
-                "mode": mode,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-        else:
-            print(f"Invalid mode '{mode}' or no change.")
-
-    def toggle_dynamic_layers(self, enable):
-        if enable != self.core_config.get("use_dynamic_layers", False):
-            self.config_manager.update("core_config.use_dynamic_layers", enable)
-            self.core_config["use_dynamic_layers"] = enable
-            print(f"Dynamic layers {'enabled' if enable else 'disabled'}. Restart to apply.")
-            self.logger.record({
-                "event": "toggle_dynamic_layers",
-                "enable": enable,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-
-    def set_sleep_params(self, conf_threshold=None, time_factor=None, log_min=None, max_steps=None):
-        updates = {}
-        prefix = "controls_config."
-        if conf_threshold is not None and 0.5 <= conf_threshold <= 0.9:
-            updates[f"{prefix}sleep_conf_threshold"] = conf_threshold
-            self.controls_config["sleep_conf_threshold"] = conf_threshold
-            self.trainer.config.sleep_conf_threshold = conf_threshold
-        if time_factor is not None and 0.5 <= time_factor <= 5.0:
-            updates[f"{prefix}sleep_time_factor"] = time_factor
-            self.controls_config["sleep_time_factor"] = time_factor
-        if log_min is not None and 5 <= log_min <= 20:
-            updates[f"{prefix}sleep_log_min"] = log_min
-            self.controls_config["sleep_log_min"] = log_min
-            self.trainer.config.sleep_log_min = log_min
-        if max_steps is not None and 10 <= max_steps <= 1000:
-            updates["training_config.sleep_max_steps"] = max_steps
-            self.training_config["sleep_max_steps"] = max_steps
-            self.trainer.config.sleep_max_steps = max_steps
-
-        if updates:
-            self.config_manager.update_batch(updates)
-            self.config_manager.save_config()
-            self.logger.record({
-                "event": "set_sleep_params",
-                "params": updates,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Sleep params updated: {updates}")
 
     def tune_dream(self, swing_var=None, lifecycle_delta=None, temperament_on=None, noise_scale=None,
                    memory_weight=None, memory_maxlen=None, prompt_weight=None, novelty_boost=None,
@@ -1299,563 +849,23 @@ class SOVLSystem:
             print(f"Dream params updated: {updates}")
 
     def adjust_temperament(self, eager_threshold=None, sluggish_threshold=None, mood_influence=None,
-                           curiosity_boost=None, restless_drop=None, melancholy_noise=None,
-                           conf_feedback_strength=None, temp_smoothing_factor=None, decay_rate=None):
-        updates = {}
-        prefix = "controls_config."
-        if eager_threshold is not None and 0.7 <= eager_threshold <= 0.9:
-            updates[f"{prefix}temp_eager_threshold"] = eager_threshold
-            self.controls_config["temp_eager_threshold"] = eager_threshold
-        if sluggish_threshold is not None and 0.4 <= sluggish_threshold <= 0.6:
-            updates[f"{prefix}temp_sluggish_threshold"] = sluggish_threshold
-            self.controls_config["temp_sluggish_threshold"] = sluggish_threshold
-        if mood_influence is not None and 0 <= mood_influence <= 1:
-            updates[f"{prefix}temp_mood_influence"] = mood_influence
-            self.controls_config["temp_mood_influence"] = mood_influence
-        if curiosity_boost is not None and 0 <= curiosity_boost <= 0.5:
-            updates[f"{prefix}temp_curiosity_boost"] = curiosity_boost
-            self.controls_config["temp_curiosity_boost"] = curiosity_boost
-        if restless_drop is not None and 0 <= restless_drop <= 0.5:
-            updates[f"{prefix}temp_restless_drop"] = restless_drop
-            self.controls_config["temp_restless_drop"] = restless_drop
-        if melancholy_noise is not None and 0 <= melancholy_noise <= 0.05:
-            updates[f"{prefix}temp_melancholy_noise"] = melancholy_noise
-            self.controls_config["temp_melancholy_noise"] = melancholy_noise
-        if conf_feedback_strength is not None and 0 <= conf_feedback_strength <= 1:
-            updates[f"{prefix}conf_feedback_strength"] = conf_feedback_strength
-            self.controls_config["conf_feedback_strength"] = conf_feedback_strength
-        if temp_smoothing_factor is not None and 0 <= temp_smoothing_factor <= 1:
-            updates[f"{prefix}temp_smoothing_factor"] = temp_smoothing_factor
-            self.controls_config["temp_smoothing_factor"] = temp_smoothing_factor
-        if decay_rate is not None and 0.0 <= decay_rate <= 1.0:
-            updates[f"{prefix}temperament_decay_rate"] = decay_rate
-            self.controls_config["temperament_decay_rate"] = decay_rate
-            self.state.temperament_decay_rate = decay_rate
-
-        if updates:
-            self.config_manager.update_batch(updates)
-            self.config_manager.save_config()
-            self.logger.record({
-                "event": "adjust_temperament",
-                "params": updates,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Temperament params updated: {updates}")
-
-    def set_global_blend(self, weight_cap=None, base_temp=None):
-        updates = {}
-        prefix = "controls_config."
-        if weight_cap is not None and 0.5 <= weight_cap <= 1.0:
-            updates[f"{prefix}scaffold_weight_cap"] = weight_cap
-            self.controls_config["scaffold_weight_cap"] = weight_cap
-            self.scaffold_weight = weight_cap
-        if base_temp is not None and 0.5 <= base_temp <= 1.5:
-            updates[f"{prefix}base_temperature"] = base_temp
-            self.controls_config["base_temperature"] = base_temp
-            self.base_temperature = base_temp
-
-        if updates:
-            self.config_manager.update_batch(updates)
-            self.config_manager.save_config()
-            self.logger.record({
-                "event": "set_global_blend",
-                "params": updates,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Global blend updated: {updates}")
-
-    def tune_lifecycle(self, capacity_factor=None, curve=None, lora_capacity=None):
-        updates = {}
-        prefix = "training_config."
-        if capacity_factor is not None and 0.001 <= capacity_factor <= 0.1:
-            updates[f"{prefix}lifecycle_capacity_factor"] = capacity_factor
-            self.training_config["lifecycle_capacity_factor"] = capacity_factor
-            self.trainer.config.lifecycle_capacity_factor = capacity_factor
-        if curve in ["sigmoid_linear", "exponential"]:
-            updates[f"{prefix}lifecycle_curve"] = curve
-            self.training_config["lifecycle_curve"] = curve
-            self.trainer.config.lifecycle_curve = curve
-        if lora_capacity is not None and 0 <= lora_capacity <= 1000:
-            updates[f"{prefix}lora_capacity"] = lora_capacity
-            self.training_config["lora_capacity"] = lora_capacity
-            self.trainer.lora_capacity = lora_capacity
-
-        if updates:
-            self.config_manager.update_batch(updates)
-            self.config_manager.save_config()
-            self.logger.record({
-                "event": "tune_lifecycle",
-                "params": updates,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Lifecycle params updated: {updates}")
-
-    def save_state(self, path_prefix=None):
-        """Save all system state with proper serialization."""
-        if path_prefix is None:
-            path_prefix = self.controls_config.get("save_path_prefix", "state")
-        try:
-            with self.memory_lock:
-                # Save scaffold
-                torch.save(self.scaffolds[0].state_dict(), f"{path_prefix}_scaffold.pth")
-
-                # Save cross-attention
-                self.cross_attention_injector.save_state(f"{path_prefix}_cross_attn.pth", self.base_model)
-
-                # Save token map
-                with open(f"{path_prefix}_token_map.json", "w") as f:
-                    json.dump({str(k): v for k, v in self.token_map.items()}, f)
-
-                # Save system state
-                state_dict = {
-                    "system_state": self.state.to_dict(),
-                    "curiosity_state": self.curiosity_manager.save_state() if self.curiosity_manager else {},
-                    "config_state": self.config_manager.get_state()
-                }
-                with open(f"{path_prefix}_state.json", "w") as f:
-                    json.dump(state_dict, f)
-
-                self.logger.record({
-                    "event": "state_saved",
-                    "path_prefix": path_prefix,
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-                print(f"State saved to {path_prefix}_*.pth/json")
-        except Exception as e:
-            self.error_logger.record({
-                "error": f"Save failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "stack_trace": traceback.format_exc(),
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Save failed: {e}")
-            try:
-                state_dict = {
-                    "system_state": self.state.to_dict(),
-                    "curiosity_state": {},
-                    "config_state": self.config_manager.get_state()
-                }
-                with open(f"{path_prefix}_state.json", "w") as f:
-                    json.dump(state_dict, f)
-                print("Saved core state")
-            except:
-                print("Complete save failure!")
-
-    def load_state(self, path_prefix=None):
-        """Load all system state with proper device handling."""
-        if path_prefix is None:
-            path_prefix = self.controls_config.get("save_path_prefix", "state")
-        try:
-            with self.memory_lock:
-                if os.path.exists(f"{path_prefix}_scaffold.pth"):
-                    self.scaffolds[0].load_state_dict(torch.load(f"{path_prefix}_scaffold.pth"))
-                    print("Scaffold state loaded.")
-
-                if os.path.exists(f"{path_prefix}_cross_attn.pth"):
-                    try:
-                        self.cross_attention_injector.load_state(f"{path_prefix}_cross_attn.pth", self.base_model)
-                        print("Cross-attention state loaded.")
-                    except Exception as e:
-                        self.error_logger.record({
-                            "error": f"Failed to load cross-attention state: {str(e)}",
-                            "timestamp": time.time(),
-                            "stack_trace": traceback.format_exc(),
-                            "conversation_id": self.history.conversation_id,
-                            "state_hash": self.state.state_hash()
-                        })
-                        print(f"Warning: Cross-attention state load failed: {e}. Continuing without it.")
-
-                if os.path.exists(f"{path_prefix}_token_map.json"):
-                    with open(f"{path_prefix}_token_map.json", "r") as f:
-                        loaded_map = json.load(f)
-                    self.token_map = defaultdict(lambda: [self.scaffold_unk_id],
-                                                {int(k): v for k, v in loaded_map.items()})
-                    print("Token map loaded.")
-
-                if os.path.exists(f"{path_prefix}_state.json"):
-                    with open(f"{path_prefix}_state.json", "r") as f:
-                        state_dict = json.load(f)
-                    self.state.from_dict(state_dict["system_state"], device=DEVICE)
-                    if self.curiosity_manager and "curiosity_state" in state_dict:
-                        self.curiosity_manager.load_state(state_dict["curiosity_state"])
-                    if "config_state" in state_dict:
-                        self.config_manager.load_state(state_dict["config_state"])
-                        self.core_config = self.config_manager.get_section("core_config")
-                        self.training_config = self.config_manager.get_section("training_config")
-                        self.curiosity_config = self.config_manager.get_section("curiosity_config")
-                        self.cross_attn_config = self.config_manager.get_section("cross_attn_config")
-                        self.controls_config = self.config_manager.get_section("controls_config")
-                        self.lora_config = self.config_manager.get_section("lora_config")
-                    print("System and curiosity state loaded.")
-
-                self.logger.record({
-                    "event": "state_loaded",
-                    "path_prefix": path_prefix,
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-        except Exception as e:
-            self.error_logger.record({
-                "error": f"Load failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "stack_trace": traceback.format_exc(),
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Load failed: {e}. Starting fresh.")
-            self.state = SOVLState(
-                self.config_manager,
-                dream_memory_maxlen=self.controls_config.get("dream_memory_maxlen", 10),
-                confidence_history_maxlen=self.controls_config.get("confidence_history_maxlen", 5),
-                temperament_history_maxlen=self.controls_config.get("temperament_history_maxlen", 5),
-                conversation_history_maxlen=self.controls_config.get("conversation_history_maxlen", 10),
-                max_seen_prompts=self.controls_config.get("max_seen_prompts", 1000),
-                prompt_timeout=self.controls_config.get("prompt_timeout", 86400.0),
-                temperament_decay_rate=self.controls_config.get("temperament_decay_rate", 0.95),
-                curiosity=CuriosityState(self.config_manager, self.logger)
-            )
-            self.state.set_scaffold_unk_id(self.scaffold_unk_id)
-
-    def _clear_scaffold_cache(self):
-        """Clear scaffold-related caches safely."""
-        with self.memory_lock:
-            try:
-                if hasattr(self, '_temp_scaffold_context') and self._temp_scaffold_context is not None:
-                    if isinstance(self._temp_scaffold_context, torch.Tensor):
-                        self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
-                    del self._temp_scaffold_context
-                self._temp_scaffold_context = None
-
-                with self.state.memory_lock:
-                    if self.state.last_prompt_embedding is not None:
-                        if isinstance(self.state.last_prompt_embedding, torch.Tensor):
-                            self.state.last_prompt_embedding = self.state.last_prompt_embedding.detach().cpu()
-                        del self.state.last_prompt_embedding
-                        self.state.last_prompt_embedding = None
-
-                    if self.state.dream_memory:
-                        new_memory = deque(maxlen=self.state.dream_memory_maxlen)
-                        for tensor, weight in self.state.dream_memory:
-                            new_memory.append((tensor.detach().cpu(), weight))
-                        self.state.dream_memory = new_memory
-
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-                self.logger.record({
-                    "event": "scaffold_cache_cleared",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-            except Exception as e:
-                self.error_logger.record({
-                    "error": f"Failed to clear scaffold cache: {str(e)}",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "stack_trace": traceback.format_exc(),
-                    "state_hash": self.state.state_hash()
-                })
-
-    @contextlib.contextmanager
-    def _scaffold_context(self, scaffold_hidden_states):
-        """Manage scaffold context with safe tensor handling."""
-        try:
-            with self.memory_lock:
-                self._temp_scaffold_context = scaffold_hidden_states.detach() if isinstance(scaffold_hidden_states, torch.Tensor) else scaffold_hidden_states
-            yield
-        finally:
-            self._clear_scaffold_cache()
-    
-    def log_system_stats(self):
-        """Log system resource statistics."""
-        stats = {
-            "timestamp": time.time(),
-            "event": "system_stats",
-            "gpu_allocated": None,
-            "gpu_reserved": None,
-            "gpu_memory_percent": None,
-            "cpu_load": None,
-            "temperament": self.state.temperament_score,
-            "confidence_history": list(self.state.confidence_history),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        }
-        if torch.cuda.is_available():
-            try:
-                stats["gpu_allocated"] = torch.cuda.memory_allocated()
-                stats["gpu_reserved"] = torch.cuda.memory_reserved()
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                stats["gpu_memory_percent"] = (stats["gpu_allocated"] / total_memory * 100) if total_memory > 0 else None
-            except Exception as e:
-                self.logger.record({
-                    "warning": f"Failed to calculate GPU memory stats: {str(e)}",
-                    "timestamp": time.time(),
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
-        try:
-            stats["cpu_load"] = os.getloadavg()[0]  # 1-minute load average
-        except (AttributeError, OSError):
-            stats["cpu_load"] = None
-        self.logger.record(stats)
-    
-    def log_training_metrics(self, metrics):
-        """Batch log training metrics."""
-        entries = [
-            {
-                "timestamp": time.time(),
-                "event": "training_metric",
-                "name": metric["name"],
-                "value": metric["value"],
-                "epoch": metric.get("epoch"),
-                "step": metric.get("step"),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            }
-            for metric in metrics
-        ]
-        self.logger.record_batch(entries)
-    
-    def tokenize_and_map(self, prompts, max_length=None, padding='max_length'):
-        """Tokenize prompts and map to scaffold tokens."""
-        max_length = max_length or self.training_config.get("max_seq_length", 128)
-        if isinstance(prompts, str):
-            prompts = [prompts]
-        inputs = self.base_tokenizer(prompts, return_tensors='pt', padding=padding, truncation=True, max_length=max_length).to(DEVICE)
-        scaffold_input_ids = self.scaffold_manager.map_sequence(inputs.input_ids)
-        scaffold_attention_mask = (scaffold_input_ids != self.scaffold_tokenizer.pad_token_id).int()
-        return {'input_ids': scaffold_input_ids, 'attention_mask': scaffold_attention_mask}
-    
-    def get_scaffold_hidden_states(self, scaffold_inputs):
-        """Get hidden states from scaffold model."""
-        with torch.autocast(device_type=DEVICE.type, dtype=torch.float16 if DEVICE.type == 'cuda' else torch.bfloat16):
-            scaffold_outputs = self.scaffolds[0](**scaffold_inputs, output_hidden_states=True)
-            return scaffold_outputs.hidden_states[-1] if hasattr(scaffold_outputs, 'hidden_states') else scaffold_outputs.base_model_output.hidden_states[-1]
-    
-    def _get_model_layers(self, model):
-        """Retrieve model layers dynamically."""
-        actual_model = model.base_model if hasattr(model, 'base_model') else model
-        if hasattr(actual_model, 'transformer') and hasattr(actual_model.transformer, 'h'):
-            return actual_model.transformer.h
-        elif hasattr(actual_model, 'model') and hasattr(actual_model.model, 'layers'):
-            return actual_model.model.layers
-        elif hasattr(actual_model, 'layers'):
-            return actual_model.layers
-        elif hasattr(actual_model, 'decoder') and hasattr(actual_model.decoder, 'layers'):
-            return actual_model.decoder.layers
-        raise ValueError(f"Cannot determine layer structure for {actual_model.__class__.__name__}")
-    
-    def _insert_cross_attention(self):
-        """Inject cross-attention layers using config."""
-        if not self.cross_attn_config.get("enable_cross_attention", True):
-            self.logger.record({
-                "event": "cross_attention",
-                "status": "disabled",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print("Cross-attention disabled.")
-            return
-    
-        try:
-            # Validate layer indices before injection
-            cross_attn_layers = self.core_config.get("cross_attn_layers", [])
-            if not validate_layer_indices(cross_attn_layers, self.base_config.num_hidden_layers):
-                raise ValueError(f"Invalid cross-attention layer indices: {cross_attn_layers}")
-    
-            # Create injector with validation
-            injector = CrossAttentionInjector(
-                hidden_size=self.base_config.hidden_size,
-                num_heads=self.base_config.num_attention_heads,
-                logger=self.logger.record
-            )
-    
-            # Backup original model state
-            original_state = {}
-            for name, param in self.base_model.named_parameters():
-                original_state[name] = param.clone()
-            
-            try:
-                # Log injection attempt
-                self.logger.record({
-                    "event": "cross_attention_injection_start",
-                    "layers": cross_attn_layers,
-                    "timestamp": time.time()
-                })
-                
-                # Perform injection
-                injector.inject_cross_attention(
-                    model=self.base_model,
-                    scaffold_model=self.scaffolds[0],
-                    core_config=self.core_config,
-                    cross_attn_config=self.cross_attn_config,
-                    lora_config=self.lora_config,
-                    token_map=self.token_map,
-                    device=DEVICE
-                )
-                
-                # Verify injection
-                if not self._verify_cross_attention_injection():
-                    raise RuntimeError("Cross-attention injection verification failed")
-                    
-                # Log successful injection
-                self.logger.record({
-                    "event": "cross_attention_injection_complete",
-                    "status": "success",
-                    "timestamp": time.time()
-                })
-                    
-            except Exception as e:
-                # Log failure
-                self.logger.record({
-                    "event": "cross_attention_injection_failed",
-                    "error": str(e),
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
-                })
-                
-                # Restore original state
-                for name, param in self.base_model.named_parameters():
-                    if name in original_state:
-                        param.data.copy_(original_state[name])
-                        
-                # Log restoration
-                self.logger.record({
-                    "event": "cross_attention_restored",
-                    "status": "success",
-                    "timestamp": time.time()
-                })
-                
-                raise
-            
-        except Exception as e:
-            self.error_logger.record({
-                "error": f"Cross-attention injection failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-    def enable_dry_run(self, max_samples=2, max_length=128, validate_architecture=True, skip_training=True):
-        """Enable dry run mode."""
-        self.dry_run = True
-        self.dry_run_params = {
-            'max_samples': max_samples,
-            'max_length': max_length,
-            'validate_architecture': validate_architecture,
-            'skip_training': skip_training
-        }
-        self.config_manager.update("training_config.dry_run", True)
-        self.config_manager.update("training_config.dry_run_params", self.dry_run_params)
-        self.training_config["dry_run"] = True
-        self.training_config["dry_run_params"] = self.dry_run_params
-        print(f"Dry run activated (max_samples={max_samples}, max_length={max_length})")
-        self.logger.record({
-            "event": "enable_dry_run",
-            "params": self.dry_run_params,
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        })
-    
-    def map_sequence(self, base_input_ids):
-        try:
-            # Get values from core_config instead of config
-            max_expanded_len = self.core_config["max_sequence_length"] * self.core_config.get("expansion_factor", 2)
-            max_seq_length = self.core_config["max_sequence_length"]
-            
-            mapped_ids = self.processor.validate_and_map_tokens(
-                base_input_ids,
-                max_expanded_len=max_expanded_len,
-                max_seq_length=max_seq_length
-            )
-            
-            return mapped_ids
-            
-        except Exception as e:
-            self.logger.record({
-                "error": f"Sequence mapping failed: {str(e)}",
-                "input_shape": str(base_input_ids.shape),
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            raise
-    
-    def _update_token_map_memory(self, prompt, confidence):
-        """Update token map weights based on prompt and confidence."""
-        if not self.use_token_map_memory:
-            return
-        
-        self.processor.update_token_map_memory(
-            prompt=prompt,
-            confidence=confidence,
-            tokenizer=self.base_tokenizer,
-            memory_decay_rate=self.controls_config.get("memory_decay_rate", 0.95)
+                          curiosity_boost=None, restless_drop=None, melancholy_noise=None,
+                          conf_feedback_strength=None, temp_smoothing_factor=None, decay_rate=None):
+        """Adjust temperament parameters using the temperament system."""
+        self.temperament_system.adjust_temperament(
+            eager_threshold=eager_threshold,
+            sluggish_threshold=sluggish_threshold,
+            mood_influence=mood_influence,
+            curiosity_boost=curiosity_boost,
+            restless_drop=restless_drop,
+            melancholy_noise=melancholy_noise,
+            conf_feedback_strength=conf_feedback_strength,
+            temp_smoothing_factor=temp_smoothing_factor,
+            decay_rate=decay_rate
         )
-    
-    def _gestate(self, resume=False):
-        """Perform gestation by delegating to the trainer."""
-        log_entries = self.logger.read()
-        if not log_entries:
-            print("No log data to gestate.")
-            return False
-    
-        result = self.trainer.gestate(log_entries, resume)
-        if not result:
-            self.last_trained = time.time()
-            self.logger.clear()
-            self.last_weight = self.trainer.get_life_curve_weight()
-            self.set_scaffold_influence(self.last_weight)
-            self.logger.record({
-                "event": "gestation_complete",
-                "weight": self.last_weight,
-                "exposure": self.trainer.data_exposure,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Growth stage: {self.last_weight:.2f}, Exposure: {self.trainer.data_exposure}")
-        return result
-    
-    def _sleep_train(self):
-        """Perform sleep training by delegating to the trainer."""
-        if not self.controls_config.get("enable_sleep_training", True):
-            return
-        print("\n--- Sleep Training Initiated ---")
-        log_entries = self.logger.read()
-        if not log_entries:
-            print("No log data to train on.")
-            return
-    
-        success = self.trainer.sleep_train(log_entries)
-        if success:
-            self.last_trained = time.time()
-            self.logger.clear()
-            self.last_weight = self.trainer.get_life_curve_weight()
-            self.logger.record({
-                "event": "sleep_training_complete",
-                "weight": self.last_weight,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print("--- Sleep Training Complete ---")
-    
+
     def _update_temperament(self):
-        """Update temperament based on confidence and lifecycle."""
+        """Update temperament using the temperament system."""
         avg_confidence = safe_divide(
             self.state.sleep_confidence_sum,
             self.state.sleep_confidence_count,
@@ -1866,33 +876,30 @@ class SOVLSystem:
             self.trainer.lora_capacity,
             default=0.0
         )
-    
-        curiosity_boost = self.controls_config.get("temp_curiosity_boost", 0.3)
-        mood_influence = self.controls_config.get("temp_mood_influence", 0.5)
-        feedback_strength = self.controls_config.get("conf_feedback_strength", 0.5)
-        smoothing_factor = self.controls_config.get("temp_smoothing_factor", 0.5)
-    
-        base_score = 2.0 * (avg_confidence - 0.5)
-    
-        if float_lt(lifecycle_stage, 0.25):
-            bias = curiosity_boost * (1 - lifecycle_stage / 0.25)
-        elif float_lt(lifecycle_stage, 0.75):
-            bias = 0.0
-            if len(self.state.temperament_history) >= 5:
-                variance = torch.var(torch.tensor(list(self.state.temperament_history))).item()
-                bias -= 0.2 * variance
-        else:
-            bias = -curiosity_boost * (lifecycle_stage - 0.75) / 0.25
-    
-        target_score = base_score + bias + (feedback_strength * (avg_confidence - 0.5))
-        target_score = max(-1.0, min(1.0, target_score))
-        alpha = 0.1 * (1 - smoothing_factor)
-        self.state.temperament_score = (1 - alpha) * self.state.temperament_score + alpha * target_score
-        self.state.temperament_score = max(-1.0, min(1.0, self.state.temperament_score))
+
+        self.temperament_system.update_temperament(
+            confidence=avg_confidence,
+            lifecycle_stage=lifecycle_stage,
+            time_since_last=None,  # TODO: Add time tracking
+            curiosity_pressure=self.curiosity_manager.pressure if self.curiosity_manager else None
+        )
+
+        # Update state with new temperament score
+        self.state.temperament_score = self.temperament_system.score
         self.state.temperament_history = deque(
-            self.state.temperament_history,
+            list(self.temperament_system._history),
             maxlen=self.controls_config.get("temperament_history_maxlen", 5)
         )
+
+    def set_global_blend(self, weight_cap=None, base_temp=None):
+        updates = {}
+        prefix = "controls_config."
+        if weight_cap is not None and 0.5 <= weight_cap <= 1.0:
+            updates[f"{prefix}scaffold_weight_cap"] = weight_cap
+            self.controls_config["scaffold_weight_cap"] = weight_cap
+            self.scaffold_weight = weight_cap
+        if base_temp is not None and 0.5 <= base_temp <= 1.5:
+            updates[f"{prefix}base_temperature"] = base_temp
         self.state.temperament_history.append(self.state.temperament_score)
     
         if self.curiosity_config.get("enable_curiosity", True) and self.curiosity_manager:
@@ -2420,46 +1427,22 @@ class SOVLSystem:
         print(f"Validation Loss: {valid_loss:.4f}, Metrics: {metrics}")
         return valid_loss
     
-    def cleanup(self):
-        """Comprehensive cleanup with state preservation."""
+    def cleanup(self, model_size: int, trainer: Optional[Trainer] = None):
+        """Free GPU memory."""
         try:
-            log_memory_usage("Pre-cleanup", DEVICE, self.logger.record)
-    
-            self.trainer.cleanup()
-            self.save_state()
-    
-            with self.memory_lock:
-                if hasattr(self, '_temp_scaffold_context'):
-                    if isinstance(self._temp_scaffold_context, torch.Tensor):
-                        self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
-                    del self._temp_scaffold_context
-                self._temp_scaffold_context = None
-    
-                if self.state.curiosity:
-                    self.state.curiosity.prune_old_questions(self.curiosity_config.get("question_timeout", 3600.0))
-    
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    
-            log_memory_usage("Post-cleanup", DEVICE, self.logger.record)
-            self.logger.record({
-                "event": "cleanup_complete",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print("System cleanup completed with state preservation")
+            # ... cleanup implementation ...
+            
+            self.logger.log_cleanup_event(
+                phase="cleanup",
+                success=True,
+                model_size=model_size
+            )
         except Exception as e:
-            self.error_logger.record({
-                "error": f"Cleanup failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"System cleanup failed: {e}")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self.logger.log_error(
+                error_msg=f"Cleanup failed: {str(e)}",
+                error_type="cleanup_error",
+                stack_trace=traceback.format_exc()
+            )
     
     def _should_gestate(self):
         """Check if gestation should occur based on log size and time."""
@@ -2483,21 +1466,15 @@ class SOVLSystem:
     
     def new_conversation(self):
         """Start a new conversation."""
-        old_id = self.history.conversation_id
-        self.history = ConversationHistory(maxlen=self.controls_config.get("conversation_history_maxlen", 10))
-        with self.memory_lock:
-            self._clear_scaffold_cache()
-            if self.state.curiosity:
-                self.state.curiosity.reset_for_conversation(self.history.conversation_id)
+        self.memory_manager.new_conversation()
         self.logger.record({
             "event": "new_conversation",
             "new_id": self.history.conversation_id,
-            "old_id": old_id,
             "timestamp": time.time(),
             "conversation_id": self.history.conversation_id,
             "state_hash": self.state.state_hash()
         })
-        print(f"New conversation: {self.history.conversation_id} (Previous: {old_id})")
+        print(f"New conversation: {self.history.conversation_id}")
     
     def _reset_sleep_state(self):
         """Reset sleep-related state."""

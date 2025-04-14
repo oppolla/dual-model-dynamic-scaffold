@@ -267,6 +267,66 @@ class CuriosityState:
             })
             raise StateError(f"Curiosity state loading failed: {str(e)}")
 
+    def generate_curiosity_question(self, state, tokenizer, model, context, spontaneous=False):
+        """Generate a curiosity-driven question based on the current state."""
+        try:
+            if not self.config_manager.get("curiosity_enabled", True):
+                return None
+            # Logic to generate a question
+            question = "What is the meaning of life?"  # Placeholder logic
+            self.logger.record({
+                "event": "curiosity_question_generated",
+                "question": question,
+                "spontaneous": spontaneous,
+                "timestamp": time.time()
+            })
+            return question
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to generate curiosity question: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+
+    def check_silence(self, state, tokenizer, model, context):
+        """Check for prolonged silence and generate a question if needed."""
+        try:
+            current_time = time.time()
+            if current_time - self.last_question_time > self.question_timeout:
+                question = self.generate_curiosity_question(state, tokenizer, model, context, spontaneous=True)
+                if question:
+                    print(f"Curiosity Question: {question}")
+                    self.last_question_time = current_time
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to check silence: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+
+    def tune_curiosity(self, pressure=None, decay_rate=None, question_timeout=None):
+        """Tune curiosity parameters."""
+        try:
+            if pressure is not None:
+                self.pressure = pressure
+            if decay_rate is not None:
+                self.decay_rate = decay_rate
+            if question_timeout is not None:
+                self.question_timeout = question_timeout
+            self.logger.record({
+                "event": "curiosity_tuned",
+                "pressure": self.pressure,
+                "decay_rate": self.decay_rate,
+                "question_timeout": self.question_timeout,
+                "timestamp": time.time()
+            })
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to tune curiosity: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+
 class ConversationHistory:
     """Manages conversation messages with unique ID."""
     def __init__(self, config_manager: ConfigManager, conversation_id: Optional[str] = None):

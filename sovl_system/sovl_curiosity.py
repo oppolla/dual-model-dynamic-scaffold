@@ -486,17 +486,11 @@ class CuriosityManager:
         question: str,
         score: float,
         spontaneous: bool = False,
-        answered: bool = False
+        answered: bool = False,
+        conversation_id: Optional[str] = None,
+        state_hash: Optional[str] = None
     ) -> None:
-        """
-        Update curiosity metrics with automatic cleanup.
-
-        Args:
-            question (str): The question generated or evaluated.
-            score (float): Curiosity score for the question.
-            spontaneous (bool): Whether the question was spontaneous.
-            answered (bool): Whether the question was answered.
-        """
+        """Update curiosity metrics with automatic cleanup and logging."""
         # Check if adding will cause trimming
         will_trim = len(self.metrics) == self.metrics_maxlen
         # Create new metric entry
@@ -518,6 +512,19 @@ class CuriosityManager:
                 "current_size": len(self.metrics),
                 "max_size": self.metrics_maxlen,
                 "timestamp": time.time()
+            })
+
+        # Log the metrics update
+        if self.logger:
+            self.logger.record({
+                "event": "metrics_updated",
+                "question": question,
+                "score": score,
+                "spontaneous": spontaneous,
+                "answered": answered,
+                "timestamp": time.time(),
+                "conversation_id": conversation_id,
+                "state_hash": state_hash
             })
 
         # Trigger callback
@@ -697,3 +704,48 @@ class CuriosityManager:
         if not isinstance(metrics, list):
             metrics = []
         self.metrics = deque(metrics, maxlen=self.metrics_maxlen)
+
+    def generate_curiosity_question(self, state: Any, tokenizer: Any, model: Any, context: Optional[str] = None, spontaneous: bool = False) -> Optional[str]:
+        if not self.config.get("enable_curiosity", True):
+            return None
+        question = self.generate_question(state, tokenizer, model, context, spontaneous)
+        if question:
+            state.curiosity.update_question_history(question, time.time())
+            if self.logger:
+                self.logger.record({
+                    "event": "curiosity_question",
+                    "prompt": question,
+                    "spontaneous": spontaneous,
+                    "timestamp": time.time()
+                })
+        return question
+
+    def check_silence(self, state: Any, tokenizer: Any, model: Any, elapsed: float) -> Optional[str]:
+        if not self.config.get("enable_curiosity", True):
+            return None
+        state.curiosity.prune_old_questions(self.config.get("question_timeout", 3600.0))
+        question = self.generate_question(state, tokenizer, model, spontaneous=True)
+        if question:
+            state.curiosity.update_question_history(question, time.time())
+            if self.logger:
+                self.logger.record({
+                    "event": "silence_question",
+                    "prompt": question,
+                    "timestamp": time.time()
+                })
+        return question
+
+    def tune_curiosity(self, **kwargs) -> None:
+        updates = {}
+        for key, value in kwargs.items():
+            if key in self.config:
+                updates[key] = value
+                self.config[key] = value
+        if updates:
+            if self.logger:
+                self.logger.record({
+                    "event": "tune_curiosity",
+                    "params": updates,
+                    "timestamp": time.time()
+                })
+            self.tune(**updates)

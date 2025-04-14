@@ -551,115 +551,167 @@ class CrossAttentionInjector:
         self.logger = logger
         self.lock = Lock()
         self.scaffold_manager = ScaffoldManager(config_manager, logger)
+        self.scaffold_proj = None
 
-    def inject(
+    def inject_cross_attention(
         self,
-        base_model: nn.Module,
-        scaffold_model: Union[nn.Module, List[nn.Module]],
-        layers_to_inject: Optional[Union[List[int], str]] = None,
-        injection_strategy: Optional[str] = None,
-        token_map: Optional[Dict] = None
+        model: nn.Module,
+        scaffold_model: nn.Module,
+        core_config: dict,
+        cross_attn_config: dict,
+        lora_config: dict,
+        token_map: dict,
+        device: str
     ) -> nn.Module:
+        """
+        Inject cross-attention into the model.
+        
+        Args:
+            model: Base model to inject into
+            scaffold_model: Scaffold model providing context
+            core_config: Core configuration settings
+            cross_attn_config: Cross-attention specific settings
+            lora_config: LoRA configuration if used
+            token_map: Token mapping dictionary
+            device: Target device
+            
+        Returns:
+            nn.Module: Modified model with cross-attention
+        """
         try:
             with self.lock:
-                # Initialize and validate scaffold state
-                if not self.scaffold_manager.initialize_scaffold_state(
-                    self.config_manager.get("core_config.scaffold_model_name"),
-                    base_model.device
-                ):
-                    raise ValueError("Failed to initialize scaffold state")
-
-                # Verify compatibility
-                if not self.scaffold_manager.verify_scaffold_compatibility(base_model.config):
-                    raise ValueError("Base and scaffold models are incompatible")
-
-                # Get scaffold stats for logging
-                scaffold_stats = self.scaffold_manager.get_scaffold_stats()
+                # Validate layer indices
+                cross_attn_layers = core_config.get("cross_attn_layers", [])
+                if not validate_layer_indices(cross_attn_layers, len(self._get_model_layers(model))):
+                    raise ValueError(f"Invalid cross-attention layer indices: {cross_attn_layers}")
+                    
+                # Backup original state
+                original_state = {name: param.clone() for name, param in model.named_parameters()}
+                
+                # Log injection start
                 self.logger.record({
-                    "event": "injection_start",
-                    "scaffold_stats": scaffold_stats,
+                    "event": "cross_attention_injection_start",
+                    "layers": cross_attn_layers,
                     "timestamp": time.time()
                 })
-
-                # Rest of injection logic remains the same
-                injection_strategy = injection_strategy or self.config_manager.get("controls_config.injection_strategy", "sequential")
-                allow_empty_layers = self.config_manager.get("controls_config.allow_empty_layers", False)
-                if isinstance(scaffold_model, nn.Module):
-                    scaffold_models = [scaffold_model]
-                else:
-                    scaffold_models = scaffold_model
-
-                # Validate hidden sizes
-                base_hidden_size = getattr(base_model.config, 'hidden_size', self.config_manager.get("core_config.hidden_size", 768))
-                scaffold_hidden_size = getattr(scaffold_models[0].config, 'hidden_size', self.config_manager.get("core_config.hidden_size", 768))
-                if base_hidden_size != scaffold_hidden_size:
-                    self.logger.record({
-                        "event": "hidden_size_mismatch",
-                        "base_hidden_size": base_hidden_size,
-                        "scaffold_hidden_size": scaffold_hidden_size,
-                        "timestamp": time.time()
-                    })
-                    self.scaffold_proj = nn.Linear(scaffold_hidden_size, base_hidden_size).to(base_model.device)
-
-                # Determine layers to inject
-                layers_to_inject = self.get_cross_attention_layers(base_model, layers_to_inject)
-                if not layers_to_inject and not allow_empty_layers:
-                    raise ValueError("No layers selected for cross-attention injection")
-                elif not layers_to_inject:
-                    self.logger.record({
-                        "warning": "No layers selected for cross-attention injection",
-                        "timestamp": time.time()
-                    })
-                    return base_model
-
+                
+                # Create and inject layers
+                for layer_idx in cross_attn_layers:
+                    self._inject_single_layer(
+                        model=model,
+                        scaffold_model=scaffold_model,
+                        layer_idx=layer_idx,
+                        cross_attn_config=cross_attn_config,
+                        lora_config=lora_config,
+                        token_map=token_map,
+                        device=device
+                    )
+                    
+                # Verify injection
+                if not self.verify_injection(model, cross_attn_layers):
+                    # Restore original state on failure
+                    for name, param in model.named_parameters():
+                        if name in original_state:
+                            param.data.copy_(original_state[name])
+                    raise RuntimeError("Cross-attention injection verification failed")
+                    
                 self.logger.record({
-                    "event": "injection_start",
-                    "layers_to_inject": layers_to_inject,
-                    "injection_strategy": injection_strategy,
-                    "token_map_provided": token_map is not None,
+                    "event": "cross_attention_injection_complete",
+                    "status": "success",
                     "timestamp": time.time()
                 })
-
-                # Create cross-attention layers
-                cross_attention_layers = nn.ModuleList([
-                    CrossAttentionLayer(self.config_manager, self.logger)
-                    for _ in layers_to_inject
-                ])
-
-                # Apply injection
-                layers, layer_names = self.find_model_layers(base_model)
-                for i, layer_idx in enumerate(layers_to_inject):
-                    original_layer = layers[layer_idx]
-                    if injection_strategy == 'replace':
-                        layers[layer_idx] = self._create_wrapped_layer(
-                            original_layer, cross_attention_layers[i], scaffold_models, token_map
-                        )
-                    elif injection_strategy == 'parallel':
-                        layers[layer_idx] = self._create_parallel_layer(
-                            original_layer, cross_attention_layers[i], scaffold_models, token_map
-                        )
-                    elif injection_strategy == 'sequential':
-                        layers[layer_idx] = self._create_sequential_layer(
-                            original_layer, cross_attention_layers[i], scaffold_models, token_map
-                        )
-                    else:
-                        raise ValueError(f"Unknown injection strategy: {injection_strategy}")
-
-                self.logger.record({
-                    "event": "injection_complete",
-                    "layers_injected": layers_to_inject,
-                    "timestamp": time.time()
-                })
-                return base_model
-
+                
+                return model
+                
         except Exception as e:
             self.logger.record({
                 "error": f"Cross-attention injection failed: {str(e)}",
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc()
             })
-            # Clean up on failure
-            self.scaffold_manager.reset_scaffold_state()
+            raise
+
+    def _inject_single_layer(
+        self,
+        model: nn.Module,
+        scaffold_model: nn.Module,
+        layer_idx: int,
+        cross_attn_config: dict,
+        lora_config: dict,
+        token_map: dict,
+        device: str
+    ) -> None:
+        """
+        Inject cross-attention into a single layer.
+        
+        Args:
+            model: Base model
+            scaffold_model: Scaffold model
+            layer_idx: Index of layer to inject
+            cross_attn_config: Cross-attention configuration
+            lora_config: LoRA configuration
+            token_map: Token mapping
+            device: Target device
+        """
+        try:
+            # Get the layer to modify
+            layers, layer_names = self.find_model_layers(model)
+            if layer_idx >= len(layers):
+                raise ValueError(f"Layer index {layer_idx} out of bounds")
+                
+            original_layer = layers[layer_idx]
+            
+            # Create cross-attention layer
+            cross_attn_layer = CrossAttentionLayer(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                device=device
+            )
+            
+            # Create wrapped layer based on injection strategy
+            injection_strategy = cross_attn_config.get("injection_strategy", "sequential")
+            if injection_strategy == "replace":
+                wrapped_layer = self._create_wrapped_layer(
+                    original_layer,
+                    cross_attn_layer,
+                    scaffold_model,
+                    token_map
+                )
+            elif injection_strategy == "parallel":
+                wrapped_layer = self._create_parallel_layer(
+                    original_layer,
+                    cross_attn_layer,
+                    scaffold_model,
+                    token_map
+                )
+            else:  # sequential
+                wrapped_layer = self._create_sequential_layer(
+                    original_layer,
+                    cross_attn_layer,
+                    scaffold_model,
+                    token_map
+                )
+                
+            # Replace the original layer
+            layers[layer_idx] = wrapped_layer
+            
+            # Verify the injection
+            if not self._verify_injection(model, layer_idx):
+                raise RuntimeError(f"Layer {layer_idx} injection verification failed")
+                
+            self.logger.record({
+                "event": "layer_injected",
+                "layer_idx": layer_idx,
+                "strategy": injection_strategy,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to inject layer {layer_idx}: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
             raise
 
     def get_cross_attention_layers(self, model: nn.Module, mode: Optional[str] = None) -> List[int]:
@@ -1245,14 +1297,36 @@ class ScaffoldManager:
         Args:
             base_tokenizer: Base model tokenizer
             scaffold_tokenizer: Scaffold model tokenizer
+            
+        Returns:
+            Dict: Mapping from base token IDs to scaffold token IDs and weights
         """
         try:
-            token_map = {}
-            for token, base_id in base_tokenizer.get_vocab().items():
-                scaffold_id = scaffold_tokenizer.convert_tokens_to_ids(token)
-                if scaffold_id != scaffold_tokenizer.unk_token_id:
-                    token_map[base_id] = scaffold_id
-            self.token_map = token_map
+            token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
+            for base_token, base_id in base_tokenizer.get_vocab().items():
+                normalized = base_token.replace("Ġ", "").replace("##", "")
+                scaffold_ids = scaffold_tokenizer.encode(
+                    normalized, 
+                    add_special_tokens=False, 
+                    max_length=3, 
+                    truncation=True
+                ) or [scaffold_tokenizer.unk_token_id]
+                token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
+                
+            # Add special token mappings
+            special_token_map = {
+                base_tokenizer.pad_token_id: scaffold_tokenizer.pad_token_id,
+                base_tokenizer.eos_token_id: scaffold_tokenizer.eos_token_id or scaffold_tokenizer.sep_token_id,
+                base_tokenizer.unk_token_id: scaffold_tokenizer.unk_token_id,
+            }
+            token_map.update(special_token_map)
+            
+            self.logger.record({
+                "event": "token_map_built",
+                "map_size": len(token_map),
+                "timestamp": time.time()
+            })
+            
             return token_map
         except Exception as e:
             self.logger.record({

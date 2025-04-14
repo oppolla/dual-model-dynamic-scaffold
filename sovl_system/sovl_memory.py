@@ -214,12 +214,9 @@ class MemoryManager:
 
     def check_memory_health(self, model_size: float, trainer):
         """
-        Monitor and manage GPU memory usage, pruning memory if nearing capacity.
+        Autonomically reduce GPU memory usage if nearing capacity.
         """
         if not torch.cuda.is_available():
-            return
-
-        if time.time() - self._last_cleanup < self._cleanup_cooldown:  # New: respect cleanup cooldown
             return
 
         with self.memory_lock:
@@ -250,31 +247,28 @@ class MemoryManager:
                 getattr(trainer, 'data_exposure', 0), 
                 getattr(trainer, 'lora_capacity', 1), 
                 default=0.0
-            )  # Modified: safe attribute access
+            )
 
-            actions = {
-                "memory_pruned": False,
-                "cache_cleared": False,
-                "batch_size_reduced": False,
-                "quantization_changed": False
-            }
+            if lifecycle_stage < 0.25 and mem_ratio > dynamic_threshold:
+                memory_pruned = False
+                quantization_changed = False
+                cache_cleared = False
+                batch_size_reduced = False
 
-            if lifecycle_stage < 0.25 and mem_ratio > dynamic_threshold:  # Modified: standard comparison
-                self._last_cleanup = time.time()  # New: update cleanup time
                 torch.cuda.empty_cache()
-                actions["cache_cleared"] = True
+                cache_cleared = True
 
-                if len(self.dream_memory) > 0:
-                    original_len = len(self.dream_memory)
-                    sorted_mem = sorted(self.dream_memory, key=lambda x: x[1], reverse=True)
-                    keep_len = max(1, original_len // 2)
-                    self.dream_memory = deque(maxlen=self.dream_memory_maxlen)
-                    for tensor, weight in sorted_mem[:keep_len]:
-                        if weight > 0.5:
-                            self.dream_memory.append((tensor.detach().cpu(), weight))
-                    if len(self.dream_memory) < original_len:
-                        actions["memory_pruned"] = True
-                    self.state.dream_memory = self.dream_memory
+                with self.state.memory_lock:
+                    if len(self.state.dream_memory) > 0:
+                        original_len = len(self.state.dream_memory)
+                        sorted_mem = sorted(self.state.dream_memory, key=lambda x: x[1], reverse=True)
+                        keep_len = max(1, original_len // 2)
+                        self.state.dream_memory = deque(maxlen=self.state.dream_memory_maxlen)
+                        for tensor, weight in sorted_mem[:keep_len]:
+                            if weight > 0.5:
+                                self.state.append_dream_memory(tensor.detach().cpu(), weight)
+                        if len(self.state.dream_memory) < original_len:
+                            memory_pruned = True
 
                 current_batch_size = self.training_config.get("batch_size", 1)
                 if not hasattr(self, '_original_batch_size'):
@@ -283,32 +277,35 @@ class MemoryManager:
                     new_batch_size = max(1, current_batch_size // 2)
                     self.config_manager.update("training_config.batch_size", new_batch_size)
                     self.training_config["batch_size"] = new_batch_size
-                    actions["batch_size_reduced"] = True
-                    actions["new_batch_size"] = new_batch_size
+                    batch_size_reduced = True
 
                 quantization_mode = self.core_config.get("quantization", "fp16")
                 if quantization_mode != "int8":
                     self.config_manager.update("core_config.quantization", "int8")
                     self.core_config["quantization"] = "int8"
-                    actions["quantization_changed"] = True
+                    quantization_changed = True
 
                 self.logger.record({
                     "event": "memory_threshold_exceeded",
                     "details": {
                         "current_memory": current_mem,
                         "total_memory": total_mem,
-                        **actions,
+                        "memory_pruned": memory_pruned,
+                        "quantization_changed": quantization_changed,
+                        "cache_cleared": cache_cleared,
+                        "batch_size_reduced": batch_size_reduced,
+                        "new_batch_size": new_batch_size if batch_size_reduced else None,
                         "dynamic_threshold": dynamic_threshold,
                         "threshold": self.memory_threshold,
-                        "dream_memory_len": len(self.dream_memory)
+                        "dream_memory_len": len(self.state.dream_memory)
                     },
                     "timestamp": time.time(),
                     "conversation_id": self.conversation_history.conversation_id,
                     "state_hash": self.state.state_hash()
                 })
                 print(f"Memory adjusted (GPU: {mem_ratio:.0%}, Threshold: {dynamic_threshold:.2f}) - "
-                      f"Cache Cleared: {actions['cache_cleared']}, Pruned: {actions['memory_pruned']}, "
-                      f"Batch Reduced: {actions['batch_size_reduced']}, Quantized: {actions['quantization_changed']}")
+                      f"Cache Cleared: {cache_cleared}, Pruned: {memory_pruned}, "
+                      f"Batch Reduced: {batch_size_reduced}, Quantized: {quantization_changed}")
 
             elif mem_ratio < dynamic_threshold * 0.8 and hasattr(self, '_original_batch_size'):
                 new_batch_size = self._original_batch_size
@@ -316,13 +313,6 @@ class MemoryManager:
                 self.training_config["batch_size"] = new_batch_size
                 print(f"Restored batch size to {new_batch_size}")
                 delattr(self, '_original_batch_size')
-                self.logger.record({
-                    "event": "batch_size_restored",
-                    "new_batch_size": new_batch_size,
-                    "timestamp": time.time(),
-                    "conversation_id": self.conversation_history.conversation_id,
-                    "state_hash": self.state.state_hash()
-                })
 
     def clear_scaffold_cache(self):
         """
@@ -708,44 +698,43 @@ class MemoryManager:
             print(f"Token Map: {stats['token_map_size']} entries")
             print(f"Conversation History: {stats['conversation_history_len']} messages")
 
-    def cleanup(self):
+    def cleanup(self, model_size: float, trainer):
         """
-        Perform comprehensive memory cleanup with cooldown.
+        Perform memory cleanup operations to free up GPU memory.
         """
-        if time.time() - self._last_cleanup < self._cleanup_cooldown:  # New: respect cleanup cooldown
-            self.logger.record({
-                "event": "cleanup_skipped",
-                "reason": "cooldown_active",
-                "timestamp": time.time(),
-                "conversation_id": self.conversation_history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
+        if not torch.cuda.is_available():
             return
 
-        try:
-            log_memory_usage("Pre-memory-cleanup", self.device, self.logger.record)
-            self.clear_scaffold_cache()
-            self.prune_dream_memory()
-            if torch.cuda.is_available():
+        with self.memory_lock:
+            mem_stats = memory_usage(self.device)
+            if not mem_stats:
+                self.logger.record({
+                    "warning": "Failed to retrieve memory stats",
+                    "timestamp": time.time(),
+                    "conversation_id": self.conversation_history.conversation_id,
+                    "state_hash": self.state.state_hash()
+                })
+                return
+
+            current_mem = mem_stats['allocated'] * (1024 ** 3)
+            total_mem = torch.cuda.get_device_properties(0).total_memory
+            mem_ratio = current_mem / total_mem
+
+            if mem_ratio > self.memory_threshold:
                 torch.cuda.empty_cache()
-            self._last_cleanup = time.time()  # New: update cleanup time
-            log_memory_usage("Post-memory-cleanup", self.device, self.logger.record)
-            self.logger.record({
-                "event": "memory_cleanup_complete",
-                "timestamp": time.time(),
-                "conversation_id": self.conversation_history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-        except Exception as e:
-            self.error_logger.record({
-                "error": f"Memory cleanup failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.conversation_history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                self.logger.record({
+                    "event": "memory_cleanup",
+                    "details": {
+                        "current_memory": current_mem,
+                        "total_memory": total_mem,
+                        "memory_ratio": mem_ratio,
+                        "threshold": self.memory_threshold
+                    },
+                    "timestamp": time.time(),
+                    "conversation_id": self.conversation_history.conversation_id,
+                    "state_hash": self.state.state_hash()
+                })
+                print(f"Memory cleaned up (GPU: {mem_ratio:.0%}, Threshold: {self.memory_threshold:.2f})")
 
     def tune_memory_config(self, **kwargs):
         """

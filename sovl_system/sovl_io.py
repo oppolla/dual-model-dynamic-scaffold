@@ -1,11 +1,13 @@
 import json
 import os
 import gzip
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Tuple
 from threading import Lock
 import traceback
 from sovl_logger import Logger
 from sovl_config import ConfigManager
+import random
+import time
 
 class InsufficientDataError(Exception):
     """Raised when loaded data doesn't meet minimum entry requirements."""
@@ -153,6 +155,107 @@ class JSONLLoader:
                 "stack_trace": traceback.format_exc()
             })
             raise DataValidationError(f"Failed to load JSONL file: {str(e)}")
+
+def load_and_split_data(config_manager: ConfigManager, logger: Logger, train_data: List, valid_split_ratio: float) -> Tuple[List, List]:
+    """
+    Load and split the training data into training and validation sets.
+
+    Args:
+        config_manager: ConfigManager instance for configuration settings.
+        logger: Logger instance for recording events.
+        train_data: List of training data samples.
+        valid_split_ratio: Ratio for splitting validation data.
+
+    Returns:
+        A tuple containing the training and validation data lists.
+    """
+    random_seed = config_manager.get("core_config.random_seed", 42, expected_type=int)
+    random.seed(random_seed)
+    random.shuffle(train_data)
+    split_idx = int(len(train_data) * (1 - valid_split_ratio))
+    train_data, valid_data = train_data[:split_idx], train_data[split_idx:]
+
+    logger.write({
+        "event": "data_split",
+        "train_samples": len(train_data),
+        "valid_samples": len(valid_data),
+        "timestamp": time.time()
+    })
+    return train_data, valid_data
+
+def validate_quantization_mode(mode: str, logger: Logger) -> str:
+    """
+    Validate and normalize the quantization mode.
+
+    Args:
+        mode: The quantization mode to validate
+        logger: Logger instance for recording events
+
+    Returns:
+        The normalized quantization mode
+
+    Raises:
+        ValueError: If the mode is invalid
+    """
+    valid_modes = ["fp16", "int8", "int4"]
+    normalized_mode = mode.lower()
+    
+    if normalized_mode not in valid_modes:
+        logger.write({
+            "warning": f"Invalid quantization mode '{mode}'. Defaulting to 'fp16'.",
+            "timestamp": time.time()
+        })
+        return "fp16"
+    
+    return normalized_mode
+
+def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[List, List]:
+    """
+    Load and validate training data from the seed file.
+
+    Args:
+        config_manager: ConfigManager instance for configuration settings
+        logger: Logger instance for recording events
+
+    Returns:
+        A tuple containing the training and validation data lists
+    """
+    try:
+        train_data = load_jsonl("sovl_seed.jsonl", min_entries=0)
+        if not train_data:
+            logger.write({
+                "warning": "No data loaded from sovl_seed.jsonl",
+                "timestamp": time.time(),
+                "conversation_id": "init"
+            })
+            print("Warning: No data loaded from sovl_seed.jsonl!")
+            return [], []
+
+        valid_split_ratio = config_manager.get("core_config.valid_split_ratio", 0.2, expected_type=float)
+        train_data, valid_data = load_and_split_data(config_manager, logger, train_data, valid_split_ratio)
+        
+        return train_data, valid_data
+
+    except InsufficientDataError as e:
+        logger.write({
+            "error": str(e),
+            "timestamp": time.time(),
+            "conversation_id": "init",
+            "is_error_prompt": True
+        })
+        print(f"Data loading error: {e}")
+        return [], []
+
+    except Exception as e:
+        logger.write({
+            "error": f"Unexpected error during data loading: {e}",
+            "timestamp": time.time(),
+            "conversation_id": "init",
+            "is_error_prompt": True,
+            "stack_trace": traceback.format_exc()
+        })
+        print(f"Unexpected error during data loading: {e}")
+        return [], []
 
 if __name__ == "__main__":
     from sovl_logger import Logger, LoggerConfig

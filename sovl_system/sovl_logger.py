@@ -8,6 +8,7 @@ from datetime import datetime
 from threading import Lock
 from typing import List, Dict, Union, Optional, Callable
 from dataclasses import dataclass
+import torch
 
 @dataclass
 class LoggerConfig:
@@ -470,3 +471,98 @@ class Logger:
         except Exception as e:
             self.fallback_logger.error(f"Logger tuning failed: {str(e)}")
             raise
+
+    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, 
+                 conversation_id: str = None, state_hash: str = None, **kwargs):
+        """Log an error with standardized format."""
+        error_entry = {
+            "error": error_msg,
+            "type": error_type or "unknown",
+            "timestamp": time.time(),
+            "conversation_id": conversation_id,
+            "state_hash": state_hash,
+            "stack_trace": stack_trace,
+            **kwargs
+        }
+        self.record(error_entry)
+
+    def log_memory_usage(self, phase: str, device: torch.device, **kwargs):
+        """Log memory usage statistics."""
+        if torch.cuda.is_available() and device.type == "cuda":
+            memory_stats = {
+                "allocated": torch.cuda.memory_allocated(),
+                "reserved": torch.cuda.memory_reserved(),
+                "max_allocated": torch.cuda.max_memory_allocated()
+            }
+        else:
+            memory_stats = None
+
+        self.record({
+            "event": "memory_usage",
+            "phase": phase,
+            "timestamp": time.time(),
+            "memory_stats": memory_stats,
+            **kwargs
+        })
+
+    def log_training_event(self, event_type: str, epoch: int = None, loss: float = None,
+                         batch_size: int = None, data_exposure: float = None,
+                         conversation_id: str = None, state_hash: str = None, **kwargs):
+        """Log training-related events."""
+        self.record({
+            "event": event_type,
+            "epoch": epoch,
+            "loss": loss,
+            "batch_size": batch_size,
+            "data_exposure": data_exposure,
+            "timestamp": time.time(),
+            "conversation_id": conversation_id,
+            "state_hash": state_hash,
+            **kwargs
+        })
+
+    def log_generation_event(self, prompt: str, response: str, confidence_score: float,
+                           generation_params: dict = None, conversation_id: str = None,
+                           state_hash: str = None, **kwargs):
+        """Log generation-related events."""
+        self.record({
+            "event": "generation",
+            "prompt": prompt,
+            "response": response,
+            "confidence_score": confidence_score,
+            "generation_params": generation_params,
+            "timestamp": time.time(),
+            "conversation_id": conversation_id,
+            "state_hash": state_hash,
+            **kwargs
+        })
+
+    def log_cleanup_event(self, phase: str, success: bool, error: str = None,
+                         conversation_id: str = None, state_hash: str = None, **kwargs):
+        """Log cleanup-related events."""
+        self.record({
+            "event": "cleanup",
+            "phase": phase,
+            "success": success,
+            "error": error,
+            "timestamp": time.time(),
+            "conversation_id": conversation_id,
+            "state_hash": state_hash,
+            **kwargs
+        })
+
+    def log_curiosity_event(self, event_type: str, question: str = None, score: float = None,
+                          spontaneous: bool = False, answered: bool = False,
+                          conversation_id: str = None, state_hash: str = None, **kwargs):
+        """Log curiosity-related events."""
+        self.record({
+            "event": event_type,
+            "question": question,
+            "score": score,
+            "spontaneous": spontaneous,
+            "answered": answered,
+            "timestamp": time.time(),
+            "conversation_id": conversation_id,
+            "state_hash": state_hash,
+            **kwargs
+        })
