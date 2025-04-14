@@ -13,13 +13,9 @@ from collections import deque, defaultdict, OrderedDict
 import traceback
 import os
 from threading import Lock
-from sovl_curiosity import CuriosityManager
+from sovl_curiosity import CuriosityManager, CuriosityState
 from sovl_logger import Logger
-from sovl_io import (
-    load_training_data,
-    validate_quantization_mode,
-    InsufficientDataError
-)
+from sovl_io import load_training_data, validate_quantization_mode, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
 from sovl_config import ConfigManager
@@ -46,7 +42,7 @@ from sovl_tuner import SOVLTuner
 from sovl_error import ErrorHandler
 
 def calculate_confidence_score(logits, generated_ids) -> float:
-    """Wrapper for backward compatibility"""
+    """Calculate confidence score for generated tokens."""
     try:
         processor = LogitsProcessor(logits)
         return processor.calculate_confidence(generated_ids)
@@ -54,174 +50,38 @@ def calculate_confidence_score(logits, generated_ids) -> float:
         print(f"Confidence score error: {str(e)} - Using default 0.5")
         return 0.5
 
-# Initialize logger for data loading
-logger = Logger(
-    log_file="sovl_logs.jsonl",
-    max_size_mb=50,  # Rotate logs after 50MB
-    compress_old=True  # Compress rotated logs
-)
-
-# Load training data
-try:
-    TRAIN_DATA = load_training_data("sovl_seed.jsonl", min_entries=0)
-    if not TRAIN_DATA:
-        logger.write({
-            "warning": "No data loaded from sovl_seed.jsonl",
-            "timestamp": time.time(),
-            "conversation_id": "init"
-        })
-        print("Warning: No data loaded from sovl_seed.jsonl!")
-except InsufficientDataError as e:
-    logger.write({
-        "error": str(e),
-        "timestamp": time.time(),
-        "conversation_id": "init",
-        "is_error_prompt": True  # Flag for error listening
-    })
-    print(f"Data loading error: {e}")
-    TRAIN_DATA = []
-except Exception as e:
-    logger.write({
-        "error": f"Unexpected error during data loading: {e}",
-        "timestamp": time.time(),
-        "conversation_id": "init",
-        "is_error_prompt": True,
-        "stack_trace": traceback.format_exc()  # Include full traceback
-    })
-    print(f"Unexpected error during data loading: {e}")
-    TRAIN_DATA = []
-
-if not TRAIN_DATA:
-    logger.write({"warning": "No data loaded from sovl_seed.jsonl", "timestamp": time.time(), "conversation_id": "init"})
-    print("Warning: No data loaded from sovl_seed.jsonl!")
-
-# Split training data
-if TRAIN_DATA:
-    TRAIN_DATA, VALID_DATA = load_training_data(config_manager, logger, TRAIN_DATA, VALID_SPLIT_RATIO)
-else:
-    VALID_DATA = []
-    logger.write({
-        "warning": "No training data available",
-        "timestamp": time.time()
-    })
-
-# Initialize ConfigManager
-config_manager = ConfigManager("sovl_config.json")
-
-# Core Model Config
-BASE_MODEL_NAME = config_manager.get("core_config.base_model_name", "gpt2", expected_type=str)
-SCAFFOLD_MODEL_NAME = config_manager.get("core_config.scaffold_model_name", "gpt2", expected_type=str)
-CROSS_ATTN_LAYERS = config_manager.get("core_config.cross_attn_layers", [0, 1, 2], expected_type=list)
-USE_DYNAMIC_LAYERS = config_manager.get("core_config.use_dynamic_layers", False, expected_type=bool)
-LAYER_SELECTION_MODE = config_manager.get("core_config.layer_selection_mode", "balanced", expected_type=str)
-CUSTOM_LAYERS = config_manager.get("core_config.custom_layers", [], expected_type=list)
-VALID_SPLIT_RATIO = config_manager.get("core_config.valid_split_ratio", 0.2, expected_type=float)
-RANDOM_SEED = config_manager.get("core_config.random_seed", 42, expected_type=int)
-UANTIZATION_MODE = validate_quantization_mode(
-    config_manager.get("core_config.quantization", "fp16", expected_type=str),
-    logger
-)
-    # Curiosity Config
-ENABLE_CURIOSITY = config_manager.get("controls_config.enable_curiosity", True, expected_type=bool)
-CURIOSITY_WEIGHT_IGNORANCE = config_manager.get("controls_config.curiosity_weight_ignorance", 0.5, expected_type=float)
-CURIOSITY_WEIGHT_NOVELTY = config_manager.get("controls_config.curiosity_weight_novelty", 0.5, expected_type=float)
-CURIOSITY_PRESSURE_THRESHOLD = config_manager.get("controls_config.curiosity_pressure_threshold", 0.7, expected_type=float)
-CURIOSITY_PRESSURE_DROP = config_manager.get("controls_config.curiosity_pressure_drop", 0.2, expected_type=float)
-CURIOSITY_NOVELTY_THRESHOLD_SPONTANEOUS = config_manager.get("controls_config.curiosity_novelty_threshold_spontaneous", 0.8, expected_type=float)
-CURIOSITY_NOVELTY_THRESHOLD_RESPONSE = config_manager.get("controls_config.curiosity_novelty_threshold_response", 0.6, expected_type=float)
-CURIOSITY_SILENCE_THRESHOLD = config_manager.get("controls_config.curiosity_silence_threshold", 30.0, expected_type=float)
-CURIOSITY_QUESTION_COOLDOWN = config_manager.get("controls_config.curiosity_question_cooldown", 60.0, expected_type=float)
-CURIOSITY_QUEUE_MAXLEN = config_manager.get("controls_config.curiosity_queue_maxlen", 10, expected_type=int)
-CURIOSITY_MAX_NEW_TOKENS = config_manager.get("controls_config.curiosity_max_new_tokens", 10, expected_type=int)
-CURIOSITY_BASE_TEMPERATURE = config_manager.get("controls_config.curiosity_base_temperature", 0.9, expected_type=float)
-CURIOSITY_TEMPERAMENT_INFLUENCE = config_manager.get("controls_config.curiosity_temperament_influence", 0.3, expected_type=float)
-CURIOSITY_TOP_K = config_manager.get("controls_config.curiosity_top_k", 40, expected_type=int)
-
-# LoRA Config
-LORA_RANK = config_manager.get("lora_config.lora_rank", 8, expected_type=int)
-LORA_ALPHA = config_manager.get("lora_config.lora_alpha", 16, expected_type=int)
-LORA_DROPOUT = config_manager.get("lora_config.lora_dropout", 0.1, expected_type=float)
-LORA_TARGET_MODULES = config_manager.get("lora_config.lora_target_modules", ["q_proj", "v_proj"], expected_type=list)
-
-# Training Config
-LEARNING_RATE = config_manager.get("training_config.learning_rate", 2e-5, expected_type=float)
-TRAIN_EPOCHS = config_manager.get("training_config.train_epochs", 3, expected_type=int)
-BATCH_SIZE = config_manager.get("training_config.batch_size", 2, expected_type=int)
-MAX_SEQ_LENGTH = config_manager.get("training_config.max_seq_length", 512, expected_type=float)
-SIGMOID_SCALE = config_manager.get("training_config.sigmoid_scale", 0.5, expected_type=float)
-SIGMOID_SHIFT = config_manager.get("training_config.sigmoid_shift", 5.0, expected_type=float)
-
-# Exposed Controls
-SLEEP_CONF_THRESHOLD = config_manager.get("controls_config.sleep_conf_threshold", 0.7, expected_type=float)
-SLEEP_TIME_FACTOR = config_manager.get("controls_config.sleep_time_factor", 1.0, expected_type=float)
-SLEEP_LOG_MIN = config_manager.get("controls_config.sleep_log_min", 10, expected_type=int)
-DREAM_SWING_VAR = config_manager.get("controls_config.dream_swing_var", 0.1, expected_type=float)
-DREAM_LIFECYCLE_DELTA = config_manager.get("controls_config.dream_lifecycle_delta", 0.1, expected_type=float)
-DREAM_TEMPERAMENT_ON = config_manager.get("controls_config.dream_temperament_on", True, expected_type=bool)
-DREAM_NOISE_SCALE = config_manager.get("controls_config.dream_noise_scale", 0.05, expected_type=float)
-TEMP_EAGER_THRESHOLD = config_manager.get("controls_config.temp_eager_threshold", 0.8, expected_type=float)
-TEMP_SLUGGISH_THRESHOLD = config_manager.get("controls_config.temp_sluggish_threshold", 0.6, expected_type=float)
-MEMORY_THRESHOLD = config_manager.get("controls_config.memory_threshold", 0.85, expected_type=float)
-if not isinstance(MEMORY_THRESHOLD, (int, float)) or MEMORY_THRESHOLD <= 0 or MEMORY_THRESHOLD > 1:
-    logger.write({"warning": f"Invalid MEMORY_THRESHOLD '{MEMORY_THRESHOLD}'. Defaulting to 0.85.", "timestamp": time.time(), "conversation_id": "init"})
-    MEMORY_THRESHOLD = 0.85
-TEMP_MOOD_INFLUENCE = config_manager.get("controls_config.temp_mood_influence", 0.0, expected_type=float)
-SCAFFOLD_WEIGHT_CAP = config_manager.get("controls_config.scaffold_weight_cap", 1.0, expected_type=float)
-BASE_TEMPERATURE = config_manager.get("controls_config.base_temperature", 0.7, expected_type=float)
-SAVE_PATH_PREFIX = config_manager.get("controls_config.save_path_prefix", "state", expected_type=str)
-DREAM_MEMORY_WEIGHT = config_manager.get("controls_config.dream_memory_weight", 0.1, expected_type=float)
-DREAM_MEMORY_MAXLEN = config_manager.get("controls_config.dream_memory_maxlen", 10, expected_type=int)
-DREAM_PROMPT_WEIGHT = config_manager.get("controls_config.dream_prompt_weight", 0.5, expected_type=float)
-DREAM_NOVELTY_BOOST = config_manager.get("controls_config.dream_novelty_boost", 0.03, expected_type=float)
-TEMP_CURIOSITY_BOOST = config_manager.get("controls_config.temp_curiosity_boost", 0.5, expected_type=float)
-TEMP_RESTLESS_DROP = config_manager.get("controls_config.temp_restless_drop", 0.1, expected_type=float)
-TEMP_MELANCHOLY_NOISE = config_manager.get("controls_config.temp_melancholy_noise", 0.02, expected_type=float)
-CONF_FEEDBACK_STRENGTH = config_manager.get("controls_config.conf_feedback_strength", 0.5, expected_type=float)
-TEMP_SMOOTHING_FACTOR = config_manager.get("controls_config.temp_smoothing_factor", 0.0, expected_type=float)
-LIFECYCLE_CAPACITY_FACTOR = config_manager.get("training_config.lifecycle_capacity_factor", 0.01, expected_type=float)
-LIFECYCLE_CURVE = config_manager.get("training_config.lifecycle_curve", "sigmoid_linear", expected_type=str)
-DREAM_MEMORY_DECAY = config_manager.get("controls_config.dream_memory_decay", 0.95, expected_type=float)
-DREAM_PRUNE_THRESHOLD = config_manager.get("controls_config.dream_prune_threshold", 0.1, expected_type=float)
-USE_SCAFFOLD_MEMORY = config_manager.get("controls_config.use_scaffold_memory", True, expected_type=bool)
-USE_TOKEN_MAP_MEMORY = config_manager.get("controls_config.use_token_map_memory", True, expected_type=bool)
-DYNAMIC_CROSS_ATTN_MODE = config_manager.get("controls_config.dynamic_cross_attn_mode", None)
-DRY_RUN = config_manager.get("training_config.dry_run", False, expected_type=bool)
-DRY_RUN_MAX_SAMPLES = config_manager.get("training_config.dry_run_params.max_samples", 2, expected_type=int)
-DRY_RUN_MAX_LENGTH = config_manager.get("training_config.dry_run_params.max_length", 128, expected_type=int)
-DRY_RUN_VALIDATE_ARCH = config_manager.get("training_config.dry_run_params.validate_architecture", True, expected_type=bool)
-DRY_RUN_SKIP_TRAINING = config_manager.get("training_config.dry_run_params.skip_training", True, expected_type=bool)
-MEMORY_DECAY_RATE = config_manager.get("controls_config.memory_decay_rate", 0.95, expected_type=float)
-HAS_WOKEN = config_manager.get("controls_config.has_woken", False, expected_type=bool)
-IS_SLEEPING = config_manager.get("controls_config.is_sleeping", False, expected_type=bool)
-ACCUMULATION_STEPS = config_manager.get("training_config.accumulation_steps", 4, expected_type=int)
-EXPOSURE_GAIN_EAGER = config_manager.get("training_config.exposure_gain_eager", 3, expected_type=int)
-EXPOSURE_GAIN_DEFAULT = config_manager.get("training_config.exposure_gain_default", 2, expected_type=int)
-MAX_PATIENCE = config_manager.get("training_config.max_patience", 2, expected_type=int)
-CONFIDENCE_HISTORY_MAXLEN = config_manager.get("controls_config.confidence_history_maxlen", 5, expected_type=int)
-TEMPERAMENT_HISTORY_MAXLEN = config_manager.get("controls_config.temperament_history_maxlen", 5, expected_type=int)
-ENABLE_DREAMING = config_manager.get("controls_config.enable_dreaming", True, expected_type=bool)
-ENABLE_TEMPERAMENT = config_manager.get("controls_config.enable_temperament", True, expected_type=bool)
-ENABLE_CONFIDENCE_TRACKING = config_manager.get("controls_config.enable_confidence_tracking", True, expected_type=bool)
-ENABLE_GESTATION = config_manager.get("controls_config.enable_gestation", True, expected_type=bool)
-ENABLE_SLEEP_TRAINING = config_manager.get("controls_config.enable_sleep_training", True, expected_type=bool)
-ENABLE_CROSS_ATTENTION = config_manager.get("controls_config.enable_cross_attention", True, expected_type=bool)
-ENABLE_DYNAMIC_CROSS_ATTENTION = config_manager.get("controls_config.enable_dynamic_cross_attention", True, expected_type=bool)
-ENABLE_LORA_ADAPTERS = config_manager.get("controls_config.enable_lora_adapters", True, expected_type=bool)
-ENABLE_REPETITION_CHECK = config_manager.get("controls_config.enable_repetition_check", True, expected_type=bool)
-ENABLE_PROMPT_DRIVEN_DREAMS = config_manager.get("controls_config.enable_prompt_driven_dreams", True, expected_type=bool)
-ENABLE_LIFECYCLE_WEIGHTING = config_manager.get("controls_config.enable_lifecycle_weighting", True, expected_type=bool)
-ENABLE_ERROR_LISTENING = config_manager.get("controls_config.enable_error_listening", True, expected_type=bool)
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {DEVICE}")       
-
 class SOVLSystem:
-    def __init__(self, config_manager):
+    """Main orchestrator for the SOVL system, managing model interactions and training."""
+
+    def __init__(self, config_manager: ConfigManager):
         self.config_manager = config_manager
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+
+        # Initialize logging
+        self._setup_logging()
+
+        # Initialize core components
+        self._initialize_components()
+
+        # Load and validate training data
+        self._load_training_data()
+
+        # Initialize state
+        self._initialize_state()
+
+        # Load saved state
+        self.load_state()
+
+        # Post-initialization setup
+        self._post_initialize()
+
+    def _setup_logging(self):
+        """Configure logging for system and error events."""
         self.logger = Logger(
-            log_file=config_manager.get("logging_config.log_file", "sovl_system_logs.jsonl"),
-            max_size_mb=config_manager.get("logging_config.max_size_mb", 20),
-            compress_old=config_manager.get("logging_config.compress_old", True)
+            log_file=self.config_manager.get("logging_config.log_file", "sovl_system_logs.jsonl"),
+            max_size_mb=self.config_manager.get("logging_config.max_size_mb", 20),
+            compress_old=self.config_manager.get("logging_config.compress_old", True)
         )
         self.logger.manage_rotation(max_files=7)
         self.error_logger = Logger(
@@ -230,44 +90,106 @@ class SOVLSystem:
             compress_old=True
         )
 
+    def _initialize_components(self):
+        """Initialize core system components."""
+        # Cache configuration sections
+        self.core_config = self.config_manager.get_section("core_config")
+        self.training_config = self.config_manager.get_section("training_config")
+        self.curiosity_config = self.config_manager.get_section("curiosity_config")
+        self.cross_attn_config = self.config_manager.get_section("cross_attn_config")
+        self.controls_config = self.config_manager.get_section("controls_config")
+        self.lora_config = self.config_manager.get_section("lora_config")
+
         # Initialize error handler
         self.error_handler = ErrorHandler(
-            config_manager=config_manager,
+            config_manager=self.config_manager,
             logger=self.logger,
             error_log_file="sovl_errors.jsonl",
             max_error_log_size_mb=10,
             compress_old=True,
-            state=None  # Will be set after state initialization
+            state=None  # Set after state initialization
         )
 
         # Initialize memory manager
         self.memory_manager = MemoryManager(
-            config_manager=config_manager,
-            device=DEVICE,
+            config_manager=self.config_manager,
+            device=self.device,
             logger=self.logger
         )
 
-        # Cache configuration sections
-        self.core_config = config_manager.get_section("core_config")
-        self.training_config = config_manager.get_section("training_config")
-        self.curiosity_config = config_manager.get_section("curiosity_config")
-        self.cross_attn_config = config_manager.get_section("cross_attn_config")
-        self.controls_config = config_manager.get_section("controls_config")
-        self.lora_config = config_manager.get_section("lora_config")
-
-        # Initialize system parameters
-        self.quantization_mode = self.core_config.get("quantization", "fp16")
-        self.base_temperature = self.controls_config.get("base_temperature", 0.7)
-        self.use_scaffold_memory = self.controls_config.get("use_scaffold_memory", True)
-        self.use_token_map_memory = self.controls_config.get("use_token_map_memory", True)
-        self.scaffold_weight = self.controls_config.get("scaffold_weight_cap", 1.0)
-        self.memory_threshold = self.controls_config.get("memory_threshold", 0.85)
-        self.memory_decay_rate = self.controls_config.get("memory_decay_rate", 0.95)
-        self.dynamic_cross_attn_mode = self.controls_config.get("dynamic_cross_attn_mode", None)
-        self.has_woken = self.controls_config.get("has_woken", False)
-        self.is_sleeping = self.controls_config.get("is_sleeping", False)
-
         # Initialize temperament system
+        self._initialize_temperament()
+
+        # Validate configuration
+        self._validate_config()
+
+        # Initialize model manager
+        self.model_manager = ModelManager(
+            config_manager=self.config_manager,
+            logger=self.logger,
+            device=self.device
+        )
+
+        # Get models and tokenizers
+        self.base_model = self.model_manager.get_base_model()
+        self.scaffolds = [self.model_manager.get_scaffold_model()]
+        self.base_tokenizer = self.model_manager.get_base_tokenizer()
+        self.scaffold_tokenizer = self.model_manager.get_scaffold_tokenizer()
+        self.scaffold_unk_id = self.model_manager.get_scaffold_unk_id()
+
+        # Initialize scaffold manager
+        self.scaffold_manager = ScaffoldManager(self.config_manager, self.logger)
+        self.scaffold_token_mapper = None  # Initialized when needed
+
+        # Initialize cross-attention injector
+        self.cross_attention_injector = CrossAttentionInjector(
+            config_manager=self.config_manager,
+            logger=self.logger
+        )
+
+        # Inject cross-attention
+        self._insert_cross_attention()
+
+        # Initialize trainer
+        self._initialize_trainer()
+
+        # Initialize generation manager
+        self.generation_manager = GenerationManager(
+            config_manager=self.config_manager,
+            base_model=self.base_model,
+            scaffolds=self.scaffolds,
+            base_tokenizer=self.base_tokenizer,
+            scaffold_tokenizer=self.scaffold_tokenizer,
+            state=None,  # Set after state initialization
+            logger=self.logger,
+            error_logger=self.error_logger,
+            cross_attention_injector=self.cross_attention_injector,
+            scaffold_manager=self.scaffold_manager,
+            temperament=self.temperament_system,
+            curiosity_manager=None  # Set after curiosity initialization
+        )
+
+        # Initialize curiosity
+        self.curiosity_manager = (
+            CuriosityManager(
+                config=self.curiosity_config,
+                logger=self.logger,
+                device=self.device,
+                state=None  # Set after state initialization
+            ) if self.curiosity_config.get("enable_curiosity", True) else None
+        )
+
+        # Initialize tuner
+        self.tuner = SOVLTuner(
+            config_manager=self.config_manager,
+            logger=self.logger,
+            curiosity_manager=self.curiosity_manager,
+            trainer=self.trainer,
+            cross_attention_injector=self.cross_attention_injector
+        )
+
+    def _initialize_temperament(self):
+        """Set up the temperament system."""
         temperament_config = TemperamentConfig(
             eager_threshold=self.controls_config.get("temp_eager_threshold", 0.7),
             sluggish_threshold=self.controls_config.get("temp_sluggish_threshold", 0.3),
@@ -288,34 +210,18 @@ class SOVLSystem:
         self.temperament_system = TemperamentSystem(
             config=temperament_config,
             logger=self.logger,
-            device=DEVICE
+            device=self.device
         )
 
-        # Validate configuration
-        self._validate_config()
-
-        # Initialize model manager
-        self.model_manager = ModelManager(
-            config_manager=config_manager,
-            logger=self.logger,
-            device=DEVICE
-        )
-
-        # Get models and tokenizers from model manager
-        self.base_model = self.model_manager.get_base_model()
-        self.scaffolds = [self.model_manager.get_scaffold_model()]
-        self.base_tokenizer = self.model_manager.get_base_tokenizer()
-        self.scaffold_tokenizer = self.model_manager.get_scaffold_tokenizer()
-        self.scaffold_unk_id = self.model_manager.get_scaffold_unk_id()
-
-        # Initialize trainer
+    def _initialize_trainer(self):
+        """Set up the trainer with training configuration."""
         training_config = TrainingConfig(
             learning_rate=self.training_config.get("learning_rate", 0.0003),
             grad_accum_steps=self.training_config.get("accumulation_steps", 4),
             weight_decay=0.01,
-            total_steps=1000,  # Placeholder, computed dynamically
+            total_steps=1000,
             max_grad_norm=1.0,
-            use_amp=(DEVICE.type == "cuda"),
+            use_amp=(self.device.type == "cuda"),
             max_patience=self.training_config.get("max_patience", 2),
             batch_size=self.training_config.get("batch_size", 1),
             max_epochs=self.training_config.get("train_epochs", 3),
@@ -367,41 +273,71 @@ class SOVLSystem:
         self.trainer = SOVLTrainer(
             model=self.scaffolds[0],
             config=training_config,
-            device=DEVICE,
+            device=self.device,
             loss_fn=loss_fn,
             logger=self.logger,
             memory_lock=Lock(),
             tokenizer=self.base_tokenizer,
-            state=None
+            state=None  # Set after state initialization
         )
         self.trainer.memory_check = self.check_memory_health
 
-        # Initialize token map using ScaffoldManager
-        self.scaffold_manager = ScaffoldManager(config_manager, self.logger)
-        self.scaffold_token_mapper = None  # Will be initialized when needed
+    def _load_training_data(self):
+        """Load and split training data."""
+        try:
+            self.train_data = load_training_data("sovl_seed.jsonl", min_entries=0)
+            if not self.train_data:
+                self.logger.record({
+                    "warning": "No data loaded from sovl_seed.jsonl",
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
+                })
+                print("Warning: No data loaded from sovl_seed.jsonl!")
+        except InsufficientDataError as e:
+            self.logger.record({
+                "error": str(e),
+                "timestamp": time.time(),
+                "conversation_id": "init",
+                "is_error_prompt": True
+            })
+            print(f"Data loading error: {e}")
+            self.train_data = []
+        except Exception as e:
+            self.logger.record({
+                "error": f"Unexpected error during data loading: {e}",
+                "timestamp": time.time(),
+                "conversation_id": "init",
+                "is_error_prompt": True,
+                "stack_trace": traceback.format_exc()
+            })
+            print(f"Unexpected error during data loading: {e}")
+            self.train_data = []
 
-        # Initialize cross-attention injector
-        self.cross_attention_injector = CrossAttentionInjector(
-            config_manager=config_manager,
-            logger=self.logger
-        )
-        
-        # Inject cross-attention
-        print("Injecting cross-attention layers...")
-        self._insert_cross_attention()
-        print("Cross-attention injection complete.")
+        # Split data
+        valid_split_ratio = self.core_config.get("valid_split_ratio", 0.2)
+        if self.train_data:
+            random.seed(self.core_config.get("random_seed", 42))
+            random.shuffle(self.train_data)
+            split_idx = int(len(self.train_data) * (1 - valid_split_ratio))
+            self.train_data, self.valid_data = self.train_data[:split_idx], self.train_data[split_idx:]
+        else:
+            self.valid_data = []
+            self.logger.record({
+                "warning": "No training data available",
+                "timestamp": time.time()
+            })
 
-        # Initialize state
+    def _initialize_state(self):
+        """Initialize system state and related components."""
         self.memory_lock = Lock()
         self.mem_usage_history = deque(maxlen=10)
-        self.dynamic_threshold_base = self.memory_threshold
-        self.max_patience = self.training_config.get("max_patience", 2)
+        self.dynamic_threshold_base = self.controls_config.get("memory_threshold", 0.85)
         self.history = ConversationHistory(maxlen=self.controls_config.get("conversation_history_maxlen", 10))
         self.last_trained = 0
         self.last_weight = 0.0
 
         self.state = SOVLState(
-            config_manager,
+            config_manager=self.config_manager,
             dream_memory_maxlen=self.controls_config.get("dream_memory_maxlen", 10),
             confidence_history_maxlen=self.controls_config.get("confidence_history_maxlen", 5),
             temperament_history_maxlen=self.controls_config.get("temperament_history_maxlen", 5),
@@ -409,69 +345,30 @@ class SOVLSystem:
             max_seen_prompts=self.controls_config.get("max_seen_prompts", 1000),
             prompt_timeout=self.controls_config.get("prompt_timeout", 86400.0),
             temperament_decay_rate=self.controls_config.get("temperament_decay_rate", 0.95),
-            curiosity=CuriosityState(config_manager, self.logger)
+            curiosity=CuriosityState(self.config_manager, self.logger)
         )
         self.state.set_scaffold_unk_id(self.scaffold_unk_id)
+
+        # Update component dependencies
+        self.error_handler.state = self.state
         self.trainer.state = self.state
+        self.generation_manager.state = self.state
+        if self.curiosity_manager:
+            self.curiosity_manager.state = self.state.curiosity
+        self.generation_manager.curiosity_manager = self.curiosity_manager
 
-        # Initialize curiosity
-        self.curiosity_manager = (
-            CuriosityManager(
-                config=self.curiosity_config,
-                logger=self.logger,
-                device=DEVICE,
-                state=self.state.curiosity
-            ) if self.curiosity_config.get("enable_curiosity", True) else None
-        )
+    def _post_initialize(self):
+        """Perform post-initialization setup."""
         self.last_question_time = time.time()
-
-        self.load_state()
-
-        # After initializing the processor and token maps, add:
-        self.processor.set_token_map(self.state.token_map, self.scaffold_unk_id)
-
-        # Initialize generation manager
-        self.generation_manager = GenerationManager(
-            config_manager=config_manager,
-            base_model=self.base_model,
-            scaffolds=self.scaffolds,
-            base_tokenizer=self.base_tokenizer,
-            scaffold_tokenizer=self.scaffold_tokenizer,
-            state=self.state,
-            logger=self.logger,
-            error_logger=self.error_logger,
-            cross_attention_injector=self.cross_attention_injector,
-            scaffold_manager=self.scaffold_manager,
-            temperament=self.temperament_system,
-            curiosity_manager=self.curiosity_manager
-        )
-
-        self.tuner = SOVLTuner(
-            config_manager=self.config_manager,
-            logger=self.logger,
-            curiosity_manager=self.curiosity_manager,
-            trainer=self.trainer,
-            cross_attention_injector=self.cross_attention_injector
-        )
+        # Note: processor initialization commented out as it's not defined in the provided code
+        # self.processor.set_token_map(self.state.token_map, self.scaffold_unk_id)
 
     def _validate_config(self, model_config: Optional[Any] = None) -> bool:
-        """
-        Validate system configuration.
-
-        Args:
-            model_config: Optional model configuration for layer validation
-
-        Returns:
-            bool: True if validation succeeds, False otherwise
-        """
+        """Validate system configuration."""
         try:
-            # Delegate validation to ConfigManager
             if not self.config_manager.validate_config(model_config):
                 return False
-
-            # Additional system-specific validation can be added here if needed
             return True
-
         except Exception as e:
             self.logger.record({
                 "error": f"Configuration validation failed: {str(e)}",
@@ -482,7 +379,7 @@ class SOVLSystem:
             return False
 
     def _insert_cross_attention(self):
-        """Inject cross-attention layers using the scaffold injector."""
+        """Inject cross-attention layers into the model."""
         if not self.cross_attn_config.get("enable_cross_attention", True):
             self.logger.record({
                 "event": "cross_attention",
@@ -490,9 +387,9 @@ class SOVLSystem:
                 "timestamp": time.time()
             })
             return
-            
+
+        print("Injecting cross-attention layers...")
         try:
-            # Use the injector from sovl_scaffold
             self.cross_attention_injector.inject_cross_attention(
                 model=self.base_model,
                 scaffold_model=self.scaffolds[0],
@@ -503,44 +400,47 @@ class SOVLSystem:
                 device=self.device
             )
 
-            # Verify the injection
             expected_layers = self.core_config.get("cross_attn_layers", [])
             if not self.cross_attention_injector.verify_injection(
                 self.base_model,
                 expected_layers,
-                self.base_config
+                self.base_model.config
             ):
                 raise ValueError("Cross-attention layer verification failed")
-
         except Exception as e:
             self.error_handler.handle_cross_attention_error(e)
+        print("Cross-attention injection complete.")
 
-    def check_memory_health(self, model_size: int, trainer: Optional[Trainer] = None):
-        """Delegate memory health check to MemoryManager."""
+    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None):
+        """Check system memory health."""
         return self.memory_manager.check_memory_health(model_size, trainer)
 
-    def generate_curiosity_question(self, state: SOVLState, tokenizer: PreTrainedTokenizer,
-                                  model: PreTrainedModel, context: str = "",
-                                  spontaneous: bool = False) -> Optional[str]:
+    def generate_curiosity_question(self, context: str = "", spontaneous: bool = False) -> Optional[str]:
         """Generate a curiosity-driven question."""
+        if not self.curiosity_manager:
+            return None
         try:
-            # ... question generation implementation ...
-            
+            question = self.curiosity_manager.generate_question(
+                context=context,
+                spontaneous=spontaneous,
+                model=self.base_model,
+                tokenizer=self.base_tokenizer
+            )
             if question:
                 self.logger.log_curiosity_event(
                     event_type="question_generated",
                     question=question,
                     spontaneous=spontaneous,
-                    conversation_id=state.conversation_id,
-                    state_hash=state.get_state_hash()
+                    conversation_id=self.state.conversation_id,
+                    state_hash=self.state.get_state_hash()
                 )
-                
             return question
         except Exception as e:
             self.error_handler.handle_curiosity_error(e, "question_generation")
             return None
 
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
+        """Handle completion of a training cycle."""
         self.state.update_data_exposure(data_exposure)
         self.logger.record({
             "event": "training_complete_handled",
@@ -553,6 +453,7 @@ class SOVLSystem:
         })
 
     def handle_gestation_complete(self, batch_size: int, avg_loss: float):
+        """Handle completion of a gestation cycle."""
         self.state.update_gestation_metrics(batch_size, avg_loss)
         self.logger.record({
             "event": "gestation_complete_handled",
@@ -564,6 +465,7 @@ class SOVLSystem:
         })
 
     def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
+        """Handle completion of a dream cycle."""
         self.state.update_dream_metrics(dream_prompt, is_novel, memory_count)
         self.logger.record({
             "event": "dream_complete_handled",
@@ -576,6 +478,7 @@ class SOVLSystem:
         })
 
     def handle_sleep_train_complete(self, batch_size: int, data_exposure: float):
+        """Handle completion of a sleep training cycle."""
         self.state.update_sleep_metrics(batch_size, data_exposure)
         self.logger.record({
             "event": "sleep_train_complete_handled",
@@ -586,8 +489,8 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
 
-    def update_metrics(self, question, score, spontaneous=False, answered=False):
-        """Update curiosity metrics using the state's curiosity manager."""
+    def update_metrics(self, question: str, score: float, spontaneous: bool = False, answered: bool = False):
+        """Update curiosity metrics."""
         if self.state.curiosity:
             self.state.curiosity.update_metrics(
                 question=question,
@@ -601,67 +504,48 @@ class SOVLSystem:
     def _update_temperament(self) -> None:
         """Update temperament based on current state."""
         try:
-            # Get current state values
-            sleep_confidence_sum = self.state.sleep_confidence_sum
-            sleep_confidence_count = self.state.sleep_confidence_count
-            data_exposure = self.state.data_exposure
-            lora_capacity = self.state.lora_capacity
-            curiosity_pressure = self.curiosity_manager.get_pressure()
-            
-            # Compute and update temperament
             self.temperament_system.compute_and_update(
-                sleep_confidence_sum=sleep_confidence_sum,
-                sleep_confidence_count=sleep_confidence_count,
-                data_exposure=data_exposure,
-                lora_capacity=lora_capacity,
-                curiosity_pressure=curiosity_pressure
+                sleep_confidence_sum=self.state.sleep_confidence_sum,
+                sleep_confidence_count=self.state.sleep_confidence_count,
+                data_exposure=self.state.data_exposure,
+                lora_capacity=self.state.lora_capacity,
+                curiosity_pressure=self.curiosity_manager.get_pressure() if self.curiosity_manager else 0.0
             )
-            
-            # Sync state with new temperament
             self.state.temperament_score = self.temperament_system.score
             self.state.mood_label = self.temperament_system.mood_label
-            
         except Exception as e:
-            self.logger.error(f"Failed to update temperament: {str(e)}")
+            self.logger.record({
+                "error": f"Failed to update temperament: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
             raise
 
     def train_step(self, batch: List[dict], dry_run: bool = False, dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
-        """
-        Execute a single training step.
-        
-        Args:
-            batch: List of training examples
-            dry_run: Whether to perform a dry run
-            dry_run_params: Parameters for dry run if enabled
-            
-        Returns:
-            Optional[float]: Loss value if training was performed, None if dry run
-        """
+        """Execute a single training step."""
         try:
-            # Get scaffold context from scaffold manager
-            scaffold_provider = self.scaffold_manager.get_scaffold_context if hasattr(self, 'scaffold_manager') else None
-            
-            # Delegate to trainer
+            scaffold_provider = self.scaffold_manager.get_scaffold_context
             return self.trainer.train_step_with_scaffold(
                 batch=batch,
                 scaffold_provider=scaffold_provider,
                 dry_run=dry_run,
                 dry_run_params=dry_run_params
             )
-            
         except Exception as e:
-            self.logger({
+            self.logger.record({
                 "event": "training_error",
                 "error": str(e),
                 "batch_size": len(batch),
                 "timestamp": time.time(),
-                "conversation_id": getattr(self.state, "conversation_id", "training"),
-                "state_hash": getattr(self.state, "state_hash", None)
+                "conversation_id": self.state.conversation_id,
+                "state_hash": self.state.state_hash()
             })
             raise
 
-    def run_training_cycle(self, train_data, valid_data, epochs=None, batch_size=None):
+    def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, epochs: Optional[int] = None, batch_size: Optional[int] = None):
         """Run a full training cycle."""
+        train_data = train_data or self.train_data
+        valid_data = valid_data or self.valid_data
         epochs = epochs or self.training_config.get("train_epochs", 3)
         batch_size = batch_size or self.training_config.get("batch_size", 1)
 
@@ -696,10 +580,12 @@ class SOVLSystem:
         })
         print(f"Data exposure: {self.trainer.data_exposure} | Scaffold influence: {influence_weight:.3f}")
 
-        if self.dry_run and self.dry_run_params['skip_training']:
+        dry_run = self.training_config.get("dry_run", False)
+        dry_run_params = self.training_config.get("dry_run_params", {})
+        if dry_run and dry_run_params.get("skip_training", True):
             print("\n=== DRY RUN TRAINING ===")
-            dry_batch = train_data[:self.dry_run_params['max_samples']]
-            loss = self.train_step(dry_batch)
+            dry_batch = train_data[:dry_run_params.get("max_samples", 2)]
+            loss = self.train_step(dry_batch, dry_run=True, dry_run_params=dry_run_params)
             self.logger.record({
                 "event": "dry_run_training_complete",
                 "loss": loss,
@@ -714,7 +600,7 @@ class SOVLSystem:
         start_time = time.time()
 
         def scaffold_provider(batch):
-            prompts = batch['prompt']
+            prompts = batch["prompt"]
             scaffold_inputs = self.tokenize_and_map(prompts)
             return self.get_scaffold_hidden_states(scaffold_inputs)
 
@@ -733,7 +619,7 @@ class SOVLSystem:
             "duration": time.time() - start_time,
             "last_weight": self.last_weight,
             "training_history": training_results.get("training_history", []),
-            "best_val_loss": training_results.get("best_val_loss", float('inf')),
+            "best_val_loss": training_results.get("best_val_loss", float("inf")),
             "final_epoch": training_results.get("final_epoch", 0),
             "early_stopped": training_results.get("early_stopped", False),
             "timestamp": time.time(),
@@ -746,36 +632,31 @@ class SOVLSystem:
         """Train on dream-generated content."""
         if not self.controls_config.get("enable_sleep_training", True):
             return
-            
+
         print("\n--- Sleep Training Initiated ---")
         log_entries = self.logger.read()
-        
-        # Delegate sleep training to trainer
         self.trainer.sleep_train(log_entries)
-        
-        # Update system state
         self.last_trained = time.time()
         self.logger.clear()
         self.last_weight = self.trainer.get_life_curve_weight()
-        
-        # Update temperament if enabled
-        if self.enable_temperament:
+
+        if self.controls_config.get("enable_temperament", True):
             self._update_temperament()
-            self.last_temperament_score = self.temperament_score
-            
+            self.last_temperament_score = self.temperament_system.score
+
         print("--- Sleep Training Complete ---")
 
-    def has_repetition(self, output_ids, n=3):
+    def has_repetition(self, output_ids, n: int = 3) -> bool:
         """Check for repetition in generated output."""
         return self.generation_manager.has_repetition(output_ids, n)
-    
-    def _handle_error_prompt(self, error_msg):
+
+    def _handle_error_prompt(self, error_msg: str) -> str:
         """Generate a response to a system error."""
         return self.generation_manager._handle_error_prompt(error_msg)
 
     @torch.no_grad()
-    def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
-        """Generate a response for the given prompt using the generation manager."""
+    def generate(self, prompt: str, max_new_tokens: int = 50, scaffold_weight: Optional[float] = None, **kwargs) -> str:
+        """Generate a response for the given prompt."""
         try:
             return self.generation_manager.generate(
                 prompt=prompt,
@@ -786,19 +667,45 @@ class SOVLSystem:
         except Exception as e:
             return self.error_handler.handle_generation_error(e, prompt)
 
-    def tokenize_and_map(self, prompts, max_length=None):
-        """Tokenize prompts and map to scaffold token space using the generation manager."""
+    def tokenize_and_map(self, prompts: List[str], max_length: Optional[int] = None) -> Dict:
+        """Tokenize prompts and map to scaffold token space."""
         return self.generation_manager.tokenize_and_map(prompts, max_length)
 
-    def _update_token_map_memory(self, prompt, confidence):
-        """Update token map memory based on prompt confidence using the generation manager."""
+    def _update_token_map_memory(self, prompt: str, confidence: float):
+        """Update token map memory based on prompt confidence."""
         self.generation_manager._update_token_map_memory(prompt, confidence)
 
     def _clear_scaffold_cache(self):
-        """Clear scaffold-related caches using the generation manager."""
+        """Clear scaffold-related caches."""
         self.generation_manager._clear_scaffold_cache()
 
-# Main block moved to sovl_conductor.py
+    def set_scaffold_influence(self, weight: float):
+        """Set the influence weight for scaffold integration."""
+        self.last_weight = weight
+        # Implementation depends on scaffold_manager; placeholder for actual integration
+        self.logger.record({
+            "event": "scaffold_influence_updated",
+            "weight": weight,
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id,
+            "state_hash": self.state.state_hash()
+        })
+
+    def load_state(self):
+        """Load saved system state."""
+        # Implementation depends on state persistence mechanism
+        self.logger.record({
+            "event": "state_loaded",
+            "timestamp": time.time(),
+            "conversation_id": self.history.conversation_id,
+            "state_hash": self.state.state_hash()
+        })
+
+    def get_scaffold_hidden_states(self, scaffold_inputs: Dict) -> torch.Tensor:
+        """Get hidden states from scaffold model."""
+        # Placeholder; actual implementation depends on scaffold model
+        return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.device)
+
 if __name__ == "__main__":
     from sovl_conductor import SOVLOrchestrator
     orchestrator = SOVLOrchestrator()
@@ -808,4 +715,4 @@ if __name__ == "__main__":
         print(f"Error running SOVL system: {str(e)}")
         raise
     finally:
-        orchestrator.shutdown()    
+        orchestrator.shutdown()
