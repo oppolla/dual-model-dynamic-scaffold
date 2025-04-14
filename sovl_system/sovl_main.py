@@ -2,14 +2,14 @@ from typing import Optional, Any, List, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, TaskType
 import time
 import random
 import bitsandbytes as bnb
 import json
 import contextlib
-from collections import deque, defaultdict, OrderedDict
+from collections import deque
 import traceback
 import os
 from threading import Lock
@@ -17,22 +17,13 @@ from sovl_curiosity import CuriosityManager, CuriosityState
 from sovl_logger import Logger
 from sovl_io import load_training_data, validate_quantization_mode, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
-from sovl_trainer import TrainingConfig, SOVLTrainer, collate_batch
+from sovl_trainer import TrainingConfig, SOVLTrainer
 from sovl_config import ConfigManager
-from sovl_scaffold import inject_cross_attention, CrossAttentionInjector, ScaffoldManager, ScaffoldTokenMapper, build_scaffold_token_mapping
+from sovl_scaffold import CrossAttentionInjector, ScaffoldManager
 from sovl_processor import LogitsProcessor
 from sovl_utils import (
-    NumericalGuard,
-    safe_divide,
-    memory_usage,
-    log_memory_usage,
-    cosine_similarity_matrix,
-    float_lt,
-    get_parameter_count,
-    adjust_temperature,
     calculate_confidence,
     detect_repetitions,
-    validate_layer_indices,
 )
 from sovl_temperament import TemperamentConfig, TemperamentSystem
 from sovl_memory import MemoryManager
@@ -76,7 +67,7 @@ class SOVLSystem:
         # Post-initialization setup
         self._post_initialize()
 
-    def _setup_logging(self):
+    def _setup_logging(self) -> None:
         """Configure logging for system and error events."""
         self.logger = Logger(
             log_file=self.config_manager.get("logging_config.log_file", "sovl_system_logs.jsonl"),
@@ -90,7 +81,7 @@ class SOVLSystem:
             compress_old=True
         )
 
-    def _initialize_components(self):
+    def _initialize_components(self) -> None:
         """Initialize core system components."""
         # Cache configuration sections
         self.core_config = self.config_manager.get_section("core_config")
@@ -99,6 +90,10 @@ class SOVLSystem:
         self.cross_attn_config = self.config_manager.get_section("cross_attn_config")
         self.controls_config = self.config_manager.get_section("controls_config")
         self.lora_config = self.config_manager.get_section("lora_config")
+
+        # Validate configuration early
+        if not self._validate_config():
+            raise ValueError("Configuration validation failed")
 
         # Initialize error handler
         self.error_handler = ErrorHandler(
@@ -119,9 +114,6 @@ class SOVLSystem:
 
         # Initialize temperament system
         self._initialize_temperament()
-
-        # Validate configuration
-        self._validate_config()
 
         # Initialize model manager
         self.model_manager = ModelManager(
@@ -188,7 +180,7 @@ class SOVLSystem:
             cross_attention_injector=self.cross_attention_injector
         )
 
-    def _initialize_temperament(self):
+    def _initialize_temperament(self) -> None:
         """Set up the temperament system."""
         temperament_config = TemperamentConfig(
             eager_threshold=self.controls_config.get("temp_eager_threshold", 0.7),
@@ -213,7 +205,7 @@ class SOVLSystem:
             device=self.device
         )
 
-    def _initialize_trainer(self):
+    def _initialize_trainer(self) -> None:
         """Set up the trainer with training configuration."""
         training_config = TrainingConfig(
             learning_rate=self.training_config.get("learning_rate", 0.0003),
@@ -282,7 +274,7 @@ class SOVLSystem:
         )
         self.trainer.memory_check = self.check_memory_health
 
-    def _load_training_data(self):
+    def _load_training_data(self) -> None:
         """Load and split training data."""
         try:
             self.train_data = load_training_data("sovl_seed.jsonl", min_entries=0)
@@ -324,10 +316,11 @@ class SOVLSystem:
             self.valid_data = []
             self.logger.record({
                 "warning": "No training data available",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "conversation_id": "init"
             })
 
-    def _initialize_state(self):
+    def _initialize_state(self) -> None:
         """Initialize system state and related components."""
         self.memory_lock = Lock()
         self.mem_usage_history = deque(maxlen=10)
@@ -357,16 +350,19 @@ class SOVLSystem:
             self.curiosity_manager.state = self.state.curiosity
         self.generation_manager.curiosity_manager = self.curiosity_manager
 
-    def _post_initialize(self):
+    def _post_initialize(self) -> None:
         """Perform post-initialization setup."""
         self.last_question_time = time.time()
-        # Note: processor initialization commented out as it's not defined in the provided code
-        # self.processor.set_token_map(self.state.token_map, self.scaffold_unk_id)
 
     def _validate_config(self, model_config: Optional[Any] = None) -> bool:
         """Validate system configuration."""
         try:
             if not self.config_manager.validate_config(model_config):
+                self.logger.record({
+                    "error": "Configuration validation failed",
+                    "timestamp": time.time(),
+                    "conversation_id": "validate"
+                })
                 return False
             return True
         except Exception as e:
@@ -378,13 +374,14 @@ class SOVLSystem:
             })
             return False
 
-    def _insert_cross_attention(self):
+    def _insert_cross_attention(self) -> None:
         """Inject cross-attention layers into the model."""
         if not self.cross_attn_config.get("enable_cross_attention", True):
             self.logger.record({
                 "event": "cross_attention",
                 "status": "disabled",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "conversation_id": "init"
             })
             return
 
@@ -407,17 +404,28 @@ class SOVLSystem:
                 self.base_model.config
             ):
                 raise ValueError("Cross-attention layer verification failed")
+            self.logger.record({
+                "event": "cross_attention_injected",
+                "timestamp": time.time(),
+                "conversation_id": "init"
+            })
         except Exception as e:
             self.error_handler.handle_cross_attention_error(e)
+            raise
         print("Cross-attention injection complete.")
 
-    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None):
+    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
         """Check system memory health."""
         return self.memory_manager.check_memory_health(model_size, trainer)
 
     def generate_curiosity_question(self, context: str = "", spontaneous: bool = False) -> Optional[str]:
         """Generate a curiosity-driven question."""
         if not self.curiosity_manager:
+            self.logger.record({
+                "warning": "Curiosity manager not initialized",
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
             return None
         try:
             question = self.curiosity_manager.generate_question(
@@ -439,7 +447,7 @@ class SOVLSystem:
             self.error_handler.handle_curiosity_error(e, "question_generation")
             return None
 
-    def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
+    def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float) -> None:
         """Handle completion of a training cycle."""
         self.state.update_data_exposure(data_exposure)
         self.logger.record({
@@ -452,7 +460,7 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
 
-    def handle_gestation_complete(self, batch_size: int, avg_loss: float):
+    def handle_gestation_complete(self, batch_size: int, avg_loss: float) -> None:
         """Handle completion of a gestation cycle."""
         self.state.update_gestation_metrics(batch_size, avg_loss)
         self.logger.record({
@@ -464,7 +472,7 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
 
-    def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
+    def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Handle completion of a dream cycle."""
         self.state.update_dream_metrics(dream_prompt, is_novel, memory_count)
         self.logger.record({
@@ -477,7 +485,7 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
 
-    def handle_sleep_train_complete(self, batch_size: int, data_exposure: float):
+    def handle_sleep_train_complete(self, batch_size: int, data_exposure: float) -> None:
         """Handle completion of a sleep training cycle."""
         self.state.update_sleep_metrics(batch_size, data_exposure)
         self.logger.record({
@@ -489,7 +497,7 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
 
-    def update_metrics(self, question: str, score: float, spontaneous: bool = False, answered: bool = False):
+    def update_metrics(self, question: str, score: float, spontaneous: bool = False, answered: bool = False) -> None:
         """Update curiosity metrics."""
         if self.state.curiosity:
             self.state.curiosity.update_metrics(
@@ -504,20 +512,29 @@ class SOVLSystem:
     def _update_temperament(self) -> None:
         """Update temperament based on current state."""
         try:
+            curiosity_pressure = self.curiosity_manager.get_pressure() if self.curiosity_manager else 0.0
             self.temperament_system.compute_and_update(
                 sleep_confidence_sum=self.state.sleep_confidence_sum,
                 sleep_confidence_count=self.state.sleep_confidence_count,
                 data_exposure=self.state.data_exposure,
                 lora_capacity=self.state.lora_capacity,
-                curiosity_pressure=self.curiosity_manager.get_pressure() if self.curiosity_manager else 0.0
+                curiosity_pressure=curiosity_pressure
             )
             self.state.temperament_score = self.temperament_system.score
             self.state.mood_label = self.temperament_system.mood_label
+            self.logger.record({
+                "event": "temperament_updated",
+                "score": self.temperament_system.score,
+                "mood_label": self.temperament_system.mood_label,
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to update temperament: {str(e)}",
                 "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": self.history.conversation_id
             })
             raise
 
@@ -542,7 +559,8 @@ class SOVLSystem:
             })
             raise
 
-    def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, epochs: Optional[int] = None, batch_size: Optional[int] = None):
+    def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
+                         epochs: Optional[int] = None, batch_size: Optional[int] = None) -> None:
         """Run a full training cycle."""
         train_data = train_data or self.train_data
         valid_data = valid_data or self.valid_data
@@ -600,17 +618,26 @@ class SOVLSystem:
         start_time = time.time()
 
         def scaffold_provider(batch):
-            prompts = batch["prompt"]
+            prompts = batch.get("prompt", [])
             scaffold_inputs = self.tokenize_and_map(prompts)
             return self.get_scaffold_hidden_states(scaffold_inputs)
 
-        training_results = self.trainer.run_training_cycle(
-            train_data=train_data,
-            validation_data=valid_data,
-            scaffold_provider=scaffold_provider,
-            max_epochs=epochs,
-            early_stopping_patience=self.training_config.get("max_patience", 3)
-        )
+        try:
+            training_results = self.trainer.run_training_cycle(
+                train_data=train_data,
+                validation_data=valid_data,
+                scaffold_provider=scaffold_provider,
+                max_epochs=epochs,
+                early_stopping_patience=self.training_config.get("max_patience", 3)
+            )
+        except Exception as e:
+            self.logger.record({
+                "error": f"Training cycle failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "state_hash": self.state.state_hash()
+            })
+            raise
 
         self.last_weight = self.trainer.get_life_curve_weight()
         self.set_scaffold_influence(self.last_weight)
@@ -628,25 +655,45 @@ class SOVLSystem:
         })
         print(f"--- Training Finished ({time.time() - start_time:.2f}s) ---")
 
-    def _sleep_train(self):
+    def _sleep_train(self) -> None:
         """Train on dream-generated content."""
         if not self.controls_config.get("enable_sleep_training", True):
+            self.logger.record({
+                "event": "sleep_training_skipped",
+                "reason": "Sleep training disabled",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
             return
 
         print("\n--- Sleep Training Initiated ---")
-        log_entries = self.logger.read()
-        self.trainer.sleep_train(log_entries)
-        self.last_trained = time.time()
-        self.logger.clear()
-        self.last_weight = self.trainer.get_life_curve_weight()
+        try:
+            log_entries = self.logger.read()
+            self.trainer.sleep_train(log_entries)
+            self.last_trained = time.time()
+            self.logger.clear()
+            self.last_weight = self.trainer.get_life_curve_weight()
 
-        if self.controls_config.get("enable_temperament", True):
-            self._update_temperament()
-            self.last_temperament_score = self.temperament_system.score
+            if self.controls_config.get("enable_temperament", True):
+                self._update_temperament()
+                self.last_temperament_score = self.temperament_system.score
 
+            self.logger.record({
+                "event": "sleep_training_complete",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
+        except Exception as e:
+            self.logger.record({
+                "error": f"Sleep training failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "stack_trace": traceback.format_exc()
+            })
+            raise
         print("--- Sleep Training Complete ---")
 
-    def has_repetition(self, output_ids, n: int = 3) -> bool:
+    def has_repetition(self, output_ids: List[int], n: int = 3) -> bool:
         """Check for repetition in generated output."""
         return self.generation_manager.has_repetition(output_ids, n)
 
@@ -658,31 +705,68 @@ class SOVLSystem:
     def generate(self, prompt: str, max_new_tokens: int = 50, scaffold_weight: Optional[float] = None, **kwargs) -> str:
         """Generate a response for the given prompt."""
         try:
-            return self.generation_manager.generate(
+            response = self.generation_manager.generate(
                 prompt=prompt,
                 max_new_tokens=max_new_tokens,
                 scaffold_weight=scaffold_weight,
                 **kwargs
             )
+            self.logger.record({
+                "event": "generation_complete",
+                "prompt": prompt,
+                "response_length": len(response),
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
+            return response
         except Exception as e:
+            self.logger.record({
+                "error": f"Generation failed: {str(e)}",
+                "prompt": prompt,
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
             return self.error_handler.handle_generation_error(e, prompt)
 
     def tokenize_and_map(self, prompts: List[str], max_length: Optional[int] = None) -> Dict:
         """Tokenize prompts and map to scaffold token space."""
-        return self.generation_manager.tokenize_and_map(prompts, max_length)
+        try:
+            return self.generation_manager.tokenize_and_map(prompts, max_length)
+        except Exception as e:
+            self.logger.record({
+                "error": f"Tokenization failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
+            raise
 
-    def _update_token_map_memory(self, prompt: str, confidence: float):
+    def _update_token_map_memory(self, prompt: str, confidence: float) -> None:
         """Update token map memory based on prompt confidence."""
-        self.generation_manager._update_token_map_memory(prompt, confidence)
+        try:
+            self.generation_manager._update_token_map_memory(prompt, confidence)
+        except Exception as e:
+            self.logger.record({
+                "error": f"Token map memory update failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
+            raise
 
-    def _clear_scaffold_cache(self):
+    def _clear_scaffold_cache(self) -> None:
         """Clear scaffold-related caches."""
-        self.generation_manager._clear_scaffold_cache()
+        try:
+            self.generation_manager._clear_scaffold_cache()
+        except Exception as e:
+            self.logger.record({
+                "error": f"Scaffold cache clear failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
+            raise
 
-    def set_scaffold_influence(self, weight: float):
+    def set_scaffold_influence(self, weight: float) -> None:
         """Set the influence weight for scaffold integration."""
         self.last_weight = weight
-        # Implementation depends on scaffold_manager; placeholder for actual integration
         self.logger.record({
             "event": "scaffold_influence_updated",
             "weight": weight,
@@ -691,20 +775,36 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
 
-    def load_state(self):
+    def load_state(self) -> None:
         """Load saved system state."""
-        # Implementation depends on state persistence mechanism
-        self.logger.record({
-            "event": "state_loaded",
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        })
+        try:
+            # Implementation depends on state persistence mechanism
+            self.logger.record({
+                "event": "state_loaded",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id,
+                "state_hash": self.state.state_hash()
+            })
+        except Exception as e:
+            self.logger.record({
+                "error": f"State loading failed: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.history.conversation_id
+            })
+            raise
 
     def get_scaffold_hidden_states(self, scaffold_inputs: Dict) -> torch.Tensor:
         """Get hidden states from scaffold model."""
-        # Placeholder; actual implementation depends on scaffold model
-        return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.device)
+        try:
+            # Placeholder; actual implementation depends on scaffold model
+            return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.device)
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to get scaffold hidden states: {str(e)}",
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
+            raise
 
 if __name__ == "__main__":
     from sovl_conductor import SOVLOrchestrator
