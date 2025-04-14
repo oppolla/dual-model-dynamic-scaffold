@@ -1,7 +1,7 @@
 import json
 import os
 import gzip
-import hashlib  # Added for _compute_config_hash
+import hashlib
 from typing import Any, Optional, Dict, List, Union, Callable
 from dataclasses import dataclass
 from threading import Lock
@@ -21,10 +21,202 @@ class ConfigSchema:
     required: bool = False
     nullable: bool = False
 
+class _SchemaValidator:
+    """Handles configuration schema validation logic."""
+    
+    def __init__(self, logger: Logger):
+        self.logger = logger
+        self.schemas: Dict[str, ConfigSchema] = {}
+
+    def register(self, schemas: List[ConfigSchema]):
+        """Register new schemas."""
+        self.schemas.update({s.field: s for s in schemas})
+
+    def validate(self, key: str, value: Any, conversation_id: str = "init") -> tuple[bool, Any]:
+        """Validate a value against its schema."""
+        schema = self.schemas.get(key)
+        if not schema:
+            self.logger.record({
+                "error": f"Unknown configuration key: {key}",
+                "timestamp": time.time(),
+                "conversation_id": conversation_id
+            })
+            return False, None
+
+        if value is None:
+            if schema.required:
+                self.logger.record({
+                    "error": f"Required field {key} is missing",
+                    "suggested": f"Set to default: {schema.default}",
+                    "timestamp": time.time(),
+                    "conversation_id": conversation_id
+                })
+                return False, schema.default
+            if schema.nullable:
+                return True, value
+            return False, schema.default
+
+        if not isinstance(value, schema.type):
+            self.logger.record({
+                "warning": f"Invalid type for {key}: expected {schema.type.__name__}, got {type(value).__name__}",
+                "suggested": f"Set to default: {schema.default}",
+                "timestamp": time.time(),
+                "conversation_id": conversation_id
+            })
+            return False, schema.default
+
+        if schema.validator and not schema.validator(value):
+            valid_options = getattr(schema.validator, '__doc__', '') or str(schema.validator)
+            self.logger.record({
+                "warning": f"Invalid value for {key}: {value}",
+                "suggested": f"Valid options: {valid_options}, default: {schema.default}",
+                "timestamp": time.time(),
+                "conversation_id": conversation_id
+            })
+            return False, schema.default
+
+        if schema.range and not (schema.range[0] <= value <= schema.range[1]):
+            self.logger.record({
+                "warning": f"Value for {key} out of range {schema.range}: {value}",
+                "suggested": f"Set to default: {schema.default}",
+                "timestamp": time.time(),
+                "conversation_id": conversation_id
+            })
+            return False, schema.default
+
+        return True, value
+
+class _ConfigStore:
+    """Manages configuration storage and structure."""
+
+    def __init__(self):
+        self.flat_config: Dict[str, Any] = {}
+        self.structured_config: Dict[str, Any] = {
+            "core_config": {},
+            "lora_config": {},
+            "training_config": {"dry_run_params": {}},
+            "curiosity_config": {},
+            "cross_attn_config": {},
+            "controls_config": {},
+            "logging_config": {},
+        }
+        self.cache: Dict[str, Any] = {}
+
+    def set_value(self, key: str, value: Any):
+        """Set a value in flat and structured configs."""
+        self.cache[key] = value
+        keys = key.split('.')
+        if len(keys) == 2:
+            section, field = keys
+            self.flat_config.setdefault(section, {})[field] = value
+            self.structured_config[section][field] = value
+        elif len(keys) == 3 and keys[0] == "training_config" and keys[1] == "dry_run_params":
+            section, sub_section, field = keys
+            self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
+            self.structured_config[section][sub_section][field] = value
+
+    def get_value(self, key: str, default: Any) -> Any:
+        """Retrieve a value from the configuration."""
+        if key in self.cache:
+            return self.cache[key]
+        keys = key.split('.')
+        value = self.flat_config
+        for k in keys:
+            if isinstance(value, dict):
+                value = value.get(k, default)
+            else:
+                return default
+        return value if value != {} and value is not None else default
+
+    def get_section(self, section: str) -> Dict[str, Any]:
+        """Get an entire configuration section."""
+        return self.structured_config.get(section, {})
+
+    def rebuild_structured(self, schemas: List[ConfigSchema]):
+        """Rebuild structured config from flat config."""
+        for schema in schemas:
+            keys = schema.field.split('.')
+            section = keys[0]
+            if len(keys) == 2:
+                field = keys[1]
+                self.structured_config[section][field] = self.get_value(schema.field, schema.default)
+            elif len(keys) == 3 and section == "training_config" and keys[1] == "dry_run_params":
+                field = keys[2]
+                self.structured_config[section]["dry_run_params"][field] = self.get_value(schema.field, schema.default)
+
+    def update_cache(self, schemas: List[ConfigSchema]):
+        """Update cache with current config values."""
+        self.cache = {schema.field: self.get_value(schema.field, schema.default) for schema in schemas}
+
+class _FileHandler:
+    """Handles configuration file operations."""
+
+    def __init__(self, config_file: str, logger: Logger):
+        self.config_file = config_file
+        self.logger = logger
+
+    def load(self, max_retries: int = 3) -> Dict[str, Any]:
+        """Load configuration file with retry logic."""
+        for attempt in range(max_retries):
+            try:
+                if not os.path.exists(self.config_file):
+                    return {}
+                if self.config_file.endswith('.gz'):
+                    with gzip.open(self.config_file, 'rt', encoding='utf-8') as f:
+                        return json.load(f)
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError, gzip.BadGzipFile) as e:
+                self.logger.record({
+                    "error": f"Attempt {attempt + 1} failed to load config {self.config_file}: {str(e)}",
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc(),
+                    "conversation_id": "init"
+                })
+                if attempt == max_retries - 1:
+                    return {}
+            time.sleep(0.1)
+        return {}
+
+    def save(self, config: Dict[str, Any], file_path: Optional[str] = None, compress: bool = False, max_retries: int = 3) -> bool:
+        """Save configuration to file atomically."""
+        save_path = file_path or self.config_file
+        temp_file = f"{save_path}.tmp"
+        for attempt in range(max_retries):
+            try:
+                if compress:
+                    with gzip.open(temp_file, 'wt', encoding='utf-8') as f:
+                        json.dump(config, f, indent=2)
+                else:
+                    with open(temp_file, 'w', encoding='utf-8') as f:
+                        json.dump(config, f, indent=2)
+                os.replace(temp_file, save_path)
+                self.logger.record({
+                    "event": "config_save",
+                    "file_path": save_path,
+                    "compressed": compress,
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
+                })
+                return True
+            except Exception as e:
+                self.logger.record({
+                    "error": f"Attempt {attempt + 1} failed to save config to {save_path}: {str(e)}",
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc(),
+                    "conversation_id": "init"
+                })
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                if attempt == max_retries - 1:
+                    return False
+                time.sleep(0.1)
+        return False
+
 class ConfigManager:
     """Manages SOVLSystem configuration with validation, thread safety, and persistence."""
-    
-    SCHEMA = [
+
+    DEFAULT_SCHEMA = [
         # core_config
         ConfigSchema("core_config.base_model_name", str, "gpt2", required=True),
         ConfigSchema("core_config.scaffold_model_name", str, "gpt2", required=True),
@@ -154,71 +346,35 @@ class ConfigManager:
         """
         self.config_file = os.getenv("SOVL_CONFIG_FILE", config_file)
         self.logger = logger
-        self.config = {}  # Flat dictionary
-        self._structured_config = {}  # Structured dictionary
-        self._cache = {}  # Cache for frequent access
+        self.store = _ConfigStore()
+        self.validator = _SchemaValidator(logger)
+        self.file_handler = _FileHandler(self.config_file, logger)
         self.lock = Lock()
         self._frozen = False
-        self._last_config_hash = None
-        self._load_config()
+        self._last_config_hash = ""
+        self.validator.register(self.DEFAULT_SCHEMA)
+        self._initialize_config()
 
-    def _load_config(self, max_retries: int = 3):
-        """Load and validate configuration file with retry logic."""
-        for attempt in range(max_retries):
-            try:
-                with self.lock:
-                    if os.path.exists(self.config_file):
-                        if self.config_file.endswith('.gz'):
-                            with gzip.open(self.config_file, 'rt', encoding='utf-8') as f:
-                                self.config = json.load(f)
-                        else:
-                            with open(self.config_file, 'r', encoding='utf-8') as f:
-                                self.config = json.load(f)
-                    else:
-                        self.config = {}
-                    self._validate_config()
-                    self._build_structured_config()
-                    self._update_cache()
-                    self._last_config_hash = self._compute_config_hash()
-                    self.logger.record({
-                        "event": "config_load",
-                        "config_file": self.config_file,
-                        "config_hash": self._last_config_hash,
-                        "timestamp": time.time(),
-                        "conversation_id": "init"  # Added for consistency
-                    })
-                    return
-            except (FileNotFoundError, json.JSONDecodeError, gzip.BadGzipFile) as e:
-                self.logger.record({
-                    "error": f"Attempt {attempt + 1} failed to load config {self.config_file}: {str(e)}",
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc(),
-                    "conversation_id": "init"
-                })
-                if attempt == max_retries - 1:
-                    self.config = {}
-                    self._validate_config()
-                    self._build_structured_config()
-                    self._update_cache()
-                    self.logger.record({
-                        "warning": f"Using empty config after {max_retries} failed attempts",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
-            except Exception as e:
-                self.logger.record({
-                    "error": f"Fatal error loading config: {str(e)}",
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc(),
-                    "conversation_id": "init"
-                })
-                raise
-            time.sleep(0.1)
+    def _initialize_config(self):
+        """Initialize configuration by loading and validating."""
+        with self.lock:
+            self.store.flat_config = self.file_handler.load()
+            self._validate_and_set_defaults()
+            self.store.rebuild_structured(self.DEFAULT_SCHEMA)
+            self.store.update_cache(self.DEFAULT_SCHEMA)
+            self._last_config_hash = self._compute_config_hash()
+            self.logger.record({
+                "event": "config_load",
+                "config_file": self.config_file,
+                "config_hash": self._last_config_hash,
+                "timestamp": time.time(),
+                "conversation_id": "init"
+            })
 
     def _compute_config_hash(self) -> str:
         """Compute a hash of the current config for change tracking."""
         try:
-            config_str = json.dumps(self.config, sort_keys=True)
+            config_str = json.dumps(self.store.flat_config, sort_keys=True)
             return hashlib.sha256(config_str.encode()).hexdigest()[:16]
         except Exception as e:
             self.logger.record({
@@ -229,97 +385,13 @@ class ConfigManager:
             })
             return ""
 
-    def _validate_config(self):
-        """Validate configuration against schema with detailed feedback."""
-        for schema in self.SCHEMA:
-            value = self.get(schema.field, schema.default)
-            if value is None and schema.required:
-                self.logger.record({
-                    "error": f"Required field {schema.field} is missing",
-                    "suggested": f"Set to default: {schema.default}",
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
-                self._set_value(schema.field, schema.default)
-                continue
-            if value is None and schema.nullable:
-                continue
-            if value is not None:
-                if not isinstance(value, schema.type):
-                    self.logger.record({
-                        "warning": f"Invalid type for {schema.field}: expected {schema.type.__name__}, got {type(value).__name__}",
-                        "suggested": f"Set to default: {schema.default}",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
-                    self._set_value(schema.field, schema.default)
-                    continue
-                if schema.validator and not schema.validator(value):
-                    valid_options = getattr(schema.validator, '__doc__', '') or str(schema.validator)
-                    self.logger.record({
-                        "warning": f"Invalid value for {schema.field}: {value}",
-                        "suggested": f"Valid options: {valid_options}, default: {schema.default}",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
-                    self._set_value(schema.field, schema.default)
-                    continue
-                if schema.range:
-                    min_val, max_val = schema.range
-                    if not (min_val <= value <= max_val):
-                        self.logger.record({
-                            "warning": f"Value for {schema.field} out of range [{min_val}, {max_val}]: {value}",
-                            "suggested": f"Set to default: {schema.default}",
-                            "timestamp": time.time(),
-                            "conversation_id": "init"
-                        })
-                        self._set_value(schema.field, schema.default)
-
-    def _build_structured_config(self):
-        """Build structured config from flat config."""
-        self._structured_config = {
-            "core_config": {},
-            "lora_config": {},
-            "training_config": {"dry_run_params": {}},
-            "curiosity_config": {},
-            "cross_attn_config": {},
-            "controls_config": {},
-            "logging_config": {},
-        }
-        for schema in self.SCHEMA:
-            keys = schema.field.split('.')
-            section = keys[0]
-            if len(keys) == 2:
-                field = keys[1]
-                self._structured_config[section][field] = self.get(schema.field, schema.default)
-            elif len(keys) == 3 and section == "training_config" and keys[1] == "dry_run_params":
-                field = keys[2]
-                self._structured_config[section]["dry_run_params"][field] = self.get(schema.field, schema.default)
-
-    def _update_cache(self):
-        """Update cache with current config values."""
-        self._cache = {schema.field: self.get(schema.field, schema.default) for schema in self.SCHEMA}
-
-    def _set_value(self, key: str, value: Any):
-        """Set value in flat and structured configs."""
-        keys = key.split('.')
-        if len(keys) == 2:
-            section, field = keys
-            if section not in self.config:
-                self.config[section] = {}
-            self.config[section][field] = value
-            if section in self._structured_config:
-                self._structured_config[section][field] = value
-        elif len(keys) == 3 and keys[0] == "training_config" and keys[1] == "dry_run_params":
-            section, sub_section, field = keys
-            if section not in self.config:
-                self.config[section] = {}
-            if sub_section not in self.config[section]:
-                self.config[section][sub_section] = {}
-            self.config[section][sub_section][field] = value
-            if section in self._structured_config and sub_section in self._structured_config[section]:
-                self._structured_config[section][sub_section][field] = value
-        self._cache[key] = value
+    def _validate_and_set_defaults(self):
+        """Validate entire configuration and set defaults where needed."""
+        for schema in self.DEFAULT_SCHEMA:
+            value = self.store.get_value(schema.field, schema.default)
+            is_valid, corrected_value = self.validator.validate(schema.field, value)
+            if not is_valid:
+                self.store.set_value(schema.field, corrected_value)
 
     def freeze(self):
         """Prevent further updates to the configuration."""
@@ -353,15 +425,7 @@ class ConfigManager:
             Configuration value or default
         """
         with self.lock:
-            if key in self._cache:
-                return self._cache[key]
-            keys = key.split('.')
-            value = self.config
-            for k in keys:
-                if isinstance(value, dict):
-                    value = value.get(k, default)
-                else:
-                    return default
+            value = self.store.get_value(key, default)
             if value == {} or value is None:
                 self.logger.record({
                     "warning": f"Key '{key}' is empty or missing. Using default: {default}",
@@ -402,7 +466,7 @@ class ConfigManager:
             Dictionary of section key-value pairs
         """
         with self.lock:
-            return self._structured_config.get(section, {})
+            return self.store.get_section(section)
 
     def update(self, key: str, value: Any) -> bool:
         """
@@ -424,59 +488,23 @@ class ConfigManager:
                         "conversation_id": "init"
                     })
                     return False
-                for schema in self.SCHEMA:
-                    if schema.field == key:
-                        if value is None and not schema.nullable:
-                            self.logger.record({
-                                "error": f"Null value not allowed for {key}",
-                                "timestamp": time.time(),
-                                "conversation_id": "init"
-                            })
-                            return False
-                        if value is not None and not isinstance(value, schema.type):
-                            self.logger.record({
-                                "error": f"Invalid type for {key}: expected {schema.type.__name__}, got {type(value).__name__}",
-                                "timestamp": time.time(),
-                                "conversation_id": "init"
-                            })
-                            return False
-                        if schema.validator and value is not None and not schema.validator(value):
-                            valid_options = getattr(schema.validator, '__doc__', '') or str(schema.validator)
-                            self.logger.record({
-                                "error": f"Invalid value for {key}: {value}",
-                                "suggested": f"Valid options: {valid_options}",
-                                "timestamp": time.time(),
-                                "conversation_id": "init"
-                            })
-                            return False
-                        if schema.range and value is not None and not (schema.range[0] <= value <= schema.range[1]):
-                            self.logger.record({
-                                "error": f"Value for {key} out of range {schema.range}: {value}",
-                                "timestamp": time.time(),
-                                "conversation_id": "init"
-                            })
-                            return False
-                        break
-                else:
-                    self.logger.record({
-                        "error": f"Unknown configuration key: {key}",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
+
+                is_valid, corrected_value = self.validator.validate(key, value)
+                if not is_valid:
                     return False
 
-                self._set_value(key, value)
-                new_hash = self._compute_config_hash()
+                old_hash = self._last_config_hash
+                self.store.set_value(key, value)
+                self._last_config_hash = self._compute_config_hash()
                 self.logger.record({
                     "event": "config_update",
                     "key": key,
                     "value": value,
-                    "old_hash": self._last_config_hash,
-                    "new_hash": new_hash,
+                    "old_hash": old_hash,
+                    "new_hash": self._last_config_hash,
                     "timestamp": time.time(),
                     "conversation_id": "init"
                 })
-                self._last_config_hash = new_hash
                 return True
         except Exception as e:
             self.logger.record({
@@ -507,13 +535,14 @@ class ConfigManager:
                         "conversation_id": "init"
                     })
                     return False
-                original_config = self.config.copy()  # Moved outside conditional
+
+                original_config = self.store.flat_config.copy()
                 for key, value in updates.items():
                     if not self.update(key, value):
                         if rollback_on_failure:
-                            self.config = original_config
-                            self._build_structured_config()
-                            self._update_cache()
+                            self.store.flat_config = original_config
+                            self.store.rebuild_structured(self.DEFAULT_SCHEMA)
+                            self.store.update_cache(self.DEFAULT_SCHEMA)
                             self._last_config_hash = self._compute_config_hash()
                             self.logger.record({
                                 "event": "config_rollback",
@@ -531,9 +560,9 @@ class ConfigManager:
                 "conversation_id": "init"
             })
             if rollback_on_failure:
-                self.config = original_config
-                self._build_structured_config()
-                self._update_cache()
+                self.store.flat_config = original_config
+                self.store.rebuild_structured(self.DEFAULT_SCHEMA)
+                self.store.update_cache(self.DEFAULT_SCHEMA)
                 self._last_config_hash = self._compute_config_hash()
             return False
 
@@ -549,40 +578,8 @@ class ConfigManager:
         Returns:
             True if save succeeded, False otherwise
         """
-        save_path = file_path or self.config_file
-        temp_file = f"{save_path}.tmp"
-        for attempt in range(max_retries):
-            try:
-                with self.lock:
-                    if compress:
-                        with gzip.open(temp_file, 'wt', encoding='utf-8') as f:
-                            json.dump(self.config, f, indent=2)
-                    else:
-                        with open(temp_file, 'w', encoding='utf-8') as f:
-                            json.dump(self.config, f, indent=2)
-                    os.replace(temp_file, save_path)
-                    self.logger.record({
-                        "event": "config_save",
-                        "file_path": save_path,
-                        "compressed": compress,
-                        "config_hash": self._last_config_hash,
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
-                    return True
-            except Exception as e:
-                self.logger.record({
-                    "error": f"Attempt {attempt + 1} failed to save config to {save_path}: {str(e)}",
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc(),
-                    "conversation_id": "init"
-                })
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                if attempt == max_retries - 1:
-                    return False
-                time.sleep(0.1)
-        return False
+        with self.lock:
+            return self.file_handler.save(self.store.flat_config, file_path, compress, max_retries)
 
     def diff_config(self, old_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         """
@@ -597,13 +594,13 @@ class ConfigManager:
         try:
             with self.lock:
                 diff = {}
-                for key in self.config:
+                for key in self.store.flat_config:
                     old_value = old_config.get(key)
-                    new_value = self.config.get(key)
+                    new_value = self.store.flat_config.get(key)
                     if old_value != new_value:
                         diff[key] = {"old": old_value, "new": new_value}
                 for key in old_config:
-                    if key not in self.config:
+                    if key not in self.store.flat_config:
                         diff[key] = {"old": old_config[key], "new": None}
                 self.logger.record({
                     "event": "config_diff",
@@ -637,10 +634,10 @@ class ConfigManager:
                         "conversation_id": "init"
                     })
                     return
-                self.SCHEMA.extend(schemas)
-                self._validate_config()
-                self._build_structured_config()
-                self._update_cache()
+                self.validator.register(schemas)
+                self._validate_and_set_defaults()
+                self.store.rebuild_structured(self.DEFAULT_SCHEMA + schemas)
+                self.store.update_cache(self.DEFAULT_SCHEMA + schemas)
                 self._last_config_hash = self._compute_config_hash()
                 self.logger.record({
                     "event": "schema_registered",
@@ -667,7 +664,7 @@ class ConfigManager:
         with self.lock:
             return {
                 "config_file": self.config_file,
-                "config": self.config,
+                "config": self.store.flat_config,
                 "frozen": self._frozen,
                 "config_hash": self._last_config_hash
             }
@@ -682,11 +679,11 @@ class ConfigManager:
         try:
             with self.lock:
                 self.config_file = state.get("config_file", self.config_file)
-                self.config = state.get("config", {})
+                self.store.flat_config = state.get("config", {})
                 self._frozen = state.get("frozen", False)
-                self._validate_config()
-                self._build_structured_config()
-                self._update_cache()
+                self._validate_and_set_defaults()
+                self.store.rebuild_structured(self.DEFAULT_SCHEMA)
+                self.store.update_cache(self.DEFAULT_SCHEMA)
                 self._last_config_hash = self._compute_config_hash()
                 self.logger.record({
                     "event": "config_load_state",
@@ -729,33 +726,28 @@ class ConfigManager:
         profile_file = f"{os.path.splitext(self.config_file)[0]}_{profile}.json"
         try:
             with self.lock:
-                if os.path.exists(profile_file):
-                    if profile_file.endswith('.gz'):
-                        with gzip.open(profile_file, 'rt', encoding='utf-8') as f:
-                            self.config = json.load(f)
-                    else:
-                        with open(profile_file, 'r', encoding='utf-8') as f:
-                            self.config = json.load(f)
-                    self._validate_config()
-                    self._build_structured_config()
-                    self._update_cache()
-                    self._last_config_hash = self._compute_config_hash()
-                    self.logger.record({
-                        "event": "profile_load",
-                        "profile": profile,
-                        "config_file": profile_file,
-                        "config_hash": self._last_config_hash,
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
-                    return True
-                else:
+                config = self.file_handler.load()
+                if not config:
                     self.logger.record({
                         "error": f"Profile file {profile_file} not found",
                         "timestamp": time.time(),
                         "conversation_id": "init"
                     })
                     return False
+                self.store.flat_config = config
+                self._validate_and_set_defaults()
+                self.store.rebuild_structured(self.DEFAULT_SCHEMA)
+                self.store.update_cache(self.DEFAULT_SCHEMA)
+                self._last_config_hash = self._compute_config_hash()
+                self.logger.record({
+                    "event": "profile_load",
+                    "profile": profile,
+                    "config_file": profile_file,
+                    "config_hash": self._last_config_hash,
+                    "timestamp": time.time(),
+                    "conversation_id": "init"
+                })
+                return True
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to load profile {profile}: {str(e)}",
@@ -765,11 +757,11 @@ class ConfigManager:
             })
             return False
 
-    if __name__ == "__main__":
-        from sovl_logger import LoggerConfig
-        logger = Logger(LoggerConfig())
-        config_manager = ConfigManager("sovl_config.json", logger)
-        try:
-            config_manager.validate_keys(["core_config.base_model_name", "curiosity_config.attention_weight"])
-        except ValueError as e:
-            print(e)
+if __name__ == "__main__":
+    from sovl_logger import LoggerConfig
+    logger = Logger(LoggerConfig())
+    config_manager = ConfigManager("sovl_config.json", logger)
+    try:
+        config_manager.validate_keys(["core_config.base_model_name", "curiosity_config.attention_weight"])
+    except ValueError as e:
+        print(e)
