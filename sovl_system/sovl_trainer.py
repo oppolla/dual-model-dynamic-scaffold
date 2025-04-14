@@ -10,6 +10,7 @@ import threading
 import random
 from collections import deque
 from torch.optim.lr_scheduler import get_linear_schedule_with_warmup
+from transformers import AutoModelForCausalLM
 
 @dataclass
 class TrainingConfig:
@@ -490,588 +491,257 @@ class TrainingManager:
         metrics["loss"] = avg_loss
         return avg_loss, metrics
 
-class TrainingCallbacks:
-    """Handles training-related callbacks and logging."""
-    def __init__(self, trainer: 'SOVLTrainer'):
-        self.trainer = trainer
-        self.logger = trainer.logger
-        self.state = trainer.state
+class TrainingEventHandler:
+    """Handles training-related events and updates system state."""
+    
+    def __init__(self, logger: Logger, state: TrainingState):
+        self.logger = logger
+        self.state = state
 
-    def on_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
+    def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float) -> None:
         """Handle training completion event."""
-        if self.state:
-            self.state.update_data_exposure(data_exposure)
-        self.logger({
+        self.state.update_data_exposure(data_exposure)
+        self.logger.record({
             "event": "training_complete",
             "epoch": epoch,
             "avg_loss": avg_loss,
             "data_exposure": data_exposure,
             "timestamp": time.time(),
-            "conversation_id": getattr(self.state, "conversation_id", "training"),
-            "state_hash": getattr(self.state, "state_hash", None)
+            "state_hash": self.state.get_state_hash()
         })
 
-    def on_gestation_complete(self, batch_size: int, avg_loss: float):
+    def handle_gestation_complete(self, batch_size: int, avg_loss: float) -> None:
         """Handle gestation completion event."""
-        if self.state:
-            self.state.update_gestation_metrics(batch_size, avg_loss)
-        self.logger({
+        self.state.update_gestation_metrics(batch_size, avg_loss)
+        self.logger.record({
             "event": "gestation_complete",
             "batch_size": batch_size,
             "avg_loss": avg_loss,
             "timestamp": time.time(),
-            "conversation_id": getattr(self.state, "conversation_id", "training"),
-            "state_hash": getattr(self.state, "state_hash", None)
+            "state_hash": self.state.get_state_hash()
         })
 
-    def on_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
+    def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Handle dream completion event."""
-        if self.state:
-            self.state.update_dream_metrics(dream_prompt, is_novel, memory_count)
-        self.logger({
+        self.state.update_dream_metrics(dream_prompt, is_novel, memory_count)
+        self.logger.record({
             "event": "dream_complete",
             "dream_prompt": dream_prompt,
             "is_novel": is_novel,
             "memory_count": memory_count,
             "timestamp": time.time(),
-            "conversation_id": getattr(self.state, "conversation_id", "training"),
-            "state_hash": getattr(self.state, "state_hash", None)
+            "state_hash": self.state.get_state_hash()
         })
 
-    def on_sleep_train_complete(self, batch_size: int, data_exposure: float):
+    def handle_sleep_train_complete(self, batch_size: int, data_exposure: float) -> None:
         """Handle sleep training completion event."""
-        if self.state:
-            self.state.update_sleep_metrics(batch_size, data_exposure)
-        self.logger({
+        self.state.update_sleep_metrics(batch_size, data_exposure)
+        self.logger.record({
             "event": "sleep_train_complete",
             "batch_size": batch_size,
             "data_exposure": data_exposure,
             "timestamp": time.time(),
-            "conversation_id": getattr(self.state, "conversation_id", "training"),
-            "state_hash": getattr(self.state, "state_hash", None)
+            "state_hash": self.state.get_state_hash()
         })
+
+class TrainingWorkflowManager:
+    """Manages training cycles, sleep training, and gestation/dream cycles."""
+    
+    def __init__(self, trainer: 'SOVLTrainer', event_handler: TrainingEventHandler):
+        self.trainer = trainer
+        self.event_handler = event_handler
+        self.logger = trainer.logger
+        self.state = trainer.state
+        self.config = trainer.config
+
+    def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
+        """Run a complete training cycle."""
+        try:
+            # Get batch size from memory manager
+            batch_size = self.trainer.memory_manager.get_batch_size()
+            
+            # Run training step
+            loss, metrics = self.trainer.train_step_with_scaffold(
+                batch=batch,
+                scaffold_provider=scaffold_provider,
+                dry_run=False
+            )
+            
+            # Update state and log event
+            self.event_handler.handle_training_complete(
+                epoch=self.state.epoch,
+                avg_loss=loss,
+                data_exposure=metrics.get("data_exposure", 0.0)
+            )
+            
+            return loss, metrics
+            
+        except Exception as e:
+            self.logger.error(f"Error in training cycle: {str(e)}")
+            raise
+
+    def run_sleep_training(self, batch: List[Dict[str, Any]]) -> None:
+        """Run sleep training cycle."""
+        try:
+            # Get batch size from memory manager
+            batch_size = self.trainer.memory_manager.get_batch_size()
+            
+            # Run sleep training step
+            loss, metrics = self.trainer.train_step_with_scaffold(
+                batch=batch,
+                scaffold_provider=None,
+                dry_run=False
+            )
+            
+            # Update state and log event
+            self.event_handler.handle_sleep_train_complete(
+                batch_size=batch_size,
+                data_exposure=metrics.get("data_exposure", 0.0)
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error in sleep training: {str(e)}")
+            raise
+
+    def run_gestation_cycle(self, batch: List[Dict[str, Any]]) -> None:
+        """Run gestation cycle."""
+        try:
+            # Get batch size from memory manager
+            batch_size = self.trainer.memory_manager.get_batch_size()
+            
+            # Run gestation step
+            loss, metrics = self.trainer.train_step_with_scaffold(
+                batch=batch,
+                scaffold_provider=None,
+                dry_run=False
+            )
+            
+            # Update state and log event
+            self.event_handler.handle_gestation_complete(
+                batch_size=batch_size,
+                avg_loss=loss
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error in gestation cycle: {str(e)}")
+            raise
+
+    def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
+        """Run dream cycle."""
+        try:
+            # Update state and log event
+            self.event_handler.handle_dream_complete(
+                dream_prompt=dream_prompt,
+                is_novel=is_novel,
+                memory_count=memory_count
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error in dream cycle: {str(e)}")
+            raise
 
 class SOVLTrainer:
     """Main trainer class coordinating training, dreaming, and lifecycle management."""
-    def __init__(
-        self,
-        model: torch.nn.Module,
-        config: TrainingConfig,
-        device: torch.device,
-        loss_fn: Callable,
-        logger: Optional[Callable] = None,
-        tokenizer: Optional[Any] = None,
-        state: Optional[Any] = None
-    ):
+    
+    def __init__(self, config: TrainingConfig, state: SOVLState, logger: Logger):
         self.config = config
-        self.device = device
-        self.logger = logger or (lambda x: None)
-        self.tokenizer = tokenizer
         self.state = state
-        self.training_manager = TrainingManager(config, model, device, loss_fn, tokenizer)
-        self.dream_manager = DreamManager(config, model, tokenizer, device, state, self.logger)
-        self.lifecycle_manager = LifecycleManager(config, model, state)
-        self.best_valid_loss = float("inf")
-        self.patience = 0
-        self.scaffold_context = None
+        self.logger = logger
         
-        # Initialize callbacks
-        self.callbacks = TrainingCallbacks(self)
+        # Initialize components
+        self.memory_manager = MemoryManager(config, logger)
+        self.event_handler = TrainingEventHandler(logger, state)
+        self.workflow_manager = TrainingWorkflowManager(self, self.event_handler)
         
-        # Register default callbacks
-        self.register_callback("on_training_complete", self.callbacks.on_training_complete)
-        self.register_callback("on_gestation_complete", self.callbacks.on_gestation_complete)
-        self.register_callback("on_dream_complete", self.callbacks.on_dream_complete)
-        self.register_callback("on_sleep_train_complete", self.callbacks.on_sleep_train_complete)
+        # Initialize model and optimizer
+        self.model = None
+        self.optimizer = None
+        self._initialize_model()
         
-        self.gestation_state = {"is_gestating": False, "progress": 0, "batch": [], "total_loss": 0.0, "steps": 0}
-        self.sleep_state = {"progress": 0, "batch": [], "total_loss": 0.0, "steps": 0}
-
-        if config.dropout_rate > 0:
-            for module in model.modules():
-                if isinstance(module, torch.nn.Dropout):
-                    module.p = config.dropout_rate
-
-    def register_callback(self, event: str, callback: Callable) -> None:
-        """Register a callback for an event."""
-        if event not in self.callbacks:
-            raise ValueError(f"Unknown event: {event}")
-        self.callbacks[event] = callback
-
-    def _trigger_callback(self, event: str, **kwargs) -> Dict[str, Any]:
-        """Trigger a callback with provided arguments."""
-        if self.callbacks[event]:
-            self.callbacks[event](**kwargs)
-        return kwargs
-
-    def has_repetition(self, output_ids: torch.Tensor, special_ids: set) -> bool:
-        """Check for repeated sequences."""
-        ids = [i for i in output_ids.tolist() if i not in special_ids]
-        n = self.config.repetition_n
-        return any(ids[i:i + n] == ids[i + n:i + 2 * n] for i in range(len(ids) - 2 * n))
-
-    def get_loss_weight(self, batch: Dict[str, Any]) -> float:
-        """Calculate loss weight based on log entries."""
-        log_entries = self.logger.read() if hasattr(self.logger, "read") else []
-        for prompt in batch['prompt']:
-            if any(e["prompt"] == prompt and e.get("is_system_question", False) and e["response"] for e in log_entries):
-                return 1.2
-        return 1.0
-
-    def save_checkpoint(self, step: int, suffix: Optional[str] = None) -> None:
-        """Save model and training state."""
-        checkpoint_dir = self.config.checkpoint_path
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_name = f"checkpoint_{step}{f'_{suffix}' if suffix else ''}.pth"
-        checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
-
-        state_dict = {
-            "model_state": self.training_manager.model.state_dict(),
-            "optimizer_state": self.training_manager.optimizer.state_dict(),
-            "scheduler_state": self.training_manager.scheduler.state_dict() if self.training_manager.scheduler else None,
-            "global_step": self.training_manager.global_step,
-            "best_valid_loss": self.best_valid_loss,
-            "patience": self.patience,
-            "data_exposure": self.lifecycle_manager.data_exposure,
-            "dream_memory": {
-                'memory': list(self.dream_manager.dream_memory.memory),
-                'config': {
-                    'max_memories': self.dream_manager.dream_memory.memory.maxlen,
-                    'novelty_boost': self.dream_manager.dream_memory.config.novelty_boost
-                }
-            }
-        }
-
-        torch.save(state_dict, checkpoint_path)
-        self.logger({
-            "event": "checkpoint_saved",
-            "path": checkpoint_path,
-            "step": step,
-            "memory_count": len(self.dream_manager.dream_memory),
-            "timestamp": time.time()
-        })
-
-    def load_checkpoint(self, checkpoint_path: str) -> None:
-        """Load model and training state."""
-        if not os.path.exists(checkpoint_path):
-            self.logger({
-                "event": "checkpoint_load_failed",
-                "path": checkpoint_path,
-                "error": "File not found",
-                "timestamp": time.time()
-            })
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-        state_dict = torch.load(checkpoint_path, map_location=self.device)
-        self.training_manager.model.load_state_dict(state_dict["model_state"])
-        self.training_manager.optimizer.load_state_dict(state_dict["optimizer_state"])
-        if state_dict["scheduler_state"] and self.training_manager.scheduler:
-            self.training_manager.scheduler.load_state_dict(state_dict["scheduler_state"])
-        self.training_manager.global_step = state_dict["global_step"]
-        self.best_valid_loss = state_dict["best_valid_loss"]
-        self.patience = state_dict["patience"]
-        self.lifecycle_manager.data_exposure = state_dict.get("data_exposure", 0)
-
-        if state_dict.get("dream_memory"):
-            with self.dream_manager.dream_memory.lock:
-                self.dream_manager.dream_memory.memory = deque(
-                    state_dict['dream_memory']['memory'],
-                    maxlen=state_dict['dream_memory']['config']['max_memories']
-                )
-                self.dream_manager.dream_memory.config.novelty_boost = state_dict['dream_memory']['config']['novelty_boost']
-
-        self.logger({
-            "event": "checkpoint_loaded",
-            "path": checkpoint_path,
-            "step": self.training_manager.global_step,
-            "memory_count": len(self.dream_manager.dream_memory),
-            "timestamp": time.time()
-        })
-
-    def should_stop(self) -> bool:
-        """Check early stopping criteria."""
-        return self.patience >= self.config.max_patience
-
-    def gestate(self, log_entries: List[dict], resume: bool = False) -> bool:
-        """Perform gestation training."""
-        if not self.config.enable_gestation or not log_entries:
-            return False
-
-        if not resume and not self._should_gestate(log_entries):
-            return False
-
-        if not resume:
-            self.gestation_state.update({
-                "is_gestating": True,
-                "progress": 0,
-                "batch": [
-                    {"prompt": e["prompt"], "completion": e["response"]}
-                    for e in log_entries if "prompt" in e and "response" in e
-                ],
-                "total_loss": 0.0,
-                "steps": 0
-            })
-            if self.config.enable_dreaming and self.dream_manager.should_dream():
-                self.dream_manager.dream(log_entries)
-            self.lifecycle_manager.data_exposure += sum(
-                len(e["prompt"]) + len(e["response"]) for e in log_entries if "prompt" in e and "response" in e
+    def _initialize_model(self):
+        """Initialize the model and optimizer."""
+        try:
+            # Initialize model
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name,
+                torch_dtype=torch.float16,
+                device_map="auto"
             )
-
-        if self.gestation_state["progress"] < len(self.gestation_state["batch"]):
-            batch = [self.gestation_state["batch"][self.gestation_state["progress"]]]
-            formatted_batch = collate_batch(batch, self.tokenizer.pad_token_id, self.config.max_seq_length, self.tokenizer)
-            metrics = self.training_manager.train_step(formatted_batch, self.scaffold_context)
-            self.gestation_state["total_loss"] += metrics["loss"]
-            self.gestation_state["steps"] += 1
-            self.gestation_state["progress"] += 1
-            return True
-
-        avg_loss = self.gestation_state["total_loss"] / self.gestation_state["steps"] if self.gestation_state["steps"] else 0
-        self._trigger_callback("on_gestation_complete", batch_size=len(self.gestation_state["batch"]), avg_loss=avg_loss)
-        self._reset_gestation_state()
-        return False
-
-    def _should_gestate(self, log_entries: List[dict]) -> bool:
-        """Determine if gestation should proceed."""
-        if len(log_entries) < self.config.sleep_log_min:
-            return False
-        avg_confidence = self.state.sleep_confidence_sum / self.state.sleep_confidence_count if self.state and self.state.sleep_confidence_count else 0.5
-        return len(log_entries) >= self.config.sleep_log_min and avg_confidence > self.config.sleep_conf_threshold
-
-    def _reset_gestation_state(self) -> None:
-        """Reset gestation state."""
-        self.gestation_state.update({
-            "is_gestating": False,
-            "progress": 0,
-            "batch": [],
-            "total_loss": 0.0,
-            "steps": 0
-        })
-
-    def sleep_train(self, log_entries: List[dict]) -> None:
-        """
-        Perform sleep training on dream-generated content.
-        
-        Args:
-            log_entries: List of log entries containing prompts and responses
-        """
-        if not self.config.enable_sleep_training:
-            self.logger({
-                "event": "sleep_training_skipped",
-                "reason": "disabled",
-                "timestamp": time.time(),
-                "conversation_id": getattr(self.state, "conversation_id", "training"),
-                "state_hash": getattr(self.state, "state_hash", None)
-            })
-            return
             
-        if not log_entries:
-            self.logger({
-                "event": "sleep_training_skipped",
-                "reason": "no_log_entries",
-                "timestamp": time.time(),
-                "conversation_id": getattr(self.state, "conversation_id", "training"),
-                "state_hash": getattr(self.state, "state_hash", None)
-            })
-            return
-
-        self.logger({
-            "event": "sleep_training_started",
-            "log_entries_count": len(log_entries),
-            "timestamp": time.time(),
-            "conversation_id": getattr(self.state, "conversation_id", "training"),
-            "state_hash": getattr(self.state, "state_hash", None)
-        })
-
-        # Prepare training batch from log entries
-        batch = [
-            {"prompt": e["prompt"], "completion": e["response"]}
-            for e in log_entries if "prompt" in e and "response" in e
-        ]
-        
-        if not batch:
-            self.logger({
-                "event": "sleep_training_skipped",
-                "reason": "no_valid_entries",
-                "timestamp": time.time(),
-                "conversation_id": getattr(self.state, "conversation_id", "training"),
-                "state_hash": getattr(self.state, "state_hash", None)
-            })
-            return
-
-        # Check if dreaming should occur
-        if self.config.enable_dreaming and self.dream_manager.should_dream():
-            self.dream_manager.dream(log_entries)
-
-        # Run training with single epoch
-        original_epochs = self.config.max_epochs
-        self.config.max_epochs = 1
-        try:
-            self.train(train_data=batch, valid_data=None)
-        finally:
-            self.config.max_epochs = original_epochs
-
-        # Update data exposure
-        self.lifecycle_manager.data_exposure += sum(len(e["prompt"]) + len(e["response"]) for e in batch)
-        
-        # Reset sleep state
-        self._reset_sleep_state()
-        
-        # Trigger callback
-        self._trigger_callback(
-            "on_sleep_train_complete",
-            batch_size=len(batch),
-            data_exposure=self.lifecycle_manager.data_exposure
-        )
-        
-        # Log completion
-        self.logger({
-            "event": "sleep_training_completed",
-            "batch_size": len(batch),
-            "data_exposure": self.lifecycle_manager.data_exposure,
-            "timestamp": time.time(),
-            "conversation_id": getattr(self.state, "conversation_id", "training"),
-            "state_hash": getattr(self.state, "state_hash", None)
-        })
-
-    def _reset_sleep_state(self) -> None:
-        """Reset sleep state."""
-        self.sleep_state.update({
-            "progress": 0,
-            "batch": [],
-            "total_loss": 0.0,
-            "steps": 0
-        })
-
-    def cleanup(self) -> None:
-        """Clean up resources."""
-        try:
-            self._reset_gestation_state()
-            self._reset_sleep_state()
-            self.training_manager.optimizer.zero_grad(set_to_none=True)
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self.logger({"event": "trainer_cleanup", "timestamp": time.time(), "details": "Trainer resources cleared"})
-        except Exception as e:
-            self.logger({"event": "trainer_cleanup_failed", "error": str(e), "timestamp": time.time()})
-            raise
-
-    def train(
-        self,
-        train_data: Union[List[dict], Any],
-        valid_data: Optional[Union[List[dict], Any]] = None,
-        scaffold_provider: Optional[Callable] = None,
-        resume_checkpoint: Optional[str] = None
-    ) -> None:
-        """Run training loop."""
-        if resume_checkpoint:
-            self.load_checkpoint(resume_checkpoint)
-
-        train_iter = train_data if not isinstance(train_data, (list, tuple)) else [
-            train_data[i:i + self.config.batch_size] for i in range(0, len(train_data), self.config.batch_size)
-        ]
-        valid_iter = valid_data if not isinstance(valid_data, (list, tuple)) else [
-            valid_data[i:i + self.config.batch_size] for i in range(0, len(valid_data), self.config.batch_size)
-        ] if valid_data else None
-
-        for epoch in range(self.config.max_epochs):
-            self.training_manager.model.train()
-            epoch_loss, steps_in_epoch = 0.0, 0
-
-            for batch in train_iter:
-                if isinstance(batch, (list, tuple)):
-                    batch = collate_batch(batch, self.tokenizer.pad_token_id, self.config.max_seq_length, self.tokenizer)
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                scaffold_context = scaffold_provider(batch) if scaffold_provider else self.scaffold_context
-                if scaffold_context:
-                    scaffold_context = scaffold_context.to(self.device)
-
-                metrics = self.training_manager.train_step(batch, scaffold_context)
-                epoch_loss += metrics["loss"]
-                steps_in_epoch += 1
-                self.lifecycle_manager.update_exposure(batch["prompt"], getattr(self.state, "temperament_score", 0.0))
-
-                if valid_iter and self.config.validate_every_n_steps and self.training_manager.global_step % self.config.validate_every_n_steps == 0:
-                    valid_loss, metrics = self.training_manager.validate(valid_iter, scaffold_provider)
-                    self.logger({
-                        "event": "validation",
-                        "epoch": epoch + 1,
-                        "step": self.training_manager.global_step,
-                        "loss": valid_loss,
-                        "metrics": metrics,
-                        "timestamp": time.time()
-                    })
-                    if valid_loss < self.best_valid_loss:
-                        self.best_valid_loss = valid_loss
-                        self.patience = 0
-                        self.save_checkpoint(self.training_manager.global_step, suffix="best")
-                    else:
-                        self.patience += 1
-                    if self.should_stop():
-                        self._trigger_callback(
-                            "on_training_complete",
-                            epoch=epoch + 1,
-                            avg_loss=valid_loss,
-                            data_exposure=self.lifecycle_manager.data_exposure
-                        )
-                        return
-
-            avg_epoch_loss = epoch_loss / steps_in_epoch if steps_in_epoch else 0.0
-            self._trigger_callback(
-                "on_training_complete",
-                epoch=epoch + 1,
-                avg_loss=avg_epoch_loss,
-                data_exposure=self.lifecycle_manager.data_exposure
+            # Initialize optimizer
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.config.learning_rate
             )
-
-    def get_memory_stats(self) -> Dict[str, Any]:
-        """Get dream memory statistics."""
-        return self.dream_manager.get_memory_stats()
-
-    def run_training_cycle(
-        self,
-        train_data: List[Dict[str, torch.Tensor]],
-        validation_data: Optional[List[Dict[str, torch.Tensor]]] = None,
-        scaffold_provider: Optional[Callable] = None,
-        max_epochs: Optional[int] = None,
-        early_stopping_patience: int = 3
-    ) -> Dict[str, Any]:
-        """Run a complete training cycle."""
-        best_val_loss = float('inf')
-        epochs_without_improvement = 0
-        training_history = []
-        num_epochs = max_epochs or self.config.max_epochs
-
-        for epoch in range(num_epochs):
-            epoch_metrics = {"train_loss": 0.0, "val_loss": float('inf'), "learning_rate": self.training_manager.optimizer.param_groups[0]["lr"]}
-            self.training_manager.model.train()
-
-            for batch in train_data:
-                scaffold_context = scaffold_provider(batch) if scaffold_provider else None
-                metrics = self.training_manager.train_step(batch, scaffold_context)
-                epoch_metrics["train_loss"] += metrics["loss"]
-
-            epoch_metrics["train_loss"] /= len(train_data)
-
-            if validation_data:
-                val_loss, _ = self.training_manager.validate(validation_data, scaffold_provider)
-                epoch_metrics["val_loss"] = val_loss
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    epochs_without_improvement = 0
-                else:
-                    epochs_without_improvement += 1
-                    if epochs_without_improvement >= early_stopping_patience:
-                        break
-
-            training_history.append(epoch_metrics)
-
-        return {
-            "training_history": training_history,
-            "best_val_loss": best_val_loss,
-            "final_epoch": len(training_history),
-            "early_stopped": epochs_without_improvement >= early_stopping_patience
-        }
-
+            
+        except Exception as e:
+            self.logger.error(f"Error initializing model: {str(e)}")
+            raise
+            
     def train_step_with_scaffold(
         self,
-        batch: List[dict],
-        scaffold_provider: Optional[Callable] = None,
+        batch: List[Dict[str, Any]],
+        scaffold_provider: Optional[ScaffoldProvider] = None,
         dry_run: bool = False,
         dry_run_params: Optional[Dict[str, Any]] = None
-    ) -> Optional[float]:
-        """
-        Execute a single training step with scaffold context.
-        
-        Args:
-            batch: List of training examples
-            scaffold_provider: Optional function to provide scaffold context
-            dry_run: Whether to perform a dry run
-            dry_run_params: Parameters for dry run if enabled
-            
-        Returns:
-            Optional[float]: Loss value if training was performed, None if dry run
-        """
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Run a training step with optional scaffold context."""
         try:
-            max_seq_length = self.config.max_seq_length
-            
             if dry_run:
-                print("Dry run train step")
-                dry_batch = [
-                    {
-                        'prompt': item['prompt'][:dry_run_params['max_length']],
-                        'completion': item['completion'][:dry_run_params['max_length']]
-                    }
-                    for item in batch[:dry_run_params['max_samples']]
-                ]
-                formatted_batch = collate_batch(
-                    dry_batch,
-                    self.tokenizer.pad_token_id,
-                    max_seq_length,
-                    self.tokenizer
-                )
-                prompts = formatted_batch['prompt']
-                scaffold_inputs = scaffold_provider(prompts) if scaffold_provider else None
-                scaffold_hidden_states = scaffold_inputs if scaffold_inputs is not None else None
+                # Return mock metrics for dry run
+                return 0.0, {
+                    "data_exposure": dry_run_params.get("data_exposure", 0.0),
+                    "confidence": dry_run_params.get("confidence", 0.0)
+                }
                 
-                metrics = self.training_manager.train_step(
-                    batch=formatted_batch,
-                    scaffold_context=scaffold_hidden_states
-                )
+            # Prepare batch
+            input_ids, attention_mask, labels = collate_batch(batch)
+            
+            # Get scaffold context if provided
+            scaffold_context = None
+            if scaffold_provider:
+                scaffold_context = scaffold_provider.get_context()
                 
-                self.logger({
-                    "event": "dry_run_train_step",
-                    "loss": metrics.get("loss"),
-                    "confidence": metrics.get("confidence"),
-                    "timestamp": time.time(),
-                    "conversation_id": getattr(self.state, "conversation_id", "training"),
-                    "state_hash": getattr(self.state, "state_hash", None)
-                })
-                print(f"Dry run loss: {metrics.get('loss')}")
-                return None
-
-            prompts = [item['prompt'] for item in batch]
-            scaffold_inputs = scaffold_provider(prompts) if scaffold_provider else None
-            scaffold_hidden_states = scaffold_inputs if scaffold_inputs is not None else None
-
-            formatted_batch = collate_batch(
-                batch,
-                self.tokenizer.pad_token_id,
-                max_seq_length,
-                self.tokenizer
+            # Forward pass
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                scaffold_context=scaffold_context
             )
             
-            metrics = self.training_manager.train_step(
-                batch=formatted_batch,
-                scaffold_context=scaffold_hidden_states
-            )
-
-            if metrics.get("loss") is not None and self.config.use_token_map_memory and metrics.get("confidence") is not None:
-                self._update_token_map_memory(prompts[0], metrics.get("confidence"))
-
-            self.logger({
-                "event": "training_step",
-                "loss": metrics.get("loss"),
-                "confidence": metrics.get("confidence"),
-                "batch_size": len(batch),
-                "timestamp": time.time(),
-                "memory_usage": torch.cuda.memory_allocated() if torch.cuda.is_available() else None,
-                "conversation_id": getattr(self.state, "conversation_id", "training"),
-                "state_hash": getattr(self.state, "state_hash", None)
-            })
-
-            return metrics.get("loss")
-
+            # Calculate loss
+            loss = outputs.loss
+            
+            # Backward pass
+            loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            
+            # Calculate metrics
+            metrics = {
+                "data_exposure": len(batch) / self.config.max_batch_size,
+                "confidence": outputs.confidence.item()
+            }
+            
+            return loss.item(), metrics
+            
         except Exception as e:
-            self.logger({
-                "event": "training_error",
-                "error": str(e),
-                "batch_size": len(batch),
-                "timestamp": time.time()
-            })
+            self.logger.error(f"Error in training step: {str(e)}")
             raise
-
-    def _update_token_map_memory(self, prompt: str, confidence: float) -> None:
-        """Update token map memory based on prompt confidence."""
-        if self.state and hasattr(self.state, "update_token_map_memory"):
-            self.state.update_token_map_memory(prompt, confidence)
+            
+    def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
+        """Run a complete training cycle."""
+        return self.workflow_manager.run_training_cycle(batch, scaffold_provider)
+        
+    def run_sleep_training(self, batch: List[Dict[str, Any]]) -> None:
+        """Run sleep training cycle."""
+        self.workflow_manager.run_sleep_training(batch)
+        
+    def run_gestation_cycle(self, batch: List[Dict[str, Any]]) -> None:
+        """Run gestation cycle."""
+        self.workflow_manager.run_gestation_cycle(batch)
+        
+    def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
+        """Run dream cycle."""
+        self.workflow_manager.run_dream_cycle(dream_prompt, is_novel, memory_count)

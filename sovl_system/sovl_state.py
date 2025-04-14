@@ -1,6 +1,6 @@
 from typing import Optional, Deque, Dict, Set, Tuple, DefaultDict, Any, List
 from collections import deque, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import torch
 import uuid
 from threading import Lock
@@ -10,6 +10,7 @@ import hashlib
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare
+import json
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -43,6 +44,60 @@ class SOVLConfig:
     temperament_decay_rate: float
     scaffold_unk_id: int
     lora_capacity: int
+
+@dataclass
+class TrainingState:
+    """Manages training-specific state and metrics."""
+    last_trained: float = 0.0
+    last_weight: float = 0.0
+    sleep_confidence_sum: float = 0.0
+    sleep_confidence_count: int = 0
+    data_exposure: float = 0.0
+    lora_capacity: float = 0.0
+    gestation_metrics: Dict[str, Any] = field(default_factory=dict)
+    dream_metrics: Dict[str, Any] = field(default_factory=dict)
+    sleep_metrics: Dict[str, Any] = field(default_factory=dict)
+
+    def update_gestation_metrics(self, batch_size: int, avg_loss: float) -> None:
+        """Update gestation training metrics."""
+        self.gestation_metrics.update({
+            "batch_size": batch_size,
+            "avg_loss": avg_loss,
+            "timestamp": time.time()
+        })
+
+    def update_dream_metrics(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
+        """Update dream cycle metrics."""
+        self.dream_metrics.update({
+            "dream_prompt": dream_prompt,
+            "is_novel": is_novel,
+            "memory_count": memory_count,
+            "timestamp": time.time()
+        })
+
+    def update_sleep_metrics(self, batch_size: int, data_exposure: float) -> None:
+        """Update sleep training metrics."""
+        self.sleep_metrics.update({
+            "batch_size": batch_size,
+            "data_exposure": data_exposure,
+            "timestamp": time.time()
+        })
+
+    def update_data_exposure(self, exposure: float) -> None:
+        """Update data exposure."""
+        self.data_exposure = exposure
+
+    def get_state_hash(self) -> str:
+        """Generate a hash of the current training state."""
+        state_dict = {
+            "last_trained": self.last_trained,
+            "last_weight": self.last_weight,
+            "sleep_confidence_sum": self.sleep_confidence_sum,
+            "sleep_confidence_count": self.sleep_confidence_count,
+            "data_exposure": self.data_exposure,
+            "lora_capacity": self.lora_capacity
+        }
+        return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
 def _load_config(config_manager: ConfigManager, section: str, key: str, default: Any) -> Any:
     """Safely load a configuration value with a default."""
