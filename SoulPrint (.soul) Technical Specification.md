@@ -47,7 +47,7 @@ The format balances human readability to evoke personality with strict syntax fo
 
 - Lists: Hyphen-denoted entries, e.g., - Memory: The First Question.
 
-- Narrative Fields: Freeform text, max 500 characters unless specified, with multiline support via > prefix.
+- Multiline Fields: > | prefix, followed by indented text (e.g., > |\n  Line 1\n  Line 2).
 
 - Comments: # at line start, ignored by parsers.
 
