@@ -59,19 +59,27 @@ class TrainingConfig:
     dream_temperament_on: bool = True
     confidence_history_maxlen: int = 5
     temperament_history_maxlen: int = 5
-    curiosity_weight_ignorance: float = 0.0
-    curiosity_weight_novelty: float = 1.0
-    curiosity_pressure_threshold: float = 0.9
-    curiosity_pressure_drop: float = 0.5
-    curiosity_novelty_threshold_spontaneous: float = 0.5
-    curiosity_novelty_threshold_response: float = 1.0
-    curiosity_silence_threshold: float = 5.0
-    curiosity_question_cooldown: float = 30.0
-    curiosity_queue_maxlen: int = 5
-    curiosity_max_new_tokens: int = 12
-    curiosity_base_temperature: float = 0.5
-    curiosity_temperament_influence: float = 0.6
-    curiosity_top_k: int = 10
+    dry_run: bool = False
+    dry_run_params: Dict[str, Any] = None
+    memory_threshold: float = 0.85
+    memory_decay_rate: float = 0.95
+    use_scaffold_memory: bool = True
+    use_token_map_memory: bool = True
+    scaffold_weight: float = 1.0
+    enable_curiosity: bool = True
+    curiosity_weight_ignorance: float = 0.7
+    curiosity_weight_novelty: float = 0.3
+    curiosity_pressure_threshold: float = 0.7
+    curiosity_pressure_drop: float = 0.3
+    curiosity_novelty_threshold_spontaneous: float = 0.9
+    curiosity_novelty_threshold_response: float = 0.8
+    curiosity_silence_threshold: float = 20.0
+    curiosity_question_cooldown: float = 60.0
+    curiosity_queue_maxlen: int = 10
+    curiosity_max_new_tokens: int = 8
+    curiosity_base_temperature: float = 1.1
+    curiosity_temperament_influence: float = 0.4
+    curiosity_top_k: int = 30
 
     def __post_init__(self):
         if self.metrics_to_track is None:
@@ -835,3 +843,130 @@ class SOVLTrainer:
             "final_epoch": len(training_history),
             "early_stopped": epochs_without_improvement >= early_stopping_patience
         }
+
+    def train_step(self, batch: Dict[str, torch.Tensor], scaffold_context: Optional[Dict] = None) -> Dict[str, float]:
+        """Execute a single training step with optional scaffold context."""
+        try:
+            self.training_manager.model.train()
+            
+            # Move batch to device
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            
+            # Prepare scaffold context if provided
+            if scaffold_context:
+                scaffold_inputs = scaffold_context.get("inputs", {})
+                scaffold_inputs = {k: v.to(self.device) for k, v in scaffold_inputs.items()}
+            else:
+                scaffold_inputs = None
+                
+            # Forward pass with mixed precision
+            with torch.cuda.amp.autocast(enabled=self.config.use_amp):
+                outputs = self.training_manager.model(**batch)
+                loss = outputs.loss
+                
+                # Apply lifecycle weighting if enabled
+                if self.config.enable_lifecycle_weighting:
+                    lifecycle_weight = self._calculate_lifecycle_weight()
+                    loss = loss * lifecycle_weight
+                    
+            # Backward pass with gradient accumulation
+            if self.config.use_amp:
+                self.training_manager.scaler.scale(loss).backward()
+            else:
+                loss.backward()
+                
+            # Step optimizer and scheduler if accumulation is complete
+            if (self.training_manager.global_step + 1) % self.config.grad_accum_steps == 0:
+                if self.config.use_amp:
+                    self.training_manager.scaler.unscale_(self.training_manager.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.training_manager.model.parameters(),
+                        self.config.max_grad_norm
+                    )
+                    self.training_manager.scaler.step(self.training_manager.optimizer)
+                    self.training_manager.scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.training_manager.model.parameters(),
+                        self.config.max_grad_norm
+                    )
+                    self.training_manager.optimizer.step()
+                    
+                if self.training_manager.scheduler:
+                    self.training_manager.scheduler.step()
+                self.training_manager.optimizer.zero_grad()
+                
+            # Update metrics
+            metrics = {
+                "loss": loss.item(),
+                "learning_rate": self.training_manager.scheduler.get_last_lr()[0]
+            }
+            
+            # Log metrics
+            self.logger({
+                "event": "train_step",
+                "step": self.training_manager.global_step,
+                "loss": metrics["loss"],
+                "learning_rate": metrics["learning_rate"],
+                "timestamp": time.time()
+            })
+            
+            return metrics
+            
+        except Exception as e:
+            self.logger({
+                "event": "train_step_failed",
+                "error": str(e),
+                "timestamp": time.time()
+            })
+            raise
+            
+    def _calculate_lifecycle_weight(self) -> float:
+        """Calculate weight based on lifecycle stage."""
+        if not self.config.enable_lifecycle_weighting:
+            return 1.0
+            
+        capacity = self.lifecycle_manager.lora_capacity
+        if self.config.lifecycle_curve == "sigmoid_linear":
+            return 1 / (1 + math.exp(-self.config.sigmoid_scale * (capacity - self.config.sigmoid_shift)))
+        else:
+            return capacity * self.config.lifecycle_capacity_factor
+            
+    def _sleep_train(self, dream_prompt: str):
+        """Train on dream-generated content."""
+        try:
+            # Generate dream content
+            dream_output = self.training_manager.model.generate(
+                dream_prompt,
+                max_length=self.config.max_seq_length,
+                temperature=1.0,
+                top_p=0.9
+            )
+            
+            # Tokenize dream content
+            dream_tokens = self.training_manager.tokenizer(
+                dream_output,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.config.max_seq_length
+            )
+            
+            # Train on dream content
+            metrics = self.train_step(dream_tokens)
+            
+            # Update dream memory
+            self.dream_manager.dream_memory.add_memory(
+                prompt=dream_prompt,
+                hidden_state=dream_tokens["input_ids"].mean(dim=1),
+                is_novel=False,
+                temperament=getattr(self.state, "temperament_score", 0.0)
+            )
+            
+        except Exception as e:
+            self.logger({
+                "event": "sleep_train_failed",
+                "error": str(e),
+                "timestamp": time.time()
+            })
+            raise

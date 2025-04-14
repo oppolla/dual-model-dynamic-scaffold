@@ -903,56 +903,52 @@ class SOVLSystem:
                 prompts = formatted_batch['prompt']
                 scaffold_inputs = self.tokenize_and_map(prompts, max_length=max_seq_length)
                 scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-                loss, confidence = self.trainer.train_step(
+                metrics = self.trainer.train_step(
                     batch=formatted_batch,
-                    scaffold_context=scaffold_hidden_states,
-                    dry_run=True
+                    scaffold_context=scaffold_hidden_states
                 )
                 self.logger.record({
                     "event": "dry_run_train_step",
-                    "loss": float(loss) if loss is not None else None,
-                    "confidence": float(confidence) if confidence is not None else None,
+                    "loss": metrics.get("loss"),
+                    "confidence": metrics.get("confidence"),
                     "timestamp": time.time(),
                     "conversation_id": self.history.conversation_id,
                     "state_hash": self.state.state_hash()
                 })
-                print(f"Dry run loss: {loss}")
+                print(f"Dry run loss: {metrics.get('loss')}")
                 return None
-    
+
             prompts = [item['prompt'] for item in batch]
             scaffold_inputs = self.tokenize_and_map(prompts, max_length=max_seq_length)
             scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-    
+
             formatted_batch = collate_batch(
                 batch,
                 self.base_tokenizer.pad_token_id,
                 max_seq_length,
                 self.base_tokenizer
             )
-            loss, confidence = self.trainer.train_step(
+            metrics = self.trainer.train_step(
                 batch=formatted_batch,
-                scaffold_context=scaffold_hidden_states,
-                grad_clip=True,
-                dry_run=False,
-                memory_check=self.memory_manager.check_memory_health
+                scaffold_context=scaffold_hidden_states
             )
-    
-            if loss is not None and self.use_token_map_memory and confidence is not None:
-                self._update_token_map_memory(prompts[0], confidence)
-    
+
+            if metrics.get("loss") is not None and self.use_token_map_memory and metrics.get("confidence") is not None:
+                self._update_token_map_memory(prompts[0], metrics.get("confidence"))
+
             self.logger.record({
                 "event": "training_step",
-                "loss": float(loss) if loss is not None else None,
-                "confidence": float(confidence) if confidence is not None else None,
+                "loss": metrics.get("loss"),
+                "confidence": metrics.get("confidence"),
                 "batch_size": len(batch),
                 "timestamp": time.time(),
                 "memory_usage": torch.cuda.memory_allocated() if torch.cuda.is_available() else None,
                 "conversation_id": self.history.conversation_id,
                 "state_hash": self.state.state_hash()
             })
-    
-            return loss
-    
+
+            return metrics.get("loss")
+
         except Exception as e:
             self.error_logger.record({
                 "error": str(e),
@@ -965,12 +961,12 @@ class SOVLSystem:
                 "state_hash": self.state.state_hash()
             })
             raise
-        
+
     def run_training_cycle(self, train_data, valid_data, epochs=None, batch_size=None):
         """Run a full training cycle."""
         epochs = epochs or self.training_config.get("train_epochs", 3)
         batch_size = batch_size or self.training_config.get("batch_size", 1)
-    
+
         if len(train_data) < batch_size or not valid_data:
             self.logger.record({
                 "warning": "Insufficient data for training",
@@ -983,7 +979,7 @@ class SOVLSystem:
             })
             print("Not enough data for training.")
             return
-    
+
         influence_weight = (
             self.trainer.get_life_curve_weight()
             if self.controls_config.get("enable_lifecycle_weighting", True)
@@ -1001,7 +997,7 @@ class SOVLSystem:
             "state_hash": self.state.state_hash()
         })
         print(f"Data exposure: {self.trainer.data_exposure} | Scaffold influence: {influence_weight:.3f}")
-    
+
         if self.dry_run and self.dry_run_params['skip_training']:
             print("\n=== DRY RUN TRAINING ===")
             dry_batch = train_data[:self.dry_run_params['max_samples']]
@@ -1015,33 +1011,59 @@ class SOVLSystem:
             })
             print(f"Dry run training complete: Loss = {loss}")
             return
-    
+
         print(f"\n--- Training ({epochs} epochs) ---")
         start_time = time.time()
-    
+
         def scaffold_provider(batch):
             prompts = batch['prompt']
             scaffold_inputs = self.tokenize_and_map(prompts)
             return self.get_scaffold_hidden_states(scaffold_inputs)
-    
-        self.trainer.train(
+
+        training_results = self.trainer.run_training_cycle(
             train_data=train_data,
-            valid_data=valid_data,
-            scaffold_provider=scaffold_provider
+            validation_data=valid_data,
+            scaffold_provider=scaffold_provider,
+            max_epochs=epochs,
+            early_stopping_patience=self.training_config.get("max_patience", 3)
         )
-    
+
         self.last_weight = self.trainer.get_life_curve_weight()
         self.set_scaffold_influence(self.last_weight)
         self.logger.record({
             "event": "training_cycle_complete",
             "duration": time.time() - start_time,
             "last_weight": self.last_weight,
+            "training_history": training_results.get("training_history", []),
+            "best_val_loss": training_results.get("best_val_loss", float('inf')),
+            "final_epoch": training_results.get("final_epoch", 0),
+            "early_stopped": training_results.get("early_stopped", False),
             "timestamp": time.time(),
             "conversation_id": self.history.conversation_id,
             "state_hash": self.state.state_hash()
         })
         print(f"--- Training Finished ({time.time() - start_time:.2f}s) ---")
-    
+
+    def _sleep_train(self):
+        """Train on dream-generated content."""
+        if not self.controls_config.get("enable_sleep_training", True):
+            return
+            
+        print("\n--- Sleep Training Initiated ---")
+        log_entries = self.logger.read()
+        if not log_entries:
+            print("No log data to train on.")
+            return
+
+        self.trainer.sleep_train(log_entries)
+        self.last_trained = time.time()
+        self.logger.clear()
+        self.last_weight = self.trainer.get_life_curve_weight()
+        if self.enable_temperament:
+            self._update_temperament()
+            self.last_temperament_score = self.temperament_score
+        print("--- Sleep Training Complete ---")
+
     def has_repetition(self, output_ids, n=3):
         """Check for repetition in generated output."""
         return self.generation_manager.has_repetition(output_ids, n)
