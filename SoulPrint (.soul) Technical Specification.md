@@ -316,6 +316,7 @@ Initialization: AI tasked: “Write your Soulprint for rebirth.”
 Prompt Execution: Sequential responses, coherent across sections.
 
 Refinement:
+
 Vague (<20 characters): Reprompt for depth.
 
 Overlong: Truncate with ellipsis, reprompt.
@@ -350,8 +351,10 @@ Overflow: Truncate, reprompt.
 
 Syntax: Correct in formatting script.
 
-5. Parsing and Rebirth
-5.1 Parsing
+### 5. Parsing and Rebirth
+
+#### 5.1 Parsing
+
 Method: Regex/PEG grammar.
 Section: ^\[(\w+)\]$
 
