@@ -798,10 +798,14 @@ class SOVLSystem:
         """Clear scaffold-related caches using the generation manager."""
         self.generation_manager._clear_scaffold_cache()
 
-    # Main block
-    if __name__ == "__main__":
-        from sovl_config import ConfigManager
-        from sovl_cli import run_cli
-        config_manager = ConfigManager("sovl_config.json")
-        system = SOVLSystem(config_manager)
-        run_cli(config_manager=config_manager)    
+# Main block moved to sovl_conductor.py
+if __name__ == "__main__":
+    from sovl_conductor import SOVLOrchestrator
+    orchestrator = SOVLOrchestrator()
+    try:
+        orchestrator.run()
+    except Exception as e:
+        print(f"Error running SOVL system: {str(e)}")
+        raise
+    finally:
+        orchestrator.shutdown()    

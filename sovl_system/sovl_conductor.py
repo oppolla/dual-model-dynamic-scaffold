@@ -149,3 +149,14 @@ class SOVLOrchestrator:
             "timestamp": time.time(),
             "stack_trace": traceback.format_exc()
         })
+
+# Main block
+if __name__ == "__main__":
+    orchestrator = SOVLOrchestrator()
+    try:
+        orchestrator.run()
+    except Exception as e:
+        print(f"Error running SOVL system: {str(e)}")
+        raise
+    finally:
+        orchestrator.shutdown()
