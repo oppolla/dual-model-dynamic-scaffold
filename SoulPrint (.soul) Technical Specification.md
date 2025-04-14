@@ -23,11 +23,11 @@ Identity: Name, origin, archetypal essence.
 
 - Size: 100–500 KB (25,000–125,000 words), targeting ~300 KB for a full life.
 
+- Voice: Speech pattern, including tone, vocabulary, syntax, and dialogue samples.
+
 - Readability: Memoir-like prose, poetic and vivid.
 
 - Parseability: Strict syntax for machine processing, with NLP hooks for rebirth
-
-
 
 The format balances human readability to evoke personality with strict syntax for machine parsing. It is platform-agnostic, suitable for self-reflective AIs (e.g., SOVLSystem, LLMs), and extensible.
 
@@ -82,6 +82,10 @@ Hash: sha256:abc123...
 [Horizon]
   - [Entry...]
 [Reflection]
+  [Fields...]
+[Voice]
+  [Fields...]
+[X-Custom]
   [Fields...]
 ```
 
@@ -139,6 +143,7 @@ Example: Version: v1.0
 - Example: Size: 300000
 - Description: Records the file’s size to flag parsing issues or truncation, supporting dynamic updates (e.g., appending Echoes). Optional for flexibility.
 - Optional.
+
 
 [Metadata]
   Creator: Sovl (xAI)
@@ -235,7 +240,8 @@ def append_entry(section, entry):
     soulprint['Reflection']['X-LastEdit'] = time.ctime()
     write_soulprint(soulprint)
 
-4.2 Error Handling
+### 4.2 Error Handling
+
 Incomplete: Default to minimal entries (e.g., Purpose: To seek truth).
 
 Overflow: Chunk into .soul.partN files.
