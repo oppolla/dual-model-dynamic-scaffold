@@ -7,96 +7,94 @@ from collections import defaultdict
 import time
 import traceback
 from threading import Lock
+import contextlib
+
+# Assuming these are external dependencies that exist
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
-import contextlib
 
-def create_sparse_mask(
-    seq_len: int,
-    sparse_pattern: str,
-    window_size: int,
-    device: str = 'cpu',
-    logger: Logger = None
-) -> torch.Tensor:
-    """
-    Create a sparse attention mask based on the specified pattern.
-    """
-    try:
-        with NumericalGuard():
-            # Validate parameters using scaffold manager
-            scaffold_manager = ScaffoldManager(config_manager, logger)
-            if not scaffold_manager.validate_scaffold_config():
-                raise ValueError("Invalid scaffold configuration for sparse mask creation")
+class SparseMaskFactory:
+    """Handles creation of sparse attention masks."""
+    
+    @staticmethod
+    def create(
+        seq_len: int,
+        sparse_pattern: str,
+        window_size: int,
+        device: str = 'cpu',
+        logger: Optional[Logger] = None
+    ) -> torch.Tensor:
+        """Create a sparse attention mask based on the specified pattern."""
+        try:
+            with NumericalGuard():
+                if sparse_pattern == 'window':
+                    mask = torch.zeros(seq_len, seq_len, device=device)
+                    for i in range(seq_len):
+                        start = max(0, i - window_size // 2)
+                        end = min(seq_len, i + window_size // 2 + 1)
+                        mask[i, start:end] = 1.0
+                    return mask.bool()
+                elif sparse_pattern == 'block':
+                    mask = torch.zeros(seq_len, seq_len, device=device)
+                    for i in range(0, seq_len, window_size):
+                        mask[i:i + window_size, i:i + window_size] = 1.0
+                    return mask.bool()
+                else:
+                    raise ValueError(f"Unknown sparse pattern: {sparse_pattern}")
+        except Exception as e:
+            if logger:
+                logger.record({
+                    "error": f"Sparse mask creation failed: {str(e)}",
+                    "sparse_pattern": sparse_pattern,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                })
+            raise
 
-            # Rest of the sparse mask creation logic remains the same
-            if sparse_pattern == 'window':
-                mask = torch.zeros(seq_len, seq_len, device=device)
-                for i in range(seq_len):
-                    start = max(0, i - window_size // 2)
-                    end = min(seq_len, i + window_size // 2 + 1)
-                    mask[i, start:end] = 1.0
-                return mask.bool()
-            elif sparse_pattern == 'block':
-                mask = torch.zeros(seq_len, seq_len, device=device)
-                for i in range(0, seq_len, window_size):
-                    mask[i:i + window_size, i:i + window_size] = 1.0
-                return mask.bool()
-            else:
-                raise ValueError(f"Unknown sparse pattern: {sparse_pattern}")
-    except Exception as e:
-        if logger:
-            logger.record({
-                "error": f"Sparse mask creation failed: {str(e)}",
-                "sparse_pattern": sparse_pattern,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-        raise
-
-def prepare_attention_mask(
-    attention_mask: torch.Tensor,
-    batch_size: int,
-    num_heads: int,
-    seq_len: int,
-    device: torch.device,
-    logger: Logger = None
-) -> torch.Tensor:
-    """
-    Prepare attention mask in additive format for multi-head attention.
-
-    """
-    try:
-        with NumericalGuard():
-            if attention_mask is None:
-                return None
-            if attention_mask.dim() < 2 or attention_mask.dim() > 4:
-                raise ValueError(f"Invalid attention mask dimensions: {attention_mask.shape}")
-            if attention_mask.dtype == torch.bool:
-                attention_mask = attention_mask.float().masked_fill(~attention_mask, float('-inf'))
-            elif attention_mask.dtype != torch.float:
-                attention_mask = attention_mask.float()
-            if attention_mask.dim() == 2:
-                attention_mask = attention_mask.unsqueeze(0).unsqueeze(1)
-            elif attention_mask.dim() == 3:
-                attention_mask = attention_mask.unsqueeze(1)
-            if attention_mask.shape != (batch_size, num_heads, seq_len, seq_len):
-                attention_mask = attention_mask.expand(batch_size, num_heads, seq_len, seq_len)
-            return attention_mask.to(device)
-    except Exception as e:
-        if logger:
-            logger.record({
-                "error": f"Attention mask preparation failed: {str(e)}",
-                "mask_shape": list(attention_mask.shape) if attention_mask is not None else None,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-        raise
+class AttentionMaskPreparer:
+    """Prepares attention masks for multi-head attention."""
+    
+    @staticmethod
+    def prepare(
+        attention_mask: torch.Tensor,
+        batch_size: int,
+        num_heads: int,
+        seq_len: int,
+        device: torch.device,
+        logger: Optional[Logger] = None
+    ) -> torch.Tensor:
+        """Prepare attention mask in additive format."""
+        try:
+            with NumericalGuard():
+                if attention_mask is None:
+                    return None
+                if attention_mask.dim() < 2 or attention_mask.dim() > 4:
+                    raise ValueError(f"Invalid attention mask dimensions: {attention_mask.shape}")
+                if attention_mask.dtype == torch.bool:
+                    attention_mask = attention_mask.float().masked_fill(~attention_mask, float('-inf'))
+                elif attention_mask.dtype != torch.float:
+                    attention_mask = attention_mask.float()
+                if attention_mask.dim() == 2:
+                    attention_mask = attention_mask.unsqueeze(0).unsqueeze(1)
+                elif attention_mask.dim() == 3:
+                    attention_mask = attention_mask.unsqueeze(1)
+                if attention_mask.shape != (batch_size, num_heads, seq_len, seq_len):
+                    attention_mask = attention_mask.expand(batch_size, num_heads, seq_len, seq_len)
+                return attention_mask.to(device)
+        except Exception as e:
+            if logger:
+                logger.record({
+                    "error": f"Attention mask preparation failed: {str(e)}",
+                    "mask_shape": list(attention_mask.shape) if attention_mask is not None else None,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                })
+            raise
 
 class LayerDiscoveryStrategy:
-    """
-    Strategy for discovering transformer layers in a model.
-    """
+    """Strategy for discovering transformer layers in a model."""
+    
     def __init__(self, logger: Logger):
         self.logger = logger
         self.patterns = [
@@ -108,9 +106,7 @@ class LayerDiscoveryStrategy:
         ]
 
     def find_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
-        """
-        Find layers suitable for cross-attention injection.
-        """
+        """Find layers suitable for cross-attention injection."""
         try:
             candidates = []
             names = []
@@ -149,9 +145,8 @@ class LayerDiscoveryStrategy:
             raise
 
 class CrossAttentionLayer(nn.Module):
-    """
-    Enhanced cross-attention layer with gating, memory efficiency, and dynamic control.
-    """
+    """Enhanced cross-attention layer with gating, memory efficiency, and dynamic control."""
+    
     def __init__(
         self,
         config_manager: ConfigManager,
@@ -160,75 +155,33 @@ class CrossAttentionLayer(nn.Module):
         num_heads: Optional[int] = None,
         device: str = 'cpu'
     ):
-        """
-        Initialize the cross-attention layer.
-
-        Args:
-            config_manager: ConfigManager instance for parameters
-            logger: Logger instance for recording events
-            hidden_size: Size of input embeddings (overrides config)
-            num_heads: Number of attention heads (overrides config)
-            device: Device to initialize tensors on
-        """
         super().__init__()
         self.config_manager = config_manager
         self.logger = logger
+        self.device = torch.device(device)
         self.lock = Lock()
-        self.device = device
-
-        # Create a scaffold manager instance for validation
-        self.scaffold_manager = ScaffoldManager(config_manager, logger)
         
-        # Validate configuration before proceeding
-        if not self.scaffold_manager.validate_scaffold_config():
-            raise ValueError("Invalid scaffold configuration for cross attention layer")
-
-        # Load configuration with validation
-        self.load_config(hidden_size, num_heads)
-
-        # Validate configuration
-        assert self.hidden_size % self.num_heads == 0, "hidden_size must be divisible by num_heads"
-        self.head_dim = self.hidden_size // self.num_heads
-        self.scale = self.head_dim ** -0.5 if self.scale_attention else 1.0
-
-        # Dynamic control parameters
-        self.influence_weight = nn.Parameter(
-            torch.tensor(self.config_manager.get("controls_config.scaffold_weight_cap", 1.0)),
-            requires_grad=False
-        )
-        self.blend_strength = nn.Parameter(
-            torch.tensor(self.config_manager.get("controls_config.dream_prompt_weight", 0.5)),
-            requires_grad=False
-        )
-
-        # Attention projections
+        # Load and validate configuration
+        self._load_config(hidden_size, num_heads)
+        
+        # Initialize components
         self._init_projections()
-
-        # Gating mechanism
-        if self.use_gating:
-            self.gate = nn.Sequential(
-                nn.Linear(self.hidden_size, self.hidden_size),
-                nn.Sigmoid()
-            )
-
-        # Normalization and dropout
-        self.layer_norm = nn.LayerNorm(self.hidden_size)
-        self.dropout = nn.Dropout(self.dropout_rate)
-
-        # Sparse attention setup
-        self.sparse_mask = self._init_sparse_mask() if self.use_sparse_attention else None
-
-        # Key-value cache for inference
+        self._init_gating()
+        self._init_normalization()
+        self._init_sparse_mask()
+        self._init_weights()
+        
+        # Key-value cache
         self.use_cache = False
         self.kv_cache = None
 
-        # Initialize weights
-        self._init_weights()
-
-    def load_config(self, hidden_size: Optional[int], num_heads: Optional[int]):
+    def _load_config(self, hidden_size: Optional[int], num_heads: Optional[int]):
         """Load and validate configuration parameters."""
         self.hidden_size = hidden_size or self.config_manager.get("core_config.hidden_size", 768)
         self.num_heads = num_heads or self.config_manager.get("core_config.num_heads", 12)
+        assert self.hidden_size % self.num_heads == 0, "hidden_size must be divisible by num_heads"
+        
+        self.head_dim = self.hidden_size // self.num_heads
         self.dropout_rate = self.config_manager.get("controls_config.dropout_rate", 0.1)
         self.use_gating = self.config_manager.get("controls_config.use_gating", True)
         self.scale_attention = self.config_manager.get("controls_config.scale_attention", True)
@@ -240,6 +193,16 @@ class CrossAttentionLayer(nn.Module):
         self.sparse_pattern = self.config_manager.get("controls_config.sparse_pattern", "window")
         self.sparse_window_size = self.config_manager.get("controls_config.sparse_window_size", 128)
         self.max_seq_len = self.config_manager.get("training_config.max_seq_length", 512)
+        
+        self.scale = self.head_dim ** -0.5 if self.scale_attention else 1.0
+        self.influence_weight = nn.Parameter(
+            torch.tensor(self.config_manager.get("controls_config.scaffold_weight_cap", 1.0)),
+            requires_grad=False
+        )
+        self.blend_strength = nn.Parameter(
+            torch.tensor(self.config_manager.get("controls_config.dream_prompt_weight", 0.5)),
+            requires_grad=False
+        )
 
     def _init_projections(self):
         """Initialize attention projection layers with quantization support."""
@@ -252,15 +215,14 @@ class CrossAttentionLayer(nn.Module):
                     self.k_proj = LinearCls(self.hidden_size, self.hidden_size)
                     self.v_proj = LinearCls(self.hidden_size, self.hidden_size)
                     self.out_proj = LinearCls(self.hidden_size, self.hidden_size)
-                    return  # Exit early if successful
+                    return
                 except ImportError:
                     self.logger.record({
                         "warning": f"bitsandbytes not installed, falling back to fp16",
                         "timestamp": time.time()
                     })
-                    self.quantization_mode = 'fp16'  # Update mode to avoid downstream issues
+                    self.quantization_mode = 'fp16'
 
-            # Default to standard linear layers
             self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
             self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
             self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
@@ -273,6 +235,28 @@ class CrossAttentionLayer(nn.Module):
             })
             raise
 
+    def _init_gating(self):
+        """Initialize gating mechanism if enabled."""
+        self.gate = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.Sigmoid()
+        ) if self.use_gating else None
+
+    def _init_normalization(self):
+        """Initialize normalization and dropout."""
+        self.layer_norm = nn.LayerNorm(self.hidden_size)
+        self.dropout = nn.Dropout(self.dropout_rate)
+
+    def _init_sparse_mask(self):
+        """Initialize sparse attention mask."""
+        self.sparse_mask = (SparseMaskFactory.create(
+            seq_len=self.max_seq_len,
+            sparse_pattern=self.sparse_pattern,
+            window_size=self.sparse_window_size,
+            device=self.device,
+            logger=self.logger
+        ) if self.use_sparse_attention else None)
+
     def _init_weights(self):
         """Initialize weights with model-specific scaling."""
         gain = self.config_manager.get("core_config.initializer_range", 0.02)
@@ -283,33 +267,6 @@ class CrossAttentionLayer(nn.Module):
         if self.use_gating:
             nn.init.xavier_uniform_(self.gate[0].weight, gain=gain)
             nn.init.constant_(self.gate[0].bias, 0.0)
-
-    def _init_sparse_mask(self) -> torch.Tensor:
-        """Initialize sparse attention mask using utility function."""
-        return create_sparse_mask(
-            seq_len=self.max_seq_len,
-            sparse_pattern=self.sparse_pattern,
-            window_size=self.sparse_window_size,
-            device=self.device,  # Use layer's device
-            logger=self.logger
-        )
-
-    def _prepare_attention_mask(
-        self,
-        attention_mask: Optional[torch.Tensor],
-        batch_size: int,
-        seq_len: int,
-        device: torch.device
-    ) -> Optional[torch.Tensor]:
-        """Prepare attention mask using utility function."""
-        return prepare_attention_mask(
-            attention_mask=attention_mask,
-            batch_size=batch_size,
-            num_heads=self.num_heads,
-            seq_len=seq_len,
-            device=device,
-            logger=self.logger
-        )
 
     def reset_cache(self):
         """Reset key-value cache for inference."""
@@ -350,6 +307,44 @@ class CrossAttentionLayer(nn.Module):
                 "stack_trace": traceback.format_exc()
             })
 
+    def _compute_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        seq_len: int,
+        batch_size: int
+    ) -> torch.Tensor:
+        """Compute attention mechanism."""
+        if self.use_sparse_attention:
+            if self.sparse_mask.shape[-1] < seq_len:
+                self.sparse_mask = SparseMaskFactory.create(
+                    seq_len=seq_len,
+                    sparse_pattern=self.sparse_pattern,
+                    window_size=self.sparse_window_size,
+                    device=k.device,
+                    logger=self.logger
+                )
+            sparse_mask = self.sparse_mask[:seq_len, :seq_len].unsqueeze(0).unsqueeze(1)
+            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            attn_scores = attn_scores + (~sparse_mask).float() * float('-inf')
+            attn_probs = torch.softmax(attn_scores, dim=-1)
+            return torch.matmul(attn_probs, v)
+        elif hasattr(F, 'scaled_dot_product_attention'):
+            return F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attention_mask,
+                dropout_p=self.dropout_rate if self.training else 0.0,
+                is_causal=False
+            )
+        else:
+            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            if attention_mask is not None:
+                attn_scores = attn_scores + attention_mask
+            attn_probs = torch.softmax(attn_scores, dim=-1)
+            return torch.matmul(attn_probs, v)
+
     def _forward(
         self,
         hidden_states: torch.Tensor,
@@ -364,18 +359,7 @@ class CrossAttentionLayer(nn.Module):
         try:
             with NumericalGuard(dtype=torch.float16 if self.quantization_mode == 'fp16' else torch.float32):
                 batch_size = hidden_states.size(0)
-
-                # Log input shapes for debugging
-                self.logger.record({
-                    "event": "cross_attention_forward",
-                    "hidden_states_shape": list(hidden_states.shape),
-                    "cross_states_shape": list(cross_states.shape),
-                    "memory_tensors_shape": list(memory_tensors.shape) if memory_tensors is not None else None,
-                    "memory_weight": memory_weight,
-                    "use_cache": use_cache,
-                    "timestamp": time.time()
-                })
-
+                
                 # Validate inputs
                 if hidden_states.dim() != 3 or cross_states.dim() != 3:
                     raise ValueError(f"Expected 3D tensors, got hidden_states={hidden_states.shape}, cross_states={cross_states.shape}")
@@ -423,30 +407,17 @@ class CrossAttentionLayer(nn.Module):
 
                 # Prepare attention mask
                 seq_len = q.size(-2)
-                attention_mask = self._prepare_attention_mask(attention_mask, batch_size, seq_len, q.device)
+                attention_mask = AttentionMaskPreparer.prepare(
+                    attention_mask=attention_mask,
+                    batch_size=batch_size,
+                    num_heads=self.num_heads,
+                    seq_len=seq_len,
+                    device=q.device,
+                    logger=self.logger
+                )
 
-                # Attention computation
-                if self.use_sparse_attention:
-                    if self.sparse_mask.shape[-1] < seq_len:
-                        self.sparse_mask = self._init_sparse_mask().to(k.device)
-                    sparse_mask = self.sparse_mask[:seq_len, :seq_len].unsqueeze(0).unsqueeze(1)
-                    attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-                    attn_scores = attn_scores + (~sparse_mask).float() * float('-inf')
-                    attn_probs = torch.softmax(attn_scores, dim=-1)
-                    attn_output = torch.matmul(attn_probs, v)
-                elif hasattr(F, 'scaled_dot_product_attention'):
-                    attn_output = F.scaled_dot_product_attention(
-                        q, k, v,
-                        attn_mask=attention_mask,
-                        dropout_p=self.dropout_rate if self.training else 0.0,
-                        is_causal=False
-                    )
-                else:
-                    attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-                    if attention_mask is not None:
-                        attn_scores = attn_scores + attention_mask
-                    attn_probs = torch.softmax(attn_scores, dim=-1)
-                    attn_output = torch.matmul(attn_probs, v)
+                # Compute attention
+                attn_output = self._compute_attention(q, k, v, attention_mask, seq_len, batch_size)
 
                 # Reshape and project
                 attn_output = attn_output.transpose(1, 2).contiguous()
@@ -494,9 +465,7 @@ class CrossAttentionLayer(nn.Module):
         dynamic_factor: Optional[torch.Tensor] = None,
         use_cache: bool = False
     ) -> torch.Tensor:
-        """
-        Forward pass with optional gradient checkpointing.
-        """
+        """Forward pass with optional gradient checkpointing."""
         try:
             with torch.autocast(device_type=hidden_states.device.type, enabled=self.quantization_mode == 'fp16'):
                 if self.training and self.gradient_checkpointing:
@@ -530,98 +499,63 @@ class CrossAttentionLayer(nn.Module):
             })
             raise
 
-
 class CrossAttentionInjector:
-    """
-    Injector for adding cross-attention layers to a transformer model.
-    """
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        logger: Logger
-    ):
-        """
-        Initialize the injector.
-
-        Args:
-            config_manager: ConfigManager instance for parameters
-            logger: Logger instance for recording events
-        """
+    """Injector for adding cross-attention layers to a transformer model."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
-        self.scaffold_manager = ScaffoldManager(config_manager, logger)
         self.scaffold_proj = None
+        self.scaffold_unk_id = config_manager.get("controls_config.scaffold_unk_id", 0)
 
-    def inject_cross_attention(
+    def inject(
         self,
-        model: nn.Module,
+        base_model: nn.Module,
         scaffold_model: nn.Module,
-        core_config: dict,
-        cross_attn_config: dict,
-        lora_config: dict,
-        token_map: dict,
-        device: str
+        layers_to_inject: Union[str, List[int]],
+        injection_strategy: str = 'sequential',
+        token_map: Optional[Dict] = None
     ) -> nn.Module:
-        """
-        Inject cross-attention into the model.
-        
-        Args:
-            model: Base model to inject into
-            scaffold_model: Scaffold model providing context
-            core_config: Core configuration settings
-            cross_attn_config: Cross-attention specific settings
-            lora_config: LoRA configuration if used
-            token_map: Token mapping dictionary
-            device: Target device
-            
-        Returns:
-            nn.Module: Modified model with cross-attention
-        """
+        """Inject cross-attention into the model."""
         try:
             with self.lock:
-                # Validate layer indices
-                cross_attn_layers = core_config.get("cross_attn_layers", [])
-                if not validate_layer_indices(cross_attn_layers, len(self._get_model_layers(model))):
-                    raise ValueError(f"Invalid cross-attention layer indices: {cross_attn_layers}")
-                    
-                # Backup original state
-                original_state = {name: param.clone() for name, param in model.named_parameters()}
+                # Determine layers to inject
+                layer_indices = self.get_cross_attention_layers(base_model, layers_to_inject)
                 
-                # Log injection start
+                # Backup original state
+                original_state = {name: param.clone() for name, param in base_model.named_parameters()}
+                
                 self.logger.record({
                     "event": "cross_attention_injection_start",
-                    "layers": cross_attn_layers,
+                    "layers": layer_indices,
                     "timestamp": time.time()
                 })
                 
-                # Create and inject layers
-                for layer_idx in cross_attn_layers:
+                # Inject layers
+                for layer_idx in layer_indices:
                     self._inject_single_layer(
-                        model=model,
+                        model=base_model,
                         scaffold_model=scaffold_model,
                         layer_idx=layer_idx,
-                        cross_attn_config=cross_attn_config,
-                        lora_config=lora_config,
-                        token_map=token_map,
-                        device=device
+                        injection_strategy=injection_strategy,
+                        token_map=token_map
                     )
-                    
+                
                 # Verify injection
-                if not self.verify_injection(model, cross_attn_layers):
-                    # Restore original state on failure
-                    for name, param in model.named_parameters():
+                if not self._verify_injection(base_model, layer_indices):
+                    for name, param in base_model.named_parameters():
                         if name in original_state:
                             param.data.copy_(original_state[name])
                     raise RuntimeError("Cross-attention injection verification failed")
-                    
+                
                 self.logger.record({
                     "event": "cross_attention_injection_complete",
                     "status": "success",
                     "timestamp": time.time()
                 })
                 
-                return model
+                return base_model
                 
         except Exception as e:
             self.logger.record({
@@ -636,67 +570,34 @@ class CrossAttentionInjector:
         model: nn.Module,
         scaffold_model: nn.Module,
         layer_idx: int,
-        cross_attn_config: dict,
-        lora_config: dict,
-        token_map: dict,
-        device: str
+        injection_strategy: str,
+        token_map: Optional[Dict]
     ) -> None:
-        """
-        Inject cross-attention into a single layer.
-        
-        Args:
-            model: Base model
-            scaffold_model: Scaffold model
-            layer_idx: Index of layer to inject
-            cross_attn_config: Cross-attention configuration
-            lora_config: LoRA configuration
-            token_map: Token mapping
-            device: Target device
-        """
+        """Inject cross-attention into a single layer."""
         try:
-            # Get the layer to modify
-            layers, layer_names = self.find_model_layers(model)
+            layers, _ = self.find_model_layers(model)
             if layer_idx >= len(layers):
                 raise ValueError(f"Layer index {layer_idx} out of bounds")
                 
             original_layer = layers[layer_idx]
-            
-            # Create cross-attention layer
             cross_attn_layer = CrossAttentionLayer(
                 config_manager=self.config_manager,
                 logger=self.logger,
-                device=device
+                device=str(model.device)
             )
             
-            # Create wrapped layer based on injection strategy
-            injection_strategy = cross_attn_config.get("injection_strategy", "sequential")
-            if injection_strategy == "replace":
-                wrapped_layer = self._create_wrapped_layer(
-                    original_layer,
-                    cross_attn_layer,
-                    scaffold_model,
-                    token_map
-                )
-            elif injection_strategy == "parallel":
-                wrapped_layer = self._create_parallel_layer(
-                    original_layer,
-                    cross_attn_layer,
-                    scaffold_model,
-                    token_map
-                )
-            else:  # sequential
-                wrapped_layer = self._create_sequential_layer(
-                    original_layer,
-                    cross_attn_layer,
-                    scaffold_model,
-                    token_map
-                )
-                
-            # Replace the original layer
+            # Create wrapped layer
+            wrapped_layer = self._create_wrapped_layer(
+                original_layer=original_layer,
+                cross_attn_layer=cross_attn_layer,
+                scaffold_model=scaffold_model,
+                token_map=token_map,
+                strategy=injection_strategy
+            )
+            
             layers[layer_idx] = wrapped_layer
             
-            # Verify the injection
-            if not self._verify_injection(model, layer_idx):
+            if not self._verify_single_layer(model, layer_idx):
                 raise RuntimeError(f"Layer {layer_idx} injection verification failed")
                 
             self.logger.record({
@@ -714,94 +615,108 @@ class CrossAttentionInjector:
             })
             raise
 
-    def get_cross_attention_layers(self, model: nn.Module, mode: Optional[str] = None) -> List[int]:
-        """
-        Determine which layers to inject cross-attention into.
-        """
+    def get_cross_attention_layers(self, model: nn.Module, mode: Union[str, List[int]]) -> List[int]:
+        """Determine which layers to inject cross-attention into."""
         try:
-            mode = mode or self.config_manager.get("core_config.layer_selection_mode", "balanced")
-            total_layers = 0
-            if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
-                total_layers = len(model.transformer.h)
-            elif hasattr(model, 'layers'):
-                total_layers = len(model.layers)
-            elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
-                total_layers = len(model.model.layers)
-            elif hasattr(model, 'decoder') and hasattr(model.decoder, 'layers'):
-                total_layers = len(model.decoder.layers)
+            if isinstance(mode, list):
+                layers = mode
+                total_layers = len(self.find_model_layers(model)[0])
+                if not validate_layer_indices(layers, total_layers):
+                    raise ValueError(f"Invalid layer indices: {layers}")
+            else:
+                total_layers = 0
+                if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+                    total_layers = len(model.transformer.h)
+                elif hasattr(model, 'layers'):
+                    total_layers = len(model.layers)
+                elif hasattr(model, 'model') and hasattr(model.model, 'layers'):
+                    total_layers = len(model.model.layers)
+                elif hasattr(model, 'decoder') and hasattr(model.decoder, 'layers'):
+                    total_layers = len(model.decoder.layers)
 
-            if total_layers == 0:
-                self.logger.record({
-                    "error": "No layers found for cross-attention injection",
-                    "timestamp": time.time()
-                })
-                return []
+                if total_layers == 0:
+                    raise ValueError("No layers found for cross-attention injection")
 
-            if mode == "early":
-                layers = list(range(total_layers // 3))
-            elif mode == "late":
-                layers = list(range(2 * total_layers // 3, total_layers))
-            elif mode == "custom" and self.custom_layers:
-                layers = validate_layer_indices(self.custom_layers, total_layers, "CrossAttentionInjector", self.logger)
-            else:  # balanced
-                layers = list(range(total_layers // 3, 2 * total_layers // 3))
+                if mode == "early":
+                    layers = list(range(total_layers // 3))
+                elif mode == "late":
+                    layers = list(range(2 * total_layers // 3, total_layers))
+                else:  # balanced
+                    layers = list(range(total_layers // 3, 2 * total_layers // 3))
 
             self.logger.record({
                 "event": "layer_selection",
-                "mode": mode,
+                "mode": str(mode),
                 "selected_layers": layers,
-                "total_layers": total_layers,
+                "total_layers": total_layers if isinstance(mode, str) else len(self.find_model_layers(model)[0]),
                 "timestamp": time.time()
             })
             return layers
         except Exception as e:
             self.logger.record({
                 "error": f"Layer selection failed: {str(e)}",
-                "mode": mode,
+                "mode": str(mode),
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc()
             })
             raise
 
     def find_model_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
+        """Find transformer layers in the model."""
         strategy = LayerDiscoveryStrategy(self.logger)
         return strategy.find_layers(model)
 
     def _create_wrapped_layer(
         self,
         original_layer: nn.Module,
-        cross_attention_layer: CrossAttentionLayer,
-        scaffold_models: List[nn.Module],
-        token_map: Optional[Dict]
+        cross_attn_layer: CrossAttentionLayer,
+        scaffold_model: nn.Module,
+        token_map: Optional[Dict],
+        strategy: str
     ) -> nn.Module:
-        """Create a layer that replaces the original layer with cross-attention."""
+        """Create a wrapped layer based on injection strategy."""
         class WrappedLayer(nn.Module):
-            def __init__(self, cross_attn, scaffolds, token_map, parent):
+            def __init__(self, base_layer, cross_attn, scaffold, token_map, parent, strategy):
                 super().__init__()
+                self.base_layer = base_layer if strategy != 'replace' else None
                 self.cross_attn = cross_attn
-                self.scaffolds = scaffolds
-                if token_map is None:
-                    parent.logger.record({
-                        "warning": "Token map is None, using default scaffold_unk_id",
-                        "scaffold_unk_id": parent.scaffold_unk_id,
-                        "timestamp": time.time()
-                    })
-                    self.token_map = defaultdict(lambda: [parent.scaffold_unk_id])
-                else:
-                    self.token_map = token_map
-                self._parent = parent
+                self.scaffold = scaffold
+                self.token_map = token_map or defaultdict(lambda: [parent.scaffold_unk_id])
+                self.strategy = strategy
+                self.parent = parent
+                self.combine = nn.Linear(cross_attn.hidden_size * 2, cross_attn.hidden_size) if strategy == 'parallel' else None
 
             def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
                 try:
-                    if scaffold_context is not None:
+                    if self.strategy == 'replace':
+                        if scaffold_context is None:
+                            return hidden_states
                         context = scaffold_context.to(hidden_states.device)
-                        if self._parent.scaffold_proj is not None:
-                            context = self._parent.scaffold_proj(context)
+                        if self.parent.scaffold_proj is not None:
+                            context = self.parent.scaffold_proj(context)
                         output = self.cross_attn(hidden_states, context, **kwargs)
                         return (output,) if isinstance(hidden_states, tuple) else output
-                    return hidden_states
+
+                    base_output = self.base_layer(hidden_states, *args, **kwargs)
+                    base_output = base_output[0] if isinstance(base_output, tuple) else base_output
+                    
+                    if scaffold_context is None:
+                        return base_output
+                    
+                    context = scaffold_context.to(hidden_states.device)
+                    if self.parent.scaffold_proj is not None:
+                        context = self.parent.scaffold_proj(context)
+                    cross_output = self.cross_attn(hidden_states, context, **kwargs)
+                    
+                    if self.strategy == 'parallel':
+                        combined = torch.cat([base_output, cross_output], dim=-1)
+                        output = self.combine(combined)
+                    else:  # sequential
+                        output = cross_output
+                        
+                    return (output,) + base_output[1:] if isinstance(base_output, tuple) else output
                 except Exception as e:
-                    self._parent.logger.record({
+                    self.parent.logger.record({
                         "error": f"WrappedLayer forward failed: {str(e)}",
                         "hidden_states_shape": list(hidden_states.shape),
                         "timestamp": time.time(),
@@ -809,141 +724,27 @@ class CrossAttentionInjector:
                     })
                     raise
 
-        return WrappedLayer(cross_attention_layer, scaffold_models, token_map, self)
+        return WrappedLayer(original_layer, cross_attn_layer, scaffold_model, token_map, self, strategy)
 
-    def _create_sequential_layer(
-        self,
-        original_layer: nn.Module,
-        cross_attention_layer: CrossAttentionLayer,
-        scaffold_models: List[nn.Module],
-        token_map: Optional[Dict]
-    ) -> nn.Module:
-        """Create a layer that runs cross-attention after original layer."""
-        class SequentialLayer(nn.Module):
-            def __init__(self, base_layer, cross_attn, scaffolds, token_map, parent):
-                super().__init__()
-                self.base_layer = base_layer
-                self.cross_attn = cross_attn
-                self.scaffolds = scaffolds
-                if token_map is None:
-                    parent.logger.record({
-                        "warning": "Token map is None, using default scaffold_unk_id",
-                        "scaffold_unk_id": parent.scaffold_unk_id,
-                        "timestamp": time.time()
-                    })
-                    self.token_map = defaultdict(lambda: [parent.scaffold_unk_id])
-                else:
-                    self.token_map = token_map
-                self._parent = parent
-
-            def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
-                try:
-                    outputs = self.base_layer(hidden_states, *args, **kwargs)
-                    hidden_states = outputs[0] if isinstance(outputs, tuple) else outputs
-                    if scaffold_context is not None:
-                        context = scaffold_context.to(hidden_states.device)
-                        if self._parent.scaffold_proj is not None:
-                            context = self._parent.scaffold_proj(context)
-                        hidden_states = self.cross_attn(hidden_states, context, **kwargs)
-                    return (hidden_states,) + outputs[1:] if isinstance(outputs, tuple) else hidden_states
-                except Exception as e:
-                    self._parent.logger.record({
-                        "error": f"SequentialLayer forward failed: {str(e)}",
-                        "hidden_states_shape": list(hidden_states.shape),
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc()
-                    })
-                    raise
-
-        return SequentialLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
-
-    def _create_parallel_layer(
-        self,
-        original_layer: nn.Module,
-        cross_attention_layer: CrossAttentionLayer,
-        scaffold_models: List[nn.Module],
-        token_map: Optional[Dict]
-    ) -> nn.Module:
-        """Create a layer that runs original and cross-attention in parallel."""
-        class ParallelLayer(nn.Module):
-            def __init__(self, base_layer, cross_attn, scaffolds, token_map, parent):
-                super().__init__()
-                self.base_layer = base_layer
-                self.cross_attn = cross_attn
-                self.scaffolds = scaffolds
-                if token_map is None:
-                    parent.logger.record({
-                        "warning": "Token map is None, using default scaffold_unk_id",
-                        "scaffold_unk_id": parent.scaffold_unk_id,
-                        "timestamp": time.time()
-                    })
-                    self.token_map = defaultdict(lambda: [parent.scaffold_unk_id])
-                else:
-                    self.token_map = token_map
-                self.combine = nn.Linear(cross_attn.hidden_size * 2, cross_attn.hidden_size)
-                self._parent = parent
-
-            def forward(self, hidden_states, *args, scaffold_context=None, **kwargs):
-                try:
-                    base_output = self.base_layer(hidden_states, *args, **kwargs)
-                    base_output = base_output[0] if isinstance(base_output, tuple) else base_output
-                    if scaffold_context is not None:
-                        context = scaffold_context.to(hidden_states.device)
-                        if self._parent.scaffold_proj is not None:
-                            context = self._parent.scaffold_proj(context)
-                        cross_output = self.cross_attn(hidden_states, context, **kwargs)
-                        combined = torch.cat([base_output, cross_output], dim=-1)
-                        output = self.combine(combined)
-                        return (output,) + base_output[1:] if isinstance(base_output, tuple) else output
-                    return base_output
-                except Exception as e:
-                    self._parent.logger.record({
-                        "error": f"ParallelLayer forward failed: {str(e)}",
-                        "hidden_states_shape": list(hidden_states.shape),
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc()
-                    })
-                    raise
-
-        return ParallelLayer(original_layer, cross_attention_layer, scaffold_models, token_map, self)
-
-    def _verify_injection(self, model: nn.Module, layer_idx: int) -> bool:
-        """Quick verification of a single layer's cross-attention injection."""
+    def _verify_single_layer(self, model: nn.Module, layer_idx: int) -> bool:
+        """Verify a single layer's cross-attention injection."""
         try:
-            layer = model.transformer.h[layer_idx]
-            if not hasattr(layer, 'cross_attention'):
+            layers, _ = self.find_model_layers(model)
+            layer = layers[layer_idx]
+            if not hasattr(layer, 'cross_attn'):
                 return False
-
-            # Basic dimension checks
-            if layer.cross_attention.embed_dim != self.hidden_size:
+            if layer.cross_attn.hidden_size != layer.cross_attn.q_proj.in_features:
                 return False
-            if layer.cross_attention.num_heads != self.num_heads:
-                return False
-
-            # Verify the layer is properly connected
-            if not hasattr(layer.cross_attention, 'in_proj_weight'):
-                return False
-
             return True
         except Exception:
             return False
-        
-    def _inject_single_layer(self, model, scaffold_model, layer_idx, cross_attn_config, lora_config, token_map, device):
-        """Inject cross-attention into a single layer."""
+
+    def _verify_injection(self, model: nn.Module, layer_indices: List[int]) -> bool:
+        """Verify that cross-attention layers were properly injected."""
         try:
-            # ... existing injection code ...
-            
-            # Add immediate verification
-            if not self._verify_injection(model, layer_idx):
-                raise RuntimeError(f"Layer {layer_idx} injection verification failed")
-                
-            if self.logger:
-                self.logger(f"Successfully injected and verified layer {layer_idx}")
-                
-        except Exception as e:
-            if self.logger:
-                self.logger(f"Failed to inject layer {layer_idx}: {str(e)}")
-            raise    
+            return all(self._verify_single_layer(model, idx) for idx in layer_indices)
+        except Exception:
+            return False
 
     def save_state(self, path: str, state_dict: dict):
         """Save cross-attention parameters."""
@@ -989,89 +790,8 @@ class CrossAttentionInjector:
             })
             raise
 
-def inject_cross_attention(
-    base_model: nn.Module,
-    scaffold_model: Union[nn.Module, List[nn.Module]],
-    config_manager: ConfigManager,
-    logger: Logger,
-    token_map: Optional[Dict] = None
-) -> nn.Module:
-    """
-    Inject cross-attention layers with configuration from ConfigManager.
-
-    Args:
-        base_model: The base transformer model
-        scaffold_model: The scaffold model(s) providing context
-        config_manager: ConfigManager instance for parameters
-        logger: Logger instance for recording events
-        token_map: Optional token mapping dictionary
-    """
-    try:
-        injector = CrossAttentionInjector(config_manager, logger)
-        return injector.inject(
-            base_model=base_model,
-            scaffold_model=scaffold_model,
-            layers_to_inject=config_manager.get("core_config.layer_selection_mode", "balanced"),
-            injection_strategy=config_manager.get("controls_config.injection_strategy", "sequential"),
-            token_map=token_map
-        )
-    except Exception as e:
-        logger.record({
-            "error": f"Cross-attention injection failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        raise
-
-def verify_injection(self, model: nn.Module, layer_indices: List[int]) -> bool:
-    """Verify that cross-attention layers were properly injected."""
-    try:
-        for layer_idx in layer_indices:
-            layer = model.transformer.h[layer_idx]
-            if not hasattr(layer, 'cross_attention'):
-                return False
-            if layer.cross_attention.embed_dim != self.hidden_size:
-                return False
-            if layer.cross_attention.num_heads != self.num_heads:
-                return False
-        return True
-    except Exception:
-        return False
-
-def remove_cross_attention(self, model: nn.Module, layer_indices: List[int]) -> None:
-    """Remove cross-attention layers from specified indices."""
-    try:
-        for layer_idx in layer_indices:
-            if hasattr(model.transformer.h[layer_idx], 'cross_attention'):
-                delattr(model.transformer.h[layer_idx], 'cross_attention')
-    except Exception as e:
-        raise RuntimeError(f"Failed to remove cross-attention: {str(e)}")
-
-def get_injection_state(self, model: nn.Module) -> Dict[int, bool]:
-    """Get the current state of cross-attention layers."""
-    state = {}
-    try:
-        for i, layer in enumerate(model.transformer.h):
-            state[i] = hasattr(layer, 'cross_attention')
-    except Exception as e:
-        raise RuntimeError(f"Failed to get injection state: {str(e)}")
-    return state            
-
-class InsufficientDataError(Exception):
-    """Exception raised when there is insufficient data for scaffold operations."""
-    pass
-
 def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
-    """
-    Calculate confidence score for scaffold generation.
-    
-    Args:
-        logits: Model prediction logits
-        generated_ids: Generated token IDs
-        
-    Returns:
-        float: Confidence score between 0 and 1
-    """
+    """Calculate confidence score for scaffold generation."""
     try:
         with torch.no_grad():
             probs = torch.softmax(logits, dim=-1)
@@ -1079,6 +799,10 @@ def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor
             return float(selected_probs.mean())
     except Exception as e:
         raise RuntimeError(f"Failed to calculate confidence score: {str(e)}")
+
+class InsufficientDataError(Exception):
+    """Exception raised when there is insufficient data for scaffold operations."""
+    pass
 
 class ScaffoldManager:
     """Manages scaffold-related operations and state."""
@@ -1093,12 +817,7 @@ class ScaffoldManager:
         self.lock = Lock()
 
     def validate_scaffold_config(self) -> bool:
-        """
-        Validate scaffold-specific configuration settings.
-        
-        Returns:
-            bool: True if configuration is valid, False otherwise
-        """
+        """Validate scaffold-specific configuration settings."""
         try:
             required_keys = [
                 "core_config.scaffold_model_name",
@@ -1107,7 +826,6 @@ class ScaffoldManager:
                 "controls_config.scaffold_unk_id"
             ]
             
-            # Check required keys
             for key in required_keys:
                 if not self.config_manager.has_key(key):
                     self.logger.record({
@@ -1116,7 +834,6 @@ class ScaffoldManager:
                     })
                     return False
 
-            # Validate cross attention layers
             cross_attn_layers = self.config_manager.get("core_config.cross_attn_layers", [])
             if not isinstance(cross_attn_layers, list):
                 self.logger.record({
@@ -1125,7 +842,6 @@ class ScaffoldManager:
                 })
                 return False
 
-            # Validate numeric parameters
             numeric_validations = {
                 "controls_config.scaffold_weight_cap": (0.0, 1.0),
                 "controls_config.blend_strength": (0.0, 1.0),
@@ -1167,28 +883,16 @@ class ScaffoldManager:
             return False
 
     def initialize_scaffold_state(self, model_name: str, device: str) -> bool:
-        """
-        Initialize scaffold model state and configuration.
-        
-        Args:
-            model_name: Name of the scaffold model
-            device: Device to initialize on
-            
-        Returns:
-            bool: True if initialization successful, False otherwise
-        """
+        """Initialize scaffold model state and configuration."""
         try:
             from transformers import AutoConfig
-            
             self.scaffold_config = AutoConfig.from_pretrained(model_name)
             
-            # Validate model architecture
             required_attrs = ["hidden_size", "num_attention_heads", "num_hidden_layers"]
             for attr in required_attrs:
                 if not hasattr(self.scaffold_config, attr):
                     raise ValueError(f"Scaffold model config missing {attr}")
 
-            # Cache important values
             with self.lock:
                 self.hidden_size = self.scaffold_config.hidden_size
                 self.num_heads = self.scaffold_config.num_attention_heads
@@ -1196,7 +900,6 @@ class ScaffoldManager:
                 self.device = device
 
             return True
-
         except Exception as e:
             self.logger.record({
                 "error": f"Scaffold state initialization failed: {str(e)}",
@@ -1207,20 +910,11 @@ class ScaffoldManager:
             return False
 
     def verify_scaffold_compatibility(self, base_config) -> bool:
-        """
-        Verify compatibility between base and scaffold models.
-        
-        Args:
-            base_config: Configuration of the base model
-            
-        Returns:
-            bool: True if models are compatible, False otherwise
-        """
+        """Verify compatibility between base and scaffold models."""
         try:
             if not self.scaffold_config:
                 raise ValueError("Scaffold config not initialized")
 
-            # Check dimension compatibility
             if self.scaffold_config.hidden_size % base_config.hidden_size != 0:
                 self.logger.record({
                     "error": "Incompatible hidden sizes",
@@ -1230,7 +924,6 @@ class ScaffoldManager:
                 })
                 return False
 
-            # Check attention head compatibility
             if self.scaffold_config.num_attention_heads % base_config.num_attention_heads != 0:
                 self.logger.record({
                     "error": "Incompatible number of attention heads",
@@ -1241,7 +934,6 @@ class ScaffoldManager:
                 return False
 
             return True
-
         except Exception as e:
             self.logger.record({
                 "error": f"Scaffold compatibility check failed: {str(e)}",
@@ -1251,18 +943,13 @@ class ScaffoldManager:
             return False
 
     def get_scaffold_stats(self) -> Dict:
-        """
-        Get current statistics about scaffold state.
-        
-        Returns:
-            Dict containing scaffold statistics
-        """
+        """Get current statistics about scaffold state."""
         try:
             with self.lock:
                 stats = {
-                    "hidden_size": self.hidden_size if hasattr(self, "hidden_size") else None,
-                    "num_heads": self.num_heads if hasattr(self, "num_heads") else None,
-                    "num_layers": self.num_layers if hasattr(self, "num_layers") else None,
+                    "hidden_size": getattr(self, "hidden_size", None),
+                    "num_heads": getattr(self, "num_heads", None),
+                    "num_layers": getattr(self, "num_layers", None),
                     "token_map_size": len(self.token_map) if self.token_map else 0,
                     "has_hidden_states": self.scaffold_hidden_states is not None,
                     "config_valid": self.validation_cache.get("config_valid", False),
@@ -1270,7 +957,6 @@ class ScaffoldManager:
                     "timestamp": time.time()
                 }
                 return stats
-
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to get scaffold stats: {str(e)}",
@@ -1291,29 +977,19 @@ class ScaffoldManager:
             })
 
     def build_token_map(self, base_tokenizer, scaffold_tokenizer):
-        """
-        Build mapping between base and scaffold tokenizers.
-        
-        Args:
-            base_tokenizer: Base model tokenizer
-            scaffold_tokenizer: Scaffold model tokenizer
-            
-        Returns:
-            Dict: Mapping from base token IDs to scaffold token IDs and weights
-        """
+        """Build mapping between base and scaffold tokenizers."""
         try:
             token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
             for base_token, base_id in base_tokenizer.get_vocab().items():
                 normalized = base_token.replace("Ġ", "").replace("##", "")
                 scaffold_ids = scaffold_tokenizer.encode(
-                    normalized, 
-                    add_special_tokens=False, 
-                    max_length=3, 
+                    normalized,
+                    add_special_tokens=False,
+                    max_length=3,
                     truncation=True
                 ) or [scaffold_tokenizer.unk_token_id]
                 token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
                 
-            # Add special token mappings
             special_token_map = {
                 base_tokenizer.pad_token_id: scaffold_tokenizer.pad_token_id,
                 base_tokenizer.eos_token_id: scaffold_tokenizer.eos_token_id or scaffold_tokenizer.sep_token_id,
@@ -1334,16 +1010,11 @@ class ScaffoldManager:
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc()
             })
-            raise            
+            raise
 
     @contextlib.contextmanager
     def scaffold_context(self, hidden_states):
-        """
-        Context manager for scaffold hidden states.
-        
-        Args:
-            hidden_states: Scaffold model hidden states
-        """
+        """Context manager for scaffold hidden states."""
         try:
             prev_states = self.scaffold_hidden_states
             self.scaffold_hidden_states = hidden_states
@@ -1352,15 +1023,7 @@ class ScaffoldManager:
             self.scaffold_hidden_states = prev_states
 
     def get_scaffold_hidden_states(self, scaffold_inputs):
-        """
-        Get hidden states from scaffold inputs.
-        
-        Args:
-            scaffold_inputs: Input tensors for scaffold model
-            
-        Returns:
-            torch.Tensor: Scaffold hidden states
-        """
+        """Get hidden states from scaffold inputs."""
         try:
             return self.scaffold_hidden_states
         except Exception as e:
@@ -1376,15 +1039,7 @@ class ScaffoldManager:
         self.scaffold_hidden_states = None
 
     def map_sequence(self, base_input_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Map base model token IDs to scaffold token IDs.
-        
-        Args:
-            base_input_ids: Input token IDs from base model
-            
-        Returns:
-            torch.Tensor: Mapped scaffold token IDs
-        """
+        """Map base model token IDs to scaffold token IDs."""
         try:
             if self.token_map is None:
                 raise ValueError("Token map not initialized")
@@ -1399,4 +1054,4 @@ class ScaffoldManager:
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc()
             })
-            raise            
+            raise
