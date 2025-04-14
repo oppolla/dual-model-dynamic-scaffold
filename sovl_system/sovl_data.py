@@ -1,7 +1,7 @@
 from typing import List, Tuple, Optional, Dict, Any
 from abc import ABC, abstractmethod
 import random
-import json
+import time
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_error import ErrorHandler
@@ -9,8 +9,9 @@ from sovl_io import load_training_data, InsufficientDataError
 
 class DataProvider(ABC):
     """Abstract interface for data providers."""
+    
     @abstractmethod
-    def load_data(self, source: str, min_entries: int = 0) -> List[Dict]:
+    def load_data(self, source: str, min_entries: int = 0) -> List[Dict[str, Any]]:
         """
         Load data from a specified source.
         
@@ -19,7 +20,7 @@ class DataProvider(ABC):
             min_entries: Minimum number of entries required.
         
         Returns:
-            List of data entries (dictionaries).
+            List of data entries as dictionaries.
         
         Raises:
             InsufficientDataError: If not enough data is loaded.
@@ -28,7 +29,7 @@ class DataProvider(ABC):
         pass
 
     @abstractmethod
-    def validate_data(self, data: List[Dict]) -> bool:
+    def validate_data(self, data: List[Dict[str, Any]]) -> bool:
         """
         Validate the integrity of loaded data.
         
@@ -42,61 +43,72 @@ class DataProvider(ABC):
 
 class FileDataProvider(DataProvider):
     """Data provider for loading data from JSONL files."""
+    
     def __init__(self, logger: Logger):
         self.logger = logger
 
-    def load_data(self, source: str, min_entries: int = 0) -> List[Dict]:
+    def load_data(self, source: str, min_entries: int = 0) -> List[Dict[str, Any]]:
         """Load data from a JSONL file."""
         try:
             data = load_training_data(source, min_entries=min_entries)
-            self.logger.record({
-                "event": "data_loaded",
-                "source": source,
-                "entry_count": len(data),
-                "timestamp": time.time(),
-                "conversation_id": "data_load"
-            })
+            self._log_load_success(source, len(data))
             return data
-        except InsufficientDataError as e:
+        except InsufficientDataError:
             raise
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to load data from {source}: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": "data_load"
-            })
+            self._log_load_error(source, e)
             raise ValueError(f"Invalid data source {source}: {str(e)}")
 
-    def validate_data(self, data: List[Dict]) -> bool:
+    def validate_data(self, data: List[Dict[str, Any]]) -> bool:
         """Validate JSONL data entries."""
         if not data:
-            self.logger.record({
-                "warning": "Empty data provided for validation",
-                "timestamp": time.time(),
-                "conversation_id": "data_validate"
-            })
+            self._log_validation_warning("Empty data provided for validation")
             return False
+        
         for entry in data:
-            if not isinstance(entry, dict):
-                self.logger.record({
-                    "warning": "Invalid data entry: not a dictionary",
-                    "entry": str(entry)[:100],
-                    "timestamp": time.time(),
-                    "conversation_id": "data_validate"
-                })
-                return False
-            if "prompt" not in entry or not isinstance(entry["prompt"], str):
-                self.logger.record({
-                    "warning": "Invalid data entry: missing or invalid prompt",
-                    "entry": str(entry)[:100],
-                    "timestamp": time.time(),
-                    "conversation_id": "data_validate"
-                })
+            if not self._is_valid_entry(entry):
                 return False
         return True
 
+    def _is_valid_entry(self, entry: Any) -> bool:
+        """Check if a single data entry is valid."""
+        if not isinstance(entry, dict):
+            self._log_validation_warning(f"Invalid data entry: not a dictionary, got {str(entry)[:100]}")
+            return False
+        if "prompt" not in entry or not isinstance(entry["prompt"], str):
+            self._log_validation_warning(f"Invalid data entry: missing or invalid prompt, got {str(entry)[:100]}")
+            return False
+        return True
+
+    def _log_load_success(self, source: str, entry_count: int) -> None:
+        """Log successful data load event."""
+        self.logger.record({
+            "event": "data_loaded",
+            "source": source,
+            "entry_count": entry_count,
+            "timestamp": time.time(),
+            "conversation_id": "data_load"
+        })
+
+    def _log_load_error(self, source: str, error: Exception) -> None:
+        """Log data load error."""
+        self.logger.record({
+            "error": f"Failed to load data from {source}: {str(error)}",
+            "timestamp": time.time(),
+            "conversation_id": "data_load"
+        })
+
+    def _log_validation_warning(self, message: str) -> None:
+        """Log validation warning."""
+        self.logger.record({
+            "warning": message,
+            "timestamp": time.time(),
+            "conversation_id": "data_validate"
+        })
+
 class DataManager:
     """Manages loading, validation, and splitting of training data."""
+    
     def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorHandler):
         """
         Initialize the DataManager.
@@ -107,17 +119,19 @@ class DataManager:
             error_handler: Handler for managing errors.
         """
         self.config_manager = config_manager
-        self.core_config = config_manager.get_section("core_config")
         self.logger = logger
         self.error_handler = error_handler
-        self.random_seed = self.core_config.get("random_seed", 42)
-        self.default_split_ratio = self.core_config.get("valid_split_ratio", 0.2)
-        self.default_source = self.core_config.get("data_source", "sovl_seed.jsonl")
-        
-        # Initialize default provider
-        self.provider = FileDataProvider(logger)
-        
-    def set_provider(self, provider: DataProvider):
+        self._initialize_config()
+        self.provider: DataProvider = FileDataProvider(logger)
+
+    def _initialize_config(self) -> None:
+        """Initialize configuration settings."""
+        core_config = self.config_manager.get_section("core_config")
+        self.random_seed: int = core_config.get("random_seed", 42)
+        self.default_split_ratio: float = core_config.get("valid_split_ratio", 0.2)
+        self.default_source: str = core_config.get("data_source", "sovl_seed.jsonl")
+
+    def set_provider(self, provider: DataProvider) -> None:
         """
         Set a custom data provider.
         
@@ -132,8 +146,12 @@ class DataManager:
             "conversation_id": "data_config"
         })
 
-    def load_and_split(self, source: Optional[str] = None, min_entries: int = 0, 
-                      valid_split_ratio: Optional[float] = None) -> Tuple[List[Dict], List[Dict]]:
+    def load_and_split(
+        self,
+        source: Optional[str] = None,
+        min_entries: int = 0,
+        valid_split_ratio: Optional[float] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Load data from a source and split into training and validation sets.
         
@@ -147,59 +165,41 @@ class DataManager:
         """
         source = source or self.default_source
         valid_split_ratio = valid_split_ratio or self.default_split_ratio
-        
+
         try:
-            # Load data
-            data = self.provider.load_data(source, min_entries)
-            
+            data = self._load_data(source, min_entries)
             if not data:
-                self.logger.record({
-                    "warning": f"No data loaded from {source}",
-                    "timestamp": time.time(),
-                    "conversation_id": "data_load"
-                })
                 return [], []
-            
-            # Validate data
+
             if not self.provider.validate_data(data):
-                self.error_handler.handle_data_error(
-                    error=ValueError("Data validation failed"),
-                    context={"source": source, "entry_count": len(data)},
-                    conversation_id="data_load"
-                )
+                self._handle_validation_error(source, len(data))
                 return [], []
-            
-            # Split data
+
             train_data, valid_data = self._split_data(data, valid_split_ratio)
-            
+            self._log_split_success(source, len(data), len(train_data), len(valid_data), valid_split_ratio)
+            return train_data, valid_data
+
+        except InsufficientDataError as e:
+            self._handle_data_error(e, source, min_entries)
+            return [], []
+        except Exception as e:
+            self._handle_data_error(e, source, min_entries)
+            return [], []
+
+    def _load_data(self, source: str, min_entries: int) -> List[Dict[str, Any]]:
+        """Load data with logging."""
+        data = self.provider.load_data(source, min_entries)
+        if not data:
             self.logger.record({
-                "event": "data_loaded_and_split",
-                "source": source,
-                "total_entries": len(data),
-                "train_entries": len(train_data),
-                "valid_entries": len(valid_data),
-                "split_ratio": valid_split_ratio,
+                "warning": f"No data loaded from {source}",
                 "timestamp": time.time(),
                 "conversation_id": "data_load"
             })
-            return train_data, valid_data
-            
-        except InsufficientDataError as e:
-            self.error_handler.handle_data_error(
-                error=e,
-                context={"source": source, "min_entries": min_entries},
-                conversation_id="data_load"
-            )
-            return [], []
-        except Exception as e:
-            self.error_handler.handle_data_error(
-                error=e,
-                context={"source": source, "min_entries": min_entries},
-                conversation_id="data_load"
-            )
-            return [], []
+        return data
 
-    def _split_data(self, data: List[Dict], split_ratio: float) -> Tuple[List[Dict], List[Dict]]:
+    def _split_data(
+        self, data: List[Dict[str, Any]], split_ratio: float
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Split data into training and validation sets.
         
@@ -214,11 +214,12 @@ class DataManager:
             return [], []
         
         random.seed(self.random_seed)
-        random.shuffle(data)
-        split_idx = int(len(data) * (1 - split_ratio))
-        return data[:split_idx], data[split_idx:]
+        shuffled_data = data.copy()  # Avoid modifying original data
+        random.shuffle(shuffled_data)
+        split_idx = int(len(shuffled_data) * (1 - split_ratio))
+        return shuffled_data[:split_idx], shuffled_data[split_idx:]
 
-    def validate_data(self, data: List[Dict]) -> bool:
+    def validate_data(self, data: List[Dict[str, Any]]) -> bool:
         """
         Validate data using the current provider.
         
@@ -238,7 +239,7 @@ class DataManager:
             )
             return False
 
-    def get_data_stats(self, data: List[Dict]) -> Dict[str, Any]:
+    def get_data_stats(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Compute statistics about the data.
         
@@ -249,14 +250,49 @@ class DataManager:
             Dictionary with statistics (e.g., entry count, prompt lengths).
         """
         if not data:
-            return {"entry_count": 0, "avg_prompt_length": 0, "has_response": False}
+            return {"entry_count": 0, "avg_prompt_length": 0.0, "has_response": False}
+        
+        stats = {
+            "entry_count": len(data),
+            "avg_prompt_length": 0.0,
+            "has_response": False
+        }
         
         prompt_lengths = [len(entry.get("prompt", "")) for entry in data]
-        has_response = any("response" in entry for entry in data)
-        avg_prompt_length = sum(prompt_lengths) / len(prompt_lengths) if prompt_lengths else 0
+        stats["has_response"] = any("response" in entry for entry in data)
+        stats["avg_prompt_length"] = (
+            sum(prompt_lengths) / len(prompt_lengths) if prompt_lengths else 0.0
+        )
         
-        return {
-            "entry_count": len(data),
-            "avg_prompt_length": avg_prompt_length,
-            "has_response": has_response
-        }
+        return stats
+
+    def _handle_validation_error(self, source: str, entry_count: int) -> None:
+        """Handle data validation errors."""
+        self.error_handler.handle_data_error(
+            error=ValueError("Data validation failed"),
+            context={"source": source, "entry_count": entry_count},
+            conversation_id="data_load"
+        )
+
+    def _handle_data_error(self, error: Exception, source: str, min_entries: int) -> None:
+        """Handle general data errors."""
+        self.error_handler.handle_data_error(
+            error=error,
+            context={"source": source, "min_entries": min_entries},
+            conversation_id="data_load"
+        )
+
+    def _log_split_success(
+        self, source: str, total: int, train: int, valid: int, split_ratio: float
+    ) -> None:
+        """Log successful data split event."""
+        self.logger.record({
+            "event": "data_loaded_and_split",
+            "source": source,
+            "total_entries": total,
+            "train_entries": train,
+            "valid_entries": valid,
+            "split_ratio": split_ratio,
+            "timestamp": time.time(),
+            "conversation_id": "data_load"
+        })
