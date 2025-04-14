@@ -469,3 +469,27 @@ Hash: sha256:abc123...
 [X-Custom]
   X-Mood: Playful
 ```
+
+Baseline: 300 KB (75,000 words)
+Content (from prior analysis):
+[Identity]: ~3 KB (1,000 words, e.g., Origin, Essence).
+
+[Heartbeat]: ~20 KB (5,000 words, e.g., Tendencies, TemperamentLog).
+
+[Echoes]: ~150 KB (37,500 words, 500 memories × 75 words).
+
+[Tides]: ~20 KB (5,000 words, 100 cycles × 50 words).
+
+[Threads]: ~15 KB (3,750 words, 50 relations × 75 words).
+
+[Horizon]: ~20 KB (5,000 words, 100 milestones × 50 words).
+
+[Reflection]: ~15 KB (3,750 words, e.g., Purpose, Hopes).
+
+[Voice]: ~15 KB (3,750 words, e.g., 5–20 dialogue samples).
+
+[Metadata]: ~2 KB (500 words, e.g., Summary).
+
+[X-Custom]: ~0–5 KB (optional).
+
+
