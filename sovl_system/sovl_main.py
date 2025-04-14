@@ -40,6 +40,7 @@ from sovl_utils import (
 )
 from sovl_temperament import TemperamentConfig, TemperamentSystem
 from sovl_memory import MemoryManager
+from sovl_manager import ModelManager
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Wrapper for backward compatibility"""
@@ -280,82 +281,19 @@ class SOVLSystem:
         # Validate configuration
         self._validate_config()
 
-        # Initialize models and tokenizers
-        self.base_config = AutoConfig.from_pretrained(self.core_config["base_model_name"])
-        self.scaffold_config = AutoConfig.from_pretrained(self.core_config["scaffold_model_name"])
-        self.dry_run = self.training_config.get("dry_run", False)
-        self.dry_run_params = self.training_config.get("dry_run_params", {})
+        # Initialize model manager
+        self.model_manager = ModelManager(
+            config_manager=config_manager,
+            logger=self.logger,
+            device=DEVICE
+        )
 
-        print(f"Loading base model: {self.core_config['base_model_name']}")
-        try:
-            quantization_config = (
-                {"load_in_8bit": True} if self.quantization_mode == "int8" else
-                {"load_in_4bit": True} if self.quantization_mode == "int4" else {}
-            )
-            self.base_model = AutoModelForCausalLM.from_pretrained(
-                self.core_config["base_model_name"],
-                config=self.base_config,
-                **quantization_config
-            ).to(DEVICE)
-            self.base_model.eval()
-            for param in self.base_model.parameters():
-                param.requires_grad = False
-            self.logger.record({
-                "event": "model_loaded",
-                "model_type": "base",
-                "model_name": self.core_config["base_model_name"],
-                "quantization": self.quantization_mode,
-                "timestamp": time.time()
-            })
-            print(f"Base model '{self.core_config['base_model_name']}' loaded and frozen.")
-        except Exception as e:
-            self.error_logger.record({
-                "error": f"Failed to load base model: {str(e)}",
-                "model_name": self.core_config["base_model_name"],
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-        print(f"Loading scaffold model: {self.core_config['scaffold_model_name']}")
-        try:
-            scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
-                self.core_config["scaffold_model_name"],
-                config=self.scaffold_config,
-                **quantization_config
-            )
-            if self.controls_config.get("enable_lora_adapters", True):
-                lora_config = LoraConfig(
-                    r=self.lora_config.get("lora_rank", 8),
-                    lora_alpha=self.lora_config.get("lora_alpha", 16),
-                    target_modules=self.lora_config.get("lora_target_modules", ["c_attn", "c_proj", "c_fc"]),
-                    lora_dropout=self.lora_config.get("lora_dropout", 0.1),
-                    bias="none",
-                    task_type=TaskType.CAUSAL_LM
-                )
-                self.scaffolds = [get_peft_model(scaffold_model_raw, lora_config).to(DEVICE)]
-                print("LoRA adapters applied to scaffold[0].")
-            else:
-                self.scaffolds = [scaffold_model_raw.to(DEVICE)]
-                print("Scaffold loaded without LoRA adapters.")
-        except Exception as e:
-            self.error_logger.record({
-                "error": f"Failed to load scaffold model: {str(e)}",
-                "model_name": self.core_config["scaffold_model_name"],
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-        print(f"Loading tokenizers from: {self.core_config['base_model_name']} and {self.core_config['scaffold_model_name']}")
-        self.base_tokenizer = AutoTokenizer.from_pretrained(self.core_config["base_model_name"])
-        self.scaffold_tokenizer = AutoTokenizer.from_pretrained(self.core_config["scaffold_model_name"])
-        if self.base_tokenizer.pad_token is None:
-            self.base_tokenizer.pad_token = self.base_tokenizer.eos_token
-        if self.scaffold_tokenizer.pad_token is None:
-            self.scaffold_tokenizer.pad_token = self.scaffold_tokenizer.eos_token
-        self.base_model.config.pad_token_id = self.base_tokenizer.pad_token_id
-        self.scaffolds[0].config.pad_token_id = self.scaffold_tokenizer.pad_token_id
+        # Get models and tokenizers from model manager
+        self.base_model = self.model_manager.get_base_model()
+        self.scaffolds = [self.model_manager.get_scaffold_model()]
+        self.base_tokenizer = self.model_manager.get_base_tokenizer()
+        self.scaffold_tokenizer = self.model_manager.get_scaffold_tokenizer()
+        self.scaffold_unk_id = self.model_manager.get_scaffold_unk_id()
 
         # Initialize trainer
         training_config = TrainingConfig(
@@ -452,8 +390,7 @@ class SOVLSystem:
         # Initialize token map using ScaffoldManager
         self.scaffold_manager = ScaffoldManager(config_manager, self.logger)
         self.scaffold_token_mapper = None  # Will be initialized when needed
-        self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", self.scaffold_tokenizer.unk_token_id)
-     
+
         # Initialize cross-attention injector
         self.cross_attention_injector = CrossAttentionInjector(
             config_manager=config_manager,
@@ -980,7 +917,7 @@ class SOVLSystem:
                 scaffold_context=scaffold_hidden_states,
                 grad_clip=True,
                 dry_run=False,
-                memory_check=self.check_memory_health
+                memory_check=self.memory_manager.check_memory_health
             )
     
             if loss is not None and self.use_token_map_memory and confidence is not None:
@@ -1149,7 +1086,7 @@ class SOVLSystem:
             })
             print(f"Generation initiated: prompt='{prompt[:30]}...', max_new_tokens={max_new_tokens}, scaffold_weight={scaffold_weight}")
     
-            self.check_memory_health()
+            self.memory_manager.check_memory_health()
             if self.is_sleeping:
                 print("\rGestation Interrupted", end="", flush=True)
                 time.sleep(0.5)
