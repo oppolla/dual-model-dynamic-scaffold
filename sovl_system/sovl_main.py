@@ -1044,42 +1044,12 @@ class SOVLSystem:
     
     def has_repetition(self, output_ids, n=3):
         """Check for repetition in generated output."""
-        ids = output_ids.tolist()
-        special_ids = {
-            self.base_tokenizer.pad_token_id,
-            self.base_tokenizer.eos_token_id,
-            self.base_tokenizer.bos_token_id,
-            self.base_tokenizer.unk_token_id
-        }
-        filtered = [i for i in ids if i not in special_ids]
-        for i in range(len(filtered) - 2 * n):
-            if filtered[i:i + n] == filtered[i + n:i + 2 * n]:
-                return True
-        return False
+        return self.generation_manager.has_repetition(output_ids, n)
     
     def _handle_error_prompt(self, error_msg):
         """Generate a response to a system error."""
-        temp_history = self.history
-        self.history = ConversationHistory(maxlen=self.controls_config.get("conversation_history_maxlen", 10))
-        response = self.generate(
-            f"System error detected: {error_msg} What happened?",
-            max_new_tokens=self.curiosity_config.get("max_new_tokens", 60),
-            temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
-            top_k=self.curiosity_config.get("top_k", 50),
-            do_sample=True
-        )
-        self.logger.record({
-            "prompt": f"System error detected: {error_msg} What happened?",
-            "response": response,
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "is_error_prompt": True,
-            "confidence_score": 0.5,
-            "state_hash": self.state.state_hash()
-        })
-        self.history = temp_history
-        return response
-    
+        return self.generation_manager._handle_error_prompt(error_msg)
+
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens=50, scaffold_weight=None, **kwargs):
         """Generate a response for the given prompt using the generation manager."""

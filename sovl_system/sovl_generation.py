@@ -112,57 +112,40 @@ class GenerationManager:
             )
             return False
 
-    def _handle_error_prompt(self, error_msg: str, temp_history: ConversationHistory) -> str:
-        """Generate a response to a system error with retry mechanism."""
-        original_history = self.state.history
-        self.state.history = ConversationHistory(
-            maxlen=self.controls_config.get("conversation_history_maxlen", 10)
-        )
-
+    def _handle_error_prompt(self, error_msg: str) -> str:
+        """Generate a response to a system error."""
         try:
-            for attempt in range(self.max_retries):
-                try:
-                    response = self.generate(
-                        prompt=f"System error detected: {error_msg} What happened?",
-                        max_new_tokens=self.curiosity_config.get("max_new_tokens", 60),
-                        temperature=self.controls_config.get("base_temperature", 0.7) + 0.2 * (attempt + 1),
-                        top_k=self.curiosity_config.get("top_k", 50),
-                        do_sample=True,
-                    )
-                    self._log_event(
-                        event="error_prompt_handled",
-                        data={
-                            "prompt": f"System error detected: {error_msg} What happened?",
-                            "response": response,
-                            "attempt": attempt + 1,
-                            "confidence_score": 0.5
-                        }
-                    )
-                    return response
-                except torch.cuda.OutOfMemoryError:
-                    if attempt < self.max_retries - 1:
-                        torch.cuda.empty_cache()
-                        continue
-                    raise
-                except Exception as e:
-                    self._log_error(
-                        error=f"Error handling prompt attempt {attempt + 1}: {str(e)}",
-                        stack_trace=traceback.format_exc(),
-                        context="handle_error_prompt"
-                    )
-                    if attempt == self.max_retries - 1:
-                        raise
+            temp_history = self.state.history
+            self.state.history = ConversationHistory(
+                maxlen=self.controls_config.get("conversation_history_maxlen", 10)
+            )
+            response = self.generate(
+                f"System error detected: {error_msg} What happened?",
+                max_new_tokens=self.curiosity_config.get("max_new_tokens", 60),
+                temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
+                top_k=self.curiosity_config.get("top_k", 50),
+                do_sample=True
+            )
+            self._log_event(
+                event="error_prompt_handled",
+                data={
+                    "prompt": f"System error detected: {error_msg} What happened?",
+                    "response": response,
+                    "is_error_prompt": True,
+                    "confidence_score": 0.5
+                }
+            )
+            self.state.history = temp_history
+            return response
         except Exception as e:
             self._log_error(
-                error=f"Failed to handle error prompt: {str(e)}",
+                error=f"Error prompt handling failed: {str(e)}",
                 stack_trace=traceback.format_exc(),
                 context="handle_error_prompt"
             )
-            return "Unable to process error prompt after retries."
-        finally:
-            self.state.history = original_history
+            return "An error occurred while handling the error prompt"
 
-    def has_repetition(self, output_ids: torch.Tensor, n: int = 3, threshold: float = 0.9) -> bool:
+    def has_repetition(self, output_ids: torch.Tensor, n: int = 3) -> bool:
         """Check for repetition in generated output."""
         try:
             ids = output_ids.tolist()
@@ -170,27 +153,12 @@ class GenerationManager:
                 self.base_tokenizer.pad_token_id,
                 self.base_tokenizer.eos_token_id,
                 self.base_tokenizer.bos_token_id,
-                self.base_tokenizer.unk_token_id,
+                self.base_tokenizer.unk_token_id
             }
             filtered = [i for i in ids if i not in special_ids]
-
             for i in range(len(filtered) - 2 * n):
-                seq1 = filtered[i: i + n]
-                seq2 = filtered[i + n: i + 2 * n]
-                if len(seq1) == len(seq2) and seq1 == seq2:
+                if filtered[i:i + n] == filtered[i + n:i + 2 * n]:
                     return True
-                if len(seq1) == len(seq2):
-                    embeddings1 = self.base_model.get_input_embeddings()(
-                        torch.tensor(seq1, device=self.device)
-                    )
-                    embeddings2 = self.base_model.get_input_embeddings()(
-                        torch.tensor(seq2, device=self.device)
-                    )
-                    similarity = torch.cosine_similarity(
-                        embeddings1.mean(dim=0), embeddings2.mean(dim=0), dim=0
-                    )
-                    if similarity > threshold:
-                        return True
             return False
         except Exception as e:
             self._log_error(
@@ -494,6 +462,19 @@ class GenerationManager:
             )
         return response
 
+    def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: List[int]) -> float:
+        """Calculate confidence score for generated output."""
+        try:
+            processor = LogitsProcessor(logits)
+            return processor.calculate_confidence(generated_ids)
+        except Exception as e:
+            self._log_error(
+                error=f"Confidence score calculation failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="calculate_confidence_score"
+            )
+            return 0.5
+
     @torch.no_grad()
     def generate(
         self,
@@ -666,7 +647,7 @@ class GenerationManager:
             torch.cuda.empty_cache()
 
             if self.controls_config.get("enable_error_listening", True):
-                return self._handle_error_prompt("GPU memory error occurred", self.state.history)
+                return self._handle_error_prompt("GPU memory error occurred")
             return "System is low on memory - please try a shorter prompt"
 
         except Exception as e:
@@ -682,7 +663,7 @@ class GenerationManager:
 
             if self.controls_config.get("enable_error_listening", True):
                 try:
-                    return self._handle_error_prompt(f"Generation error: {str(e)}", self.state.history)
+                    return self._handle_error_prompt(f"Generation error: {str(e)}")
                 except Exception as inner_e:
                     self._log_error(
                         error=f"Failed to handle generation error: {str(inner_e)}",
