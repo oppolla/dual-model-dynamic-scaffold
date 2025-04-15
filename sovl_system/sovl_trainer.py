@@ -11,6 +11,7 @@ import random
 from collections import deque
 from torch.optim.lr_scheduler import get_linear_schedule_with_warmup
 from transformers import AutoModelForCausalLM
+import traceback
 
 @dataclass
 class TrainingConfig:
@@ -418,40 +419,139 @@ class TrainingManager:
             )
         return None
 
-    def train_step(self, batch: Dict[str, torch.Tensor], scaffold_context: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, float]:
-        """Execute a single training step."""
-        self.model.train()
-        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-        if scaffold_context:
-            scaffold_context = {k: v.to(self.device) for k, v in scaffold_context.items()}
-
-        with torch.cuda.amp.autocast(enabled=self.config.use_amp):
-            outputs = self.model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], scaffold_context=scaffold_context)
-            loss = self.loss_fn(outputs.logits, batch["labels"]) / self.config.grad_accum_steps
-
-        if self.scaler:
-            self.scaler.scale(loss).backward()
-        else:
+    def train_step_with_scaffold(
+        self,
+        batch: List[Dict[str, Any]],
+        scaffold_provider: Optional[ScaffoldProvider] = None,
+        dry_run: bool = False,
+        dry_run_params: Optional[Dict[str, Any]] = None
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Execute a single training step with scaffold support."""
+        try:
+            start_time = time.time()
+            
+            # Prepare batch data
+            batch_size = len(batch)
+            input_ids = torch.stack([item["input_ids"] for item in batch])
+            attention_mask = torch.stack([item["attention_mask"] for item in batch])
+            labels = torch.stack([item["labels"] for item in batch])
+            
+            # Get scaffold context if available
+            scaffold_context = None
+            if scaffold_provider:
+                scaffold_start_time = time.time()
+                scaffold_context = scaffold_provider(batch)
+                scaffold_time = time.time() - scaffold_start_time
+            
+            # Forward pass
+            forward_start_time = time.time()
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                scaffold_context=scaffold_context
+            )
+            forward_time = time.time() - forward_start_time
+            
+            # Calculate loss
+            loss = outputs.loss
+            if self.config.grad_accum_steps > 1:
+                loss = loss / self.config.grad_accum_steps
+            
+            # Backward pass
+            backward_start_time = time.time()
             loss.backward()
-
-        if (self.global_step + 1) % self.config.grad_accum_steps == 0:
-            if self.scaler:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+            backward_time = time.time() - backward_start_time
+            
+            # Optimizer step
+            optimizer_start_time = time.time()
+            if (self.global_step + 1) % self.config.grad_accum_steps == 0:
                 self.optimizer.step()
-            if self.scheduler:
-                self.scheduler.step()
-            self.optimizer.zero_grad()
+                self.optimizer.zero_grad()
+            optimizer_time = time.time() - optimizer_start_time
+            
+            # Calculate metrics
+            metrics = {
+                "loss": loss.item(),
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+                "batch_size": batch_size,
+                "grad_norm": self._calculate_grad_norm(),
+                "timing": {
+                    "total": time.time() - start_time,
+                    "scaffold": scaffold_time if scaffold_provider else None,
+                    "forward": forward_time,
+                    "backward": backward_time,
+                    "optimizer": optimizer_time
+                },
+                "memory": {
+                    "allocated": torch.cuda.memory_allocated() if torch.cuda.is_available() else None,
+                    "reserved": torch.cuda.memory_reserved() if torch.cuda.is_available() else None
+                }
+            }
+            
+            # Log metrics
+            self.logger.record({
+                "event": "training_step",
+                "step": self.global_step,
+                "metrics": metrics,
+                "timestamp": time.time()
+            })
+            
+            self.global_step += 1
+            return loss.item(), metrics
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Training step failed: {str(e)}",
+                "step": self.global_step,
+                "batch_size": len(batch),
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
 
-        self.global_step += 1
-        return {
-            "loss": loss.item() * self.config.grad_accum_steps,
-            "learning_rate": self.optimizer.param_groups[0]["lr"]
-        }
+    def _calculate_grad_norm(self) -> float:
+        """Calculate the gradient norm across all parameters."""
+        try:
+            total_norm = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            return total_norm ** 0.5
+        except Exception as e:
+            self.logger.record({
+                "warning": f"Failed to calculate gradient norm: {str(e)}",
+                "timestamp": time.time()
+            })
+            return 0.0
+
+    def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
+        """Run a complete training cycle."""
+        try:
+            start_time = time.time()
+            loss, metrics = self.train_step_with_scaffold(batch, scaffold_provider)
+            
+            # Log cycle metrics
+            self.logger.record({
+                "event": "training_cycle_complete",
+                "step": self.global_step,
+                "loss": loss,
+                "metrics": metrics,
+                "cycle_time": time.time() - start_time,
+                "timestamp": time.time()
+            })
+            
+            return loss, metrics
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Training cycle failed: {str(e)}",
+                "step": self.global_step,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
 
     def validate(self, data: Union[List[dict], Any], scaffold_provider: Optional[Callable] = None) -> Tuple[float, Dict[str, float]]:
         """Validate model performance."""
@@ -922,54 +1022,132 @@ class SOVLTrainer:
         dry_run: bool = False,
         dry_run_params: Optional[Dict[str, Any]] = None
     ) -> Tuple[float, Dict[str, Any]]:
-        """Run a training step with optional scaffold context."""
+        """Run a training step with scaffold support."""
         try:
-            if dry_run:
-                # Return mock metrics for dry run
-                return 0.0, {
-                    "data_exposure": dry_run_params.get("data_exposure", 0.0),
-                    "confidence": dry_run_params.get("confidence", 0.0)
-                }
-                
-            # Prepare batch
-            input_ids, attention_mask, labels = collate_batch(batch)
+            start_time = time.time()
             
-            # Get scaffold context if provided
+            # Prepare batch data
+            batch_size = len(batch)
+            input_ids = torch.stack([item["input_ids"] for item in batch])
+            attention_mask = torch.stack([item["attention_mask"] for item in batch])
+            labels = torch.stack([item["labels"] for item in batch])
+            
+            # Get scaffold context if available
             scaffold_context = None
             if scaffold_provider:
-                scaffold_context = scaffold_provider.get_context()
-                
+                scaffold_start_time = time.time()
+                scaffold_context = scaffold_provider(batch)
+                scaffold_time = time.time() - scaffold_start_time
+            
             # Forward pass
+            forward_start_time = time.time()
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
                 scaffold_context=scaffold_context
             )
+            forward_time = time.time() - forward_start_time
             
             # Calculate loss
             loss = outputs.loss
+            if self.config.grad_accum_steps > 1:
+                loss = loss / self.config.grad_accum_steps
             
             # Backward pass
+            backward_start_time = time.time()
             loss.backward()
-            self.optimizer.step()
-            self.optimizer.zero_grad()
+            backward_time = time.time() - backward_start_time
+            
+            # Optimizer step
+            optimizer_start_time = time.time()
+            if (self.global_step + 1) % self.config.grad_accum_steps == 0:
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+            optimizer_time = time.time() - optimizer_start_time
             
             # Calculate metrics
             metrics = {
-                "data_exposure": len(batch) / self.config.max_batch_size,
-                "confidence": outputs.confidence.item()
+                "loss": loss.item(),
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+                "batch_size": batch_size,
+                "grad_norm": self._calculate_grad_norm(),
+                "timing": {
+                    "total": time.time() - start_time,
+                    "scaffold": scaffold_time if scaffold_provider else None,
+                    "forward": forward_time,
+                    "backward": backward_time,
+                    "optimizer": optimizer_time
+                },
+                "memory": {
+                    "allocated": torch.cuda.memory_allocated() if torch.cuda.is_available() else None,
+                    "reserved": torch.cuda.memory_reserved() if torch.cuda.is_available() else None
+                }
             }
             
+            # Log metrics
+            self.logger.record({
+                "event": "training_step",
+                "step": self.global_step,
+                "metrics": metrics,
+                "timestamp": time.time()
+            })
+            
+            self.global_step += 1
             return loss.item(), metrics
             
         except Exception as e:
-            self.logger.error(f"Error in training step: {str(e)}")
+            self.logger.record({
+                "error": f"Training step failed: {str(e)}",
+                "step": self.global_step,
+                "batch_size": len(batch),
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
             raise
-            
+
+    def _calculate_grad_norm(self) -> float:
+        """Calculate the gradient norm across all parameters."""
+        try:
+            total_norm = 0.0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            return total_norm ** 0.5
+        except Exception as e:
+            self.logger.record({
+                "warning": f"Failed to calculate gradient norm: {str(e)}",
+                "timestamp": time.time()
+            })
+            return 0.0
+
     def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
         """Run a complete training cycle."""
-        return self.workflow_manager.run_training_cycle(batch, scaffold_provider)
+        try:
+            start_time = time.time()
+            loss, metrics = self.train_step_with_scaffold(batch, scaffold_provider)
+            
+            # Log cycle metrics
+            self.logger.record({
+                "event": "training_cycle_complete",
+                "step": self.global_step,
+                "loss": loss,
+                "metrics": metrics,
+                "cycle_time": time.time() - start_time,
+                "timestamp": time.time()
+            })
+            
+            return loss, metrics
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Training cycle failed: {str(e)}",
+                "step": self.global_step,
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise
         
     def run_sleep_training(self, batch: List[Dict[str, Any]]) -> None:
         """Run sleep training cycle."""

@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 import traceback
 import os
 from threading import Lock
+import time
 
 class ModelManager:
     """
@@ -51,14 +52,35 @@ class ModelManager:
         """Load base and scaffold models along with their tokenizers."""
         with self.memory_lock:
             try:
+                start_time = time.time()
                 self._load_base_model()
+                base_load_time = time.time() - start_time
+                
+                start_time = time.time()
                 self._load_scaffold_model()
+                scaffold_load_time = time.time() - start_time
+                
+                start_time = time.time()
                 self._load_tokenizers()
+                tokenizer_load_time = time.time() - start_time
+                
+                total_load_time = time.time() - start_time
+                
                 self.logger.record({
                     "event": "models_loaded",
                     "base_model": self.core_config.get("base_model_name", "unknown"),
                     "scaffold_model": self.core_config.get("scaffold_model_name", "unknown"),
                     "quantization": self.quantization_mode,
+                    "load_times": {
+                        "base_model": base_load_time,
+                        "scaffold_model": scaffold_load_time,
+                        "tokenizers": tokenizer_load_time,
+                        "total": total_load_time
+                    },
+                    "memory_usage": {
+                        "base_model": self._get_model_memory_usage(self.base_model),
+                        "scaffold_model": self._get_model_memory_usage(self.scaffold_models[0]) if self.scaffold_models else None
+                    },
                     "timestamp": time.time()
                 })
                 print("All models and tokenizers loaded successfully.")
@@ -70,25 +92,64 @@ class ModelManager:
                 })
                 raise
 
+    def _get_model_memory_usage(self, model: Optional[nn.Module]) -> Optional[Dict[str, Any]]:
+        """Get memory usage statistics for a model."""
+        if model is None:
+            return None
+            
+        try:
+            if torch.cuda.is_available():
+                return {
+                    "allocated": torch.cuda.memory_allocated(),
+                    "reserved": torch.cuda.memory_reserved(),
+                    "max_allocated": torch.cuda.max_memory_allocated()
+                }
+            return {
+                "parameters": sum(p.numel() for p in model.parameters()),
+                "buffers": sum(b.numel() for b in model.buffers())
+            }
+        except Exception as e:
+            self.logger.record({
+                "warning": f"Failed to get memory usage: {str(e)}",
+                "timestamp": time.time()
+            })
+            return None
+
     def _load_base_model(self):
         """Load the base model with specified quantization."""
         base_model_name = self.core_config.get("base_model_name", "gpt2")
         print(f"Loading base model: {base_model_name}")
         try:
+            start_time = time.time()
             self.base_config = AutoConfig.from_pretrained(base_model_name)
+            config_load_time = time.time() - start_time
+            
+            start_time = time.time()
             quantization_config = self._get_quantization_config()
             self.base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
                 config=self.base_config,
                 **quantization_config
             ).to(self.device)
+            model_load_time = time.time() - start_time
+            
+            start_time = time.time()
             self.base_model.eval()
             for param in self.base_model.parameters():
                 param.requires_grad = False
+            setup_time = time.time() - start_time
+            
             self.logger.record({
                 "event": "base_model_loaded",
                 "model_name": base_model_name,
                 "quantization": self.quantization_mode,
+                "load_times": {
+                    "config": config_load_time,
+                    "model": model_load_time,
+                    "setup": setup_time,
+                    "total": config_load_time + model_load_time + setup_time
+                },
+                "memory_usage": self._get_model_memory_usage(self.base_model),
                 "timestamp": time.time()
             })
             print(f"Base model '{base_model_name}' loaded and frozen.")
@@ -106,13 +167,20 @@ class ModelManager:
         scaffold_model_name = self.core_config.get("scaffold_model_name", "gpt2")
         print(f"Loading scaffold model: {scaffold_model_name}")
         try:
+            start_time = time.time()
             self.scaffold_config = AutoConfig.from_pretrained(scaffold_model_name)
+            config_load_time = time.time() - start_time
+            
+            start_time = time.time()
             quantization_config = self._get_quantization_config()
             scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
                 scaffold_model_name,
                 config=self.scaffold_config,
                 **quantization_config
             )
+            model_load_time = time.time() - start_time
+            
+            start_time = time.time()
             if self.controls_config.get("enable_lora_adapters", True):
                 lora_config = LoraConfig(
                     r=self.lora_config.get("lora_rank", 8),
@@ -127,10 +195,19 @@ class ModelManager:
             else:
                 self.scaffold_models = [scaffold_model_raw.to(self.device)]
                 print("Scaffold model loaded without LoRA adapters.")
+            setup_time = time.time() - start_time
+            
             self.logger.record({
                 "event": "scaffold_model_loaded",
                 "model_name": scaffold_model_name,
                 "lora_enabled": self.controls_config.get("enable_lora_adapters", True),
+                "load_times": {
+                    "config": config_load_time,
+                    "model": model_load_time,
+                    "setup": setup_time,
+                    "total": config_load_time + model_load_time + setup_time
+                },
+                "memory_usage": self._get_model_memory_usage(self.scaffold_models[0]) if self.scaffold_models else None,
                 "timestamp": time.time()
             })
         except Exception as e:
@@ -148,9 +225,15 @@ class ModelManager:
         scaffold_model_name = self.core_config.get("scaffold_model_name", "gpt2")
         print(f"Loading tokenizers: {base_model_name}, {scaffold_model_name}")
         try:
+            start_time = time.time()
             self.base_tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-            self.scaffold_tokenizer = AutoTokenizer.from_pretrained(scaffold_model_name)
+            base_tokenizer_time = time.time() - start_time
             
+            start_time = time.time()
+            self.scaffold_tokenizer = AutoTokenizer.from_pretrained(scaffold_model_name)
+            scaffold_tokenizer_time = time.time() - start_time
+            
+            start_time = time.time()
             # Set padding tokens if not defined
             if self.base_tokenizer.pad_token is None:
                 self.base_tokenizer.pad_token = self.base_tokenizer.eos_token
@@ -167,11 +250,18 @@ class ModelManager:
                 self.scaffold_unk_id = self.scaffold_tokenizer.unk_token_id
                 self.controls_config["scaffold_unk_id"] = self.scaffold_unk_id
                 self.config_manager.update("controls_config.scaffold_unk_id", self.scaffold_unk_id)
+            setup_time = time.time() - start_time
                 
             self.logger.record({
                 "event": "tokenizers_loaded",
                 "base_tokenizer": base_model_name,
                 "scaffold_tokenizer": scaffold_model_name,
+                "load_times": {
+                    "base_tokenizer": base_tokenizer_time,
+                    "scaffold_tokenizer": scaffold_tokenizer_time,
+                    "setup": setup_time,
+                    "total": base_tokenizer_time + scaffold_tokenizer_time + setup_time
+                },
                 "timestamp": time.time()
             })
         except Exception as e:
