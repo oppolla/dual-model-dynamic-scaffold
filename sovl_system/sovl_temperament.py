@@ -4,6 +4,7 @@ from collections import deque
 import torch
 from dataclasses import dataclass
 import traceback
+import uuid
 from threading import RLock
 from sovl_utils import synchronized, safe_divide, float_lt
 from sovl_config import ConfigManager
