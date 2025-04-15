@@ -17,31 +17,35 @@ class MemoryManager:
     conversation history, scaffold context, and GPU memory health.
     """
     _CONFIG_RANGES = {
-        "memory_threshold": (0.7, 0.95),
-        "memory_decay_rate": (0.8, 0.99),
-        "dream_memory_decay": (0.8, 0.99),
+        "memory_threshold": (0.5, 0.95),
+        "memory_decay_rate": (0.8, 1.0),
+        "dream_memory_decay": (0.8, 1.0),
         "dream_prune_threshold": (0.0, 0.5),
         "token_map_weight_cap": (1.0, 5.0),
+        "dream_memory_weight": (0.0, 0.5)
     }
     _MAXLEN_RANGES = {
-        "dream_memory_maxlen": (5, 20),
-        "conversation_history_maxlen": (5, 20),
-        "confidence_history_maxlen": (3, 10),
-        "temperament_history_maxlen": (3, 10),
+        "dream_memory_maxlen": (5, 50),
+        "conversation_history_maxlen": (5, 50),
+        "confidence_history_maxlen": (3, 1000),
+        "temperament_history_maxlen": (3, 1000)
     }
     _CLEANUP_COOLDOWN = 60.0
     _MEM_USAGE_HISTORY_MAXLEN = 10
 
     def __init__(self, config_manager, device: torch.device, logger: Logger):
         self._config_manager = config_manager
-        self._device = device
+        self._device = config_manager.device  # Use device from config_manager
         self._logger = logger
-        self._error_logger = Logger(
-            log_file="sovl_memory_errors.jsonl",
-            max_size_mb=10,
-            compress_old=True
-        )
         self._memory_lock = Lock()
+
+        # Validate device consistency
+        if str(self._device) != str(device):
+            self._log_event("device_mismatch_warning", {
+                "provided_device": str(device),
+                "used_device": str(self._device),
+                "config_device": str(config_manager.device)
+            })
 
         # Initialize configuration
         self._controls_config = config_manager.get_section("controls_config")
@@ -75,107 +79,224 @@ class MemoryManager:
         self.batch_size = self.initial_batch_size
         self.memory_threshold = self.dynamic_threshold_base
 
+        # Log initialization
+        self._log_event("memory_manager_initialized", {
+            "device": str(self._device),
+            "config_device": str(config_manager.device)
+        })
+
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
-        self.memory_threshold = self._validate_config(
-            "memory_threshold", self._controls_config.get("memory_threshold", 0.85)
-        )
-        self.memory_decay_rate = self._validate_config(
-            "memory_decay_rate", self._controls_config.get("memory_decay_rate", 0.95)
-        )
-        self.dream_memory_maxlen = self._validate_maxlen(
-            "dream_memory_maxlen", self._controls_config.get("dream_memory_maxlen", 10)
-        )
-        self.dream_memory_decay = self._validate_config(
-            "dream_memory_decay", self._controls_config.get("dream_memory_decay", 0.95)
-        )
-        self.dream_prune_threshold = self._validate_config(
-            "dream_prune_threshold", self._controls_config.get("dream_prune_threshold", 0.1)
-        )
-        self.conversation_history_maxlen = self._validate_maxlen(
-            "conversation_history_maxlen", self._controls_config.get("conversation_history_maxlen", 10)
-        )
-        self.confidence_history_maxlen = self._validate_maxlen(
-            "confidence_history_maxlen", self._controls_config.get("confidence_history_maxlen", 5)
-        )
-        self.temperament_history_maxlen = self._validate_maxlen(
-            "temperament_history_maxlen", self._controls_config.get("temperament_history_maxlen", 5)
-        )
-        self.use_scaffold_memory = self._controls_config.get("use_scaffold_memory", True)
-        self.use_token_map_memory = self._controls_config.get("use_token_map_memory", True)
-        self.token_map_weight_cap = self._validate_config(
-            "token_map_weight_cap", self._controls_config.get("token_map_weight_cap", 2.0)
-        )
-        self._dynamic_threshold_base = self.memory_threshold
-
-    def _validate_config(self, key: str, value: float) -> float:
-        """Validate configuration parameter within defined range."""
-        min_val, max_val = self._CONFIG_RANGES[key]
-        if not (min_val <= value <= max_val):
-            self._log_error(
-                f"Invalid {key}: {value} not in range [{min_val}, {max_val}]",
-                conversation_id=self._conversation_history.conversation_id
+        try:
+            # Get controls config
+            controls_config = self._config_manager.get_section("controls_config", {})
+            
+            # Validate and set config values
+            for key, (min_val, max_val) in self._CONFIG_RANGES.items():
+                value = controls_config.get(key)
+                if value is not None:
+                    if not isinstance(value, (int, float)) or not (min_val <= value <= max_val):
+                        self._log_warning(
+                            f"Config {key}={value} outside valid range [{min_val}, {max_val}]",
+                            context="config_validation"
+                        )
+                        # Reset to default if invalid
+                        default = self._get_default_value(key)
+                        controls_config[key] = default
+                        self._log_event(
+                            f"config_reset_{key}",
+                            f"Reset {key} to default value {default}",
+                            level="warning"
+                        )
+                    setattr(self, key, value)
+                else:
+                    # Set default value if missing
+                    default = self._get_default_value(key)
+                    setattr(self, key, default)
+                    self._log_warning(
+                        f"Missing config {key}, using default {default}",
+                        context="config_validation"
+                    )
+            
+            # Validate maxlen values
+            for key, (min_val, max_val) in self._MAXLEN_RANGES.items():
+                value = controls_config.get(key)
+                if value is not None:
+                    if not isinstance(value, int) or not (min_val <= value <= max_val):
+                        self._log_warning(
+                            f"Config {key}={value} outside valid range [{min_val}, {max_val}]",
+                            context="config_validation"
+                        )
+                        # Reset to default if invalid
+                        default = self._get_default_value(key)
+                        controls_config[key] = default
+                        self._log_event(
+                            f"config_reset_{key}",
+                            f"Reset {key} to default value {default}",
+                            level="warning"
+                        )
+                    setattr(self, key, value)
+                else:
+                    # Set default value if missing
+                    default = self._get_default_value(key)
+                    setattr(self, key, default)
+                    self._log_warning(
+                        f"Missing config {key}, using default {default}",
+                        context="config_validation"
+                    )
+            
+            # Update config with validated values
+            self._config_manager.update_section("controls_config", controls_config)
+            
+            # Log successful initialization
+            self._log_event(
+                "memory_config_initialized",
+                "Memory configuration initialized successfully",
+                level="info"
             )
-            raise ValueError(f"{key} must be between {min_val} and {max_val}, got {value}")
-        return value
-
-    def _validate_maxlen(self, key: str, value: int) -> int:
-        """Validate maxlen parameter within defined range."""
-        min_val, max_val = self._MAXLEN_RANGES[key]
-        if not (min_val <= value <= max_val):
+            
+        except Exception as e:
             self._log_error(
-                f"Invalid {key}: {value} not in range [{min_val}, {max_val}]",
-                conversation_id=self._conversation_history.conversation_id
+                f"Failed to initialize memory config: {str(e)}",
+                context="config_initialization",
+                stack_trace=traceback.format_exc()
             )
-            raise ValueError(f"{key} must be between {min_val} and {max_val}, got {value}")
-        return value
+            raise
 
-    def _log_error(self, error: str, **kwargs) -> None:
-        """Log an error with context."""
-        self._error_logger.record({
-            "error": error,
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc() if "stack_trace" in kwargs else None,
-            "conversation_id": kwargs.get("conversation_id", None),
-            "state_hash": self._state.state_hash() if self._state else None,
-            **{k: v for k, v in kwargs.items() if k not in ("conversation_id",)}
-        })
+    def _get_default_value(self, key: str) -> Any:
+        """Get default value for a configuration key."""
+        defaults = {
+            "memory_threshold": 0.85,
+            "memory_decay_rate": 0.95,
+            "dream_memory_decay": 0.95,
+            "dream_prune_threshold": 0.1,
+            "token_map_weight_cap": 2.0,
+            "dream_memory_weight": 0.1,
+            "dream_memory_maxlen": 10,
+            "conversation_history_maxlen": 10,
+            "confidence_history_maxlen": 1000,
+            "temperament_history_maxlen": 1000
+        }
+        return defaults.get(key)
 
-    def _log_event(self, event: str, **kwargs) -> None:
-        """Log an event with context."""
-        self._logger.record({
-            "event": event,
-            "timestamp": time.time(),
-            "conversation_id": self._conversation_history.conversation_id,
-            "state_hash": self._state.state_hash() if self._state else None,
-            **kwargs
-        })
+    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Log an event with standardized format."""
+        try:
+            self._logger.record_event(
+                event_type=event_type,
+                message=message,
+                level=level,
+                additional_info={
+                    "conversation_id": self._conversation_history.conversation_id if self._conversation_history else None,
+                    "state_hash": self._state.state_hash() if self._state else None,
+                    **kwargs
+                }
+            )
+        except Exception as e:
+            print(f"Failed to log event: {str(e)}")
+
+    def _log_error(self, error_msg: str, error_type: str, stack_trace: Optional[str] = None, context: Optional[Dict] = None):
+        """Log an error with consistent formatting and context."""
+        try:
+            # Ensure context is a dictionary
+            if context is None:
+                context = {}
+            
+            # Add memory-specific context
+            if torch.cuda.is_available():
+                memory_stats = torch.cuda.memory_stats()
+                context.update({
+                    "allocated_memory": memory_stats["allocated_bytes.all.current"],
+                    "reserved_memory": memory_stats["reserved_bytes.all.current"],
+                    "active_memory": memory_stats["active_bytes.all.current"],
+                    "inactive_memory": memory_stats["inactive_bytes.all.current"]
+                })
+            
+            # Add system state context
+            context.update({
+                "memory_threshold": self.memory_threshold,
+                "batch_size": self.batch_size,
+                "max_history_size": self.max_history_size,
+                "memory_usage_history": len(self._mem_usage_history)
+            })
+            
+            # Log error with consistent format
+            self._logger.log_error(
+                error_msg=error_msg,
+                error_type=error_type,
+                stack_trace=stack_trace,
+                context=context
+            )
+            
+            # Also propagate to ErrorManager for centralized error handling
+            self._error_manager.handle_error(
+                error_type=error_type,
+                error_msg=error_msg,
+                stack_trace=stack_trace,
+                context=context
+            )
+        except Exception as e:
+            # If logging fails, at least print the error
+            print(f"Failed to log error: {str(e)}")
+            print(f"Original error: {error_msg}")
+
+    def _log_warning(self, message: str, context: str = "memory", **kwargs) -> None:
+        """Log a warning with standardized format."""
+        try:
+            self._logger.record_event(
+                event_type=f"{context}_warning",
+                message=message,
+                level="warning",
+                additional_info={
+                    "conversation_id": self._conversation_history.conversation_id if self._conversation_history else None,
+                    "state_hash": self._state.state_hash() if self._state else None,
+                    **kwargs
+                }
+            )
+        except Exception as e:
+            print(f"Failed to log warning: {str(e)}")
 
     def initialize_token_map(self, base_tokenizer, scaffold_tokenizer) -> None:
         """Initialize token map for mapping base model tokens to scaffold tokens."""
-        with self._memory_lock:
-            self._token_map = defaultdict(lambda: [{'ids': [scaffold_tokenizer.unk_token_id], 'weight': 1.0}])
-            for base_token, base_id in base_tokenizer.get_vocab().items():
-                normalized = base_token.replace("Ġ", "").replace("##", "")
-                scaffold_ids = scaffold_tokenizer.encode(
-                    normalized,
-                    add_special_tokens=False,
-                    max_length=3,
-                    truncation=True
-                ) or [scaffold_tokenizer.unk_token_id]
-                self._token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
+        with self._state.lock:
+            try:
+                # Create initial token map
+                token_map = defaultdict(lambda: {'ids': [scaffold_tokenizer.unk_token_id], 'weight': 1.0})
+                
+                # Populate token map from tokenizer vocabularies
+                for base_token, base_id in base_tokenizer.get_vocab().items():
+                    normalized = base_token.replace("Ġ", "").replace("##", "")
+                    scaffold_ids = scaffold_tokenizer.encode(
+                        normalized,
+                        add_special_tokens=False,
+                        max_length=3,
+                        truncation=True
+                    ) or [scaffold_tokenizer.unk_token_id]
+                    token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
 
-            self._special_token_map = {
-                base_tokenizer.pad_token_id: scaffold_tokenizer.pad_token_id,
-                base_tokenizer.eos_token_id: scaffold_tokenizer.eos_token_id or scaffold_tokenizer.sep_token_id,
-                base_tokenizer.unk_token_id: scaffold_tokenizer.unk_token_id,
-            }
-            self._scaffold_unk_id = self._controls_config.get("scaffold_unk_id", scaffold_tokenizer.unk_token_id)
-
-            self._log_event(
-                "token_map_initialized",
-                base_vocab_size=len(base_tokenizer.get_vocab())
-            )
+                # Update state with new token map
+                self._state.update_token_map(dict(token_map))
+                
+                # Log initialization
+                self._log_event(
+                    "token_map_initialized",
+                    {
+                        "base_vocab_size": len(base_tokenizer.get_vocab()),
+                        "state_hash": self._state.state_hash()
+                    }
+                )
+                
+            except Exception as e:
+                self._log_error(
+                    f"Failed to initialize token map: {str(e)}",
+                    error_type="token_map_error",
+                    stack_trace=traceback.format_exc(),
+                    context={
+                        "base_vocab_size": len(base_tokenizer.get_vocab()),
+                        "state_hash": self._state.state_hash()
+                    }
+                )
+                raise
 
     def set_state(self, state: SOVLState) -> None:
         """Set the state object for memory synchronization."""
@@ -199,21 +320,40 @@ class MemoryManager:
             return
 
         try:
-            with self._memory_lock:
+            with self._state.lock:
+                # Get current token map from state
+                token_map = self._state.get_token_map()
+                
+                # Update weights based on prompt
                 input_ids = tokenizer.encode(prompt, add_special_tokens=False)
                 for token_id in input_ids:
-                    if token_id in self._token_map:
-                        current_weight = self._token_map[token_id]['weight']
+                    if token_id in token_map:
+                        current_weight = token_map[token_id]['weight']
                         new_weight = current_weight * self.memory_decay_rate + confidence * (1 - self.memory_decay_rate)
-                        self._token_map[token_id]['weight'] = min(max(new_weight, 0.1), self.token_map_weight_cap)
+                        token_map[token_id]['weight'] = min(max(new_weight, 0.1), self.token_map_weight_cap)
 
+                # Update state with modified token map
+                self._state.update_token_map(token_map)
+                
                 self._log_event(
                     "token_map_updated",
-                    prompt_length=len(prompt),
-                    confidence=confidence
+                    {
+                        "prompt_length": len(prompt),
+                        "confidence": confidence,
+                        "state_hash": self._state.state_hash()
+                    }
                 )
         except Exception as e:
-            self._log_error(f"Token map update failed: {str(e)}", stack_trace=True)
+            self._log_error(
+                f"Token map update failed: {str(e)}",
+                error_type="token_map_error",
+                stack_trace=traceback.format_exc(),
+                context={
+                    "prompt_length": len(prompt),
+                    "confidence": confidence,
+                    "state_hash": self._state.state_hash()
+                }
+            )
 
     def _get_memory_stats(self) -> Optional[Dict[str, float]]:
         """Retrieve GPU memory statistics."""
@@ -236,9 +376,10 @@ class MemoryManager:
                 memory_ratio = current_memory / total_memory
                 
                 # Log memory usage
-                self._logger.log_memory_usage(
-                    phase="health_check",
-                    device=self._device,
+                self._log_event(
+                    event_type="memory_health_check",
+                    message="Memory health check performed",
+                    level="info",
                     memory_ratio=memory_ratio,
                     model_size=model_size
                 )
@@ -268,34 +409,58 @@ class MemoryManager:
                         if new_batch_size != self.batch_size:
                             self.batch_size = new_batch_size
                             trainer.train_batch_size = new_batch_size
-                            self._logger.log_event(
-                                event_type="memory_health",
-                                event_data={
-                                    "action": "reduce_batch_size",
-                                    "new_batch_size": new_batch_size,
-                                    "memory_ratio": memory_ratio,
-                                    "threshold": self.memory_threshold
-                                }
+                            self._log_event(
+                                event_type="memory_health_action",
+                                message="Batch size reduced due to high memory usage",
+                                level="warning",
+                                new_batch_size=new_batch_size,
+                                memory_ratio=memory_ratio,
+                                threshold=self.memory_threshold
                             )
                     
                     # Clear CUDA cache if memory usage is very high
                     if memory_ratio > 0.9:
                         torch.cuda.empty_cache()
-                        self._logger.log_event(
-                            event_type="memory_health",
-                            event_data={
-                                "action": "clear_cache",
-                                "memory_ratio": memory_ratio
-                            }
+                        self._log_event(
+                            event_type="memory_health_action",
+                            message="CUDA cache cleared due to very high memory usage",
+                            level="warning",
+                            memory_ratio=memory_ratio
                         )
+                    
+                    # Propagate memory warning to ErrorManager
+                    self._error_manager.handle_memory_warning(
+                        current_memory=current_memory,
+                        total_memory=total_memory,
+                        memory_ratio=memory_ratio,
+                        threshold=self.memory_threshold
+                    )
+                    return False
                 
                 return True
-            return False
+            else:
+                return True
         except Exception as e:
+            # Log detailed error information
             self._log_error(
                 error_msg=f"Memory health check failed: {str(e)}",
                 error_type="memory_error",
-                stack_trace=traceback.format_exc()
+                stack_trace=traceback.format_exc(),
+                context={
+                    "model_size": model_size,
+                    "trainer_present": trainer is not None,
+                    "device": str(self._device)
+                }
+            )
+            
+            # Propagate error to ErrorManager
+            self._error_manager.handle_memory_error(
+                error=e,
+                context={
+                    "model_size": model_size,
+                    "trainer_present": trainer is not None,
+                    "device": str(self._device)
+                }
             )
             return False
 
@@ -332,23 +497,31 @@ class MemoryManager:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-                self._log_event("scaffold_cache_cleared")
+                self._log_event("scaffold_cache_cleared", {
+                    "device": str(self._device)
+                })
             except Exception as e:
                 self._log_error(f"Failed to clear scaffold cache: {str(e)}", stack_trace=True)
 
     def set_scaffold_context(self, scaffold_hidden_states: torch.Tensor) -> None:
         """Set temporary scaffold context for generation."""
         with self._memory_lock:
+            # Ensure tensor is on correct device
+            scaffold_hidden_states = scaffold_hidden_states.to(self._device)
             self._temp_scaffold_context = scaffold_hidden_states.detach() if isinstance(scaffold_hidden_states, torch.Tensor) else scaffold_hidden_states
             self._log_event(
                 "scaffold_context_set",
-                context_shape=list(scaffold_hidden_states.shape) if isinstance(scaffold_hidden_states, torch.Tensor) else None
+                context_shape=list(scaffold_hidden_states.shape) if isinstance(scaffold_hidden_states, torch.Tensor) else None,
+                device=str(scaffold_hidden_states.device)
             )
 
     def get_scaffold_context(self) -> Optional[torch.Tensor]:
         """Retrieve the current scaffold context."""
         with self._memory_lock:
-            return self._temp_scaffold_context
+            if self._temp_scaffold_context is None:
+                return None
+            # Ensure tensor is on correct device
+            return self._temp_scaffold_context.to(self._device)
 
     def append_dream_memory(self, tensor: torch.Tensor, weight: float, metadata: Optional[Dict] = None) -> None:
         """Append a tensor to dream memory with associated weight and metadata."""
@@ -360,20 +533,24 @@ class MemoryManager:
             with self._memory_lock:
                 if tensor.shape[-1] != self._hidden_size:
                     raise ValueError(f"Dream tensor shape {tensor.shape} mismatches hidden_size {self._hidden_size}")
+                
+                # Ensure tensor is on correct device
+                tensor = tensor.to(self._device)
+                
                 entry = {
-                    "tensor": tensor.detach().to(self._device),
+                    "tensor": tensor,
                     "weight": min(max(weight, 0.0), 1.0),
                     "metadata": metadata or {"timestamp": time.time()}
                 }
                 self._dream_memory.append(entry)
                 self._state.dream_memory = self._dream_memory
-                self._log_event(
-                    "dream_memory_appended",
-                    tensor_shape=list(tensor.shape),
-                    weight=weight,
-                    metadata=metadata,
-                    dream_memory_len=len(self._dream_memory)
-                )
+                
+                self._log_event("dream_memory_appended", {
+                    "tensor_shape": list(tensor.shape),
+                    "weight": weight,
+                    "device": str(tensor.device),
+                    "dream_memory_len": len(self._dream_memory)
+                })
         except Exception as e:
             self._log_error(f"Failed to append dream memory: {str(e)}", stack_trace=True)
 
@@ -409,21 +586,28 @@ class MemoryManager:
 
         try:
             with self._memory_lock:
-                tensors = [entry["tensor"] for entry in self._dream_memory]
+                # Ensure all tensors are on correct device
+                tensors = [entry["tensor"].to(self._device) for entry in self._dream_memory]
                 weights = [entry["weight"] for entry in self._dream_memory]
+                
                 if not weights:
                     return None
-                dream_tensors = torch.stack([t.detach().to(self._device) for t in tensors])
+                    
+                dream_tensors = torch.stack(tensors)
                 dream_weights = torch.tensor(weights, dtype=torch.float32, device=self._device)
                 weight_sum = dream_weights.sum()
+                
                 if weight_sum == 0:
                     return None
+                    
                 aggregated = torch.sum(dream_tensors * dream_weights.unsqueeze(-1), dim=0) / weight_sum
-                self._log_event(
-                    "dream_memory_aggregated",
-                    tensor_count=len(dream_tensors),
-                    shapes=[list(t.shape) for t in tensors]
-                )
+                
+                self._log_event("dream_memory_aggregated", {
+                    "tensor_count": len(dream_tensors),
+                    "device": str(aggregated.device),
+                    "shapes": [list(t.shape) for t in tensors]
+                })
+                
                 return aggregated
         except Exception as e:
             self._log_error(f"Dream memory aggregation failed: {str(e)}", stack_trace=True)
@@ -516,19 +700,48 @@ class MemoryManager:
         )
 
     def new_conversation(self) -> None:
-        """Start a new conversation, resetting relevant memory."""
-        with self._memory_lock:
-            old_id = self._conversation_history.conversation_id
-            self._conversation_history = ConversationHistory(maxlen=self.conversation_history_maxlen)
-            self._state.conversation_history = self._conversation_history
-            self.clear_scaffold_cache()
-            if self._state.curiosity:
-                self._state.curiosity.reset_for_conversation(self._conversation_history.conversation_id)
-            self._log_event(
-                "new_conversation",
-                new_id=self._conversation_history.conversation_id,
-                old_id=old_id
+        """Start a new conversation with proper synchronization."""
+        try:
+            with self._state.lock:
+                # Store old conversation ID for logging
+                old_id = self._conversation_history.conversation_id if self._conversation_history else None
+                
+                # Create new conversation history
+                self._conversation_history = ConversationHistory(
+                    maxlen=self.conversation_history_maxlen
+                )
+                
+                # Update state with new conversation history
+                self._state.conversation_history = self._conversation_history
+                
+                # Clear scaffold cache
+                self.clear_scaffold_cache()
+                
+                # Reset curiosity state for new conversation if available
+                if self._state.curiosity:
+                    self._state.curiosity.reset_for_conversation(self._conversation_history.conversation_id)
+                
+                # Log the conversation change
+                self._log_event(
+                    "new_conversation",
+                    {
+                        "new_id": self._conversation_history.conversation_id,
+                        "old_id": old_id,
+                        "state_hash": self._state.state_hash()
+                    }
+                )
+                
+        except Exception as e:
+            self._log_error(
+                f"Failed to start new conversation: {str(e)}",
+                error_type="conversation_error",
+                stack_trace=traceback.format_exc(),
+                context={
+                    "old_id": old_id if 'old_id' in locals() else None,
+                    "state_hash": self._state.state_hash() if self._state else None
+                }
             )
+            raise
 
     def log_memory_stats(self, label: str = "", verbose: bool = False) -> None:
         """Log detailed memory statistics, including CPU memory if available."""

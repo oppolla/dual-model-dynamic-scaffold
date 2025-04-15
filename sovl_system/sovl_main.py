@@ -211,59 +211,62 @@ class ConfigHandler:
         )
         
     def _validate_controls_configs(self):
-        """Validate controls configuration with generation-specific keys."""
-        required_keys = {
-            "memory_threshold": (0.85, (0.5, 0.95)),
-            "max_generation_retries": (3, (1, 5)),
-            "scaffold_unk_id": (None, None),
-            "use_token_map_memory": (True, None),
-            "enable_dynamic_cross_attention": (False, None),
-            "conversation_history_maxlen": (10, (5, 50)),
-            "memory_decay_rate": (0.95, (0.8, 1.0)),
-            "enable_repetition_check": (True, None),
-            "enable_confidence_tracking": (True, None),
-            "enable_error_listening": (True, None),
-            "dream_memory_weight": (0.1, (0.0, 0.5)),
-            "gestation_confidence_threshold": (0.3, (0.1, 0.5)),
-            "gestation_history_threshold": (100, (50, 200)),
-            "base_temperature": (0.7, (0.1, 2.0)),
-            "dynamic_cross_attn_mode": (None, None)
-        }
-        
-        # Get current controls config
-        self.controls_config = self.context.config_manager.get_section("controls_config", {})
-        
-        # Validate each key
-        for key, (default, valid_range) in required_keys.items():
-            if key not in self.controls_config:
-                self.controls_config[key] = default
-                self.context.logger.record_event(
-                    event_type="config_validation",
-                    message=f"Missing {key} in controls_config, using default",
-                    level="warning",
-                    additional_info={"key": key, "default": default}
-                )
-            elif valid_range and key != "scaffold_unk_id":
-                value = self.controls_config[key]
-                if not (valid_range[0] <= value <= valid_range[1]):
-                    self.controls_config[key] = default
-                    self.context.logger.record_event(
-                        event_type="config_validation",
-                        message=f"Invalid {key} value, resetting to default",
-                        level="warning",
-                        additional_info={"key": key, "value": value, "default": default}
-                    )
-                    
-        # Log final controls config state
-        self.context.logger.record_event(
-            event_type="controls_config_validated",
-            message="Controls configuration validated",
-            level="info",
-            additional_info={
-                "config": self.controls_config,
-                "timestamp": time.time()
+        """Validate controls configuration section."""
+        try:
+            controls_config = self.context.config_manager.get_section("controls_config", {})
+            
+            # Define required keys with default values and validation ranges
+            required_keys = {
+                "memory_threshold": (0.85, (0.5, 0.95)),
+                "memory_decay_rate": (0.95, (0.8, 1.0)),
+                "dream_memory_weight": (0.1, (0.0, 0.5)),
+                "conversation_history_maxlen": (10, (5, 50)),
+                "dream_memory_maxlen": (10, (5, 50)),
+                "dream_memory_decay": (0.95, (0.8, 1.0)),
+                "dream_prune_threshold": (0.1, (0.0, 0.5)),
+                "confidence_history_maxlen": (1000, (3, 1000)),
+                "temperament_history_maxlen": (1000, (3, 1000)),
+                "token_map_weight_cap": (2.0, (1.0, 5.0))
             }
-        )
+            
+            # Check for missing keys and add them with default values
+            for key, (default, _) in required_keys.items():
+                if key not in controls_config:
+                    controls_config[key] = default
+                    self.context.logger.record_event(
+                        event_type="config_missing_key",
+                        message=f"Added missing key {key} with default value {default}",
+                        level="warning"
+                    )
+            
+            # Validate value ranges
+            for key, (default, (min_val, max_val)) in required_keys.items():
+                value = controls_config[key]
+                if not isinstance(value, (int, float)) or not (min_val <= value <= max_val):
+                    self.context.logger.record_event(
+                        event_type="config_invalid_value",
+                        message=f"Invalid value for {key}: {value}. Resetting to default {default}",
+                        level="warning"
+                    )
+                    controls_config[key] = default
+            
+            # Update the config with validated values
+            self.context.config_manager.set_section("controls_config", controls_config)
+            
+            # Log the final configuration state
+            self.context.logger.record_event(
+                event_type="controls_config_validated",
+                message="Controls configuration validated successfully",
+                level="info"
+            )
+            
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="controls_config_validation_failed",
+                message=f"Failed to validate controls config: {str(e)}",
+                level="error"
+            )
+            raise
 
     def _validate_curiosity_configs(self):
         """Validate and synchronize curiosity-related configurations."""
@@ -979,356 +982,66 @@ class CuriosityEngine:
             )
             
     def generate_question(self, context_str: str = "", spontaneous: bool = False) -> Optional[str]:
-        """
-        Generate a curiosity-driven question with proper error handling.
-        
-        Args:
-            context_str: Context string for question generation
-            spontaneous: Whether the question is spontaneous
-            
-        Returns:
-            Generated question or None if generation fails
-        """
+        """Generate a curiosity-driven question with conversation history validation."""
         try:
-            # Get current state
-            state = self.state_tracker.get_state()
-            
-            # Generate question with proper error handling
-            try:
+            # Get current state with lock
+            with self.state_tracker.state.lock:
+                state = self.state_tracker.get_state()
+                
+                # Validate conversation history
+                if not state.conversation_history:
+                    self.context.logger.record_event(
+                        event_type="conversation_error",
+                        message="No conversation history available",
+                        level="error",
+                        additional_info={
+                            "state_hash": state.state_hash(),
+                            "context": context_str
+                        }
+                    )
+                    return None
+                
+                # Check conversation ID consistency
+                current_id = state.conversation_history.conversation_id
+                if current_id != self._last_conversation_id:
+                    self.context.logger.record_event(
+                        event_type="conversation_mismatch",
+                        message="Conversation ID mismatch detected",
+                        level="warning",
+                        additional_info={
+                            "current_id": current_id,
+                            "last_id": self._last_conversation_id,
+                            "state_hash": state.state_hash()
+                        }
+                    )
+                    self._last_conversation_id = current_id
+                
+                # Generate question using validated state
                 question = self.curiosity_manager.generate_question(
-                    state=state,
-                    tokenizer=self.model_loader.base_tokenizer,
-                    model=self.model_loader.base_model,
-                    prompt=context_str,
+                    context_str=context_str,
                     spontaneous=spontaneous
                 )
                 
+                # Log question generation
                 if question:
-                    self.context.logger.info(f"Generated curiosity question: {question}")
-                    return question
-                    
-                return None
+                    self.context.logger.record_event(
+                        event_type="curiosity_question",
+                        message="Generated curiosity question",
+                        level="info",
+                        additional_info={
+                            "question": question,
+                            "conversation_id": current_id,
+                            "spontaneous": spontaneous,
+                            "state_hash": state.state_hash()
+                        }
+                    )
                 
-            except Exception as e:
-                # Log the error with full context
-                self.context.logger.log_error(
-                    error_msg=f"Curiosity question generation failed: {str(e)}",
-                    error_type="curiosity_error",
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "context": context_str,
-                        "spontaneous": spontaneous,
-                        "conversation_id": state.conversation_id,
-                        "state_hash": state.state_hash
-                    }
-                )
-                
-                # Handle the error through ErrorManager
-                return self.error_manager.handle_curiosity_error(e, context_str)
+                return question
                 
         except Exception as e:
-            # Log any unexpected errors
-            self.context.logger.log_error(
-                error_msg=f"Unexpected error in generate_question: {str(e)}",
-                error_type="unexpected_error",
-                stack_trace=traceback.format_exc()
-            )
-            return None
-
-class CycleTrainer:
-    """Manages regular training cycles."""
-    def __init__(self, context: SystemContext, config_handler: ConfigHandler, 
-                 model_loader: ModelLoader, state_tracker: StateTracker):
-        self.context = context
-        self.config_handler = config_handler
-        self.model_loader = model_loader
-        self.state_tracker = state_tracker
-        
-        # Ensure models are on the correct device
-        self.model_loader.base_model = self.model_loader.base_model.to(self.context.device)
-        self.model_loader.scaffolds[0] = self.model_loader.scaffolds[0].to(self.context.device)
-        
-        # Initialize trainer with models on correct device
-        self.trainer = self._initialize_trainer()
-        self.training_cycle_manager = TrainingCycleManager(
-            trainer=self.trainer,
-            config_manager=context.config_manager,
-            logger=context.logger
-        )
-        
-        # Log device information
-        self.context.logger.record_event(
-            event_type="cycle_trainer_initialized",
-            message="Cycle trainer initialized with models on correct device",
-            level="info",
-            additional_info={
-                "base_model_device": next(self.model_loader.base_model.parameters()).device,
-                "scaffold_model_device": next(self.model_loader.scaffolds[0].parameters()).device,
-                "target_device": str(self.context.device)
-            }
-        )
-
-    def _initialize_trainer(self) -> SOVLTrainer:
-        # Get base training config
-        training_config = TrainingConfig(
-            learning_rate=self.config_handler.training_config.get("learning_rate", 0.0003),
-            grad_accum_steps=self.config_handler.training_config.get("accumulation_steps", 4),
-            weight_decay=0.01,
-            total_steps=1000,
-            max_grad_norm=1.0,
-            use_amp=(self.context.device.type == "cuda"),
-            max_patience=self.config_handler.training_config.get("max_patience", 2),
-            batch_size=self.config_handler.training_config.get("batch_size", 1),
-            max_epochs=self.config_handler.training_config.get("train_epochs", 3),
-            validate_every_n_steps=100,
-            checkpoint_interval=1000,
-            checkpoint_path="checkpoints/sovl_trainer",
-            scheduler_type="linear",
-            cosine_min_lr=1e-6,
-            warmup_ratio=0.1,
-            dropout_rate=self.config_handler.lora_config.get("lora_dropout", 0.1),
-            max_seq_length=self.config_handler.training_config.get("max_seq_length", 128),
-            metrics_to_track=["loss", "accuracy", "confidence"],
-            enable_gestation=self.config_handler.controls_config.get("enable_gestation", True),
-            enable_sleep_training=self.config_handler.controls_config.get("enable_sleep_training", True),
-            enable_lifecycle_weighting=self.config_handler.controls_config.get("enable_lifecycle_weighting", True),
-            lifecycle_capacity_factor=self.config_handler.training_config.get("lifecycle_capacity_factor", 0.01),
-            lifecycle_curve=self.config_handler.training_config.get("lifecycle_curve", "sigmoid_linear"),
-            sleep_conf_threshold=self.config_handler.controls_config.get("sleep_conf_threshold", 0.7),
-            sleep_log_min=self.config_handler.controls_config.get("sleep_log_min", 10),
-            accumulation_steps=self.config_handler.training_config.get("accumulation_steps", 4),
-            exposure_gain_eager=self.config_handler.training_config.get("exposure_gain_eager", 3),
-            exposure_gain_default=self.config_handler.training_config.get("exposure_gain_default", 2),
-            dream_memory_weight=self.config_handler.controls_config.get("dream_memory_weight", 0.1),
-            enable_dreaming=self.config_handler.controls_config.get("enable_dreaming", True),
-            repetition_n=3,
-            sigmoid_scale=self.config_handler.training_config.get("sigmoid_scale", 0.5),
-            sigmoid_shift=self.config_handler.training_config.get("sigmoid_shift", 5.0)
-        )
-
-        # Handle curiosity configuration based on enable_curiosity
-        if self.config_handler.curiosity_config.get("enable_curiosity", True):
-            training_config.curiosity_weight_ignorance = self.config_handler.curiosity_config.get("weight_ignorance", 0.7)
-            training_config.curiosity_weight_novelty = self.config_handler.curiosity_config.get("weight_novelty", 0.3)
-            training_config.curiosity_pressure_threshold = self.config_handler.curiosity_config.get("pressure_threshold", 0.7)
-            training_config.curiosity_pressure_drop = self.config_handler.curiosity_config.get("pressure_drop", 0.3)
-            training_config.curiosity_novelty_threshold_spontaneous = self.config_handler.curiosity_config.get("novelty_threshold_spontaneous", 0.9)
-            training_config.curiosity_novelty_threshold_response = self.config_handler.curiosity_config.get("novelty_threshold_response", 0.8)
-            training_config.curiosity_silence_threshold = self.config_handler.curiosity_config.get("silence_threshold", 20.0)
-            training_config.curiosity_question_cooldown = self.config_handler.curiosity_config.get("question_cooldown", 60.0)
-            training_config.curiosity_queue_maxlen = self.config_handler.curiosity_config.get("queue_maxlen", 10)
-            training_config.curiosity_max_new_tokens = self.config_handler.curiosity_config.get("max_new_tokens", 8)
-            training_config.curiosity_base_temperature = self.config_handler.curiosity_config.get("base_temperature", 1.1)
-            training_config.curiosity_temperament_influence = self.config_handler.curiosity_config.get("temperament_influence", 0.4)
-            training_config.curiosity_top_k = self.config_handler.curiosity_config.get("top_k", 30)
-        else:
-            # Set all curiosity-related parameters to 0 or disabled values
-            training_config.curiosity_weight_ignorance = 0.0
-            training_config.curiosity_weight_novelty = 0.0
-            training_config.curiosity_pressure_threshold = 0.0
-            training_config.curiosity_pressure_drop = 0.0
-            training_config.curiosity_novelty_threshold_spontaneous = 0.0
-            training_config.curiosity_novelty_threshold_response = 0.0
-            training_config.curiosity_silence_threshold = 0.0
-            training_config.curiosity_question_cooldown = 0.0
-            training_config.curiosity_queue_maxlen = 0
-            training_config.curiosity_max_new_tokens = 0
-            training_config.curiosity_base_temperature = 0.0
-            training_config.curiosity_temperament_influence = 0.0
-            training_config.curiosity_top_k = 0
-
-        def loss_fn(logits, labels):
-            # Ensure inputs are on the correct device
-            logits = logits.to(self.context.device)
-            labels = labels.to(self.context.device)
-            mask = labels != -100
-            return F.cross_entropy(
-                logits.view(-1, logits.size(-1))[mask.view(-1)],
-                labels.view(-1)[mask.view(-1)],
-                ignore_index=-100
-            )
-
-        # Initialize trainer with models on correct device
-        trainer = SOVLTrainer(
-            model=self.model_loader.scaffolds[0],
-            config=training_config,
-            device=self.context.device,
-            loss_fn=loss_fn,
-            logger=self.context.logger,
-            memory_lock=Lock(),
-            tokenizer=self.model_loader.base_tokenizer,
-            state=self.state_tracker.state
-        )
-        
-        # Log trainer initialization with device information
-        self.context.logger.record_event(
-            event_type="trainer_initialized",
-            message="Trainer initialized with models on correct device",
-            level="info",
-            additional_info={
-                "model_device": next(trainer.model.parameters()).device,
-                "target_device": str(self.context.device),
-                "use_amp": training_config.use_amp
-            }
-        )
-        
-        return trainer
-
-class GestationTrainer:
-    """Manages gestation-specific training."""
-    def __init__(self, context: SystemContext, config_handler: ConfigHandler, 
-                 model_loader: ModelLoader, state_tracker: StateTracker):
-        self.context = context
-        self.config_handler = config_handler
-        self.model_loader = model_loader
-        self.state_tracker = state_tracker
-        # Gestation-specific logic can be added here
-
-    def handle_gestation_complete(self, batch_size: int, avg_loss: float):
-        self.state_tracker.update_gestation_metrics(batch_size, avg_loss)
-        self.context.logger.record({
-            "event": "gestation_complete_handled",
-            "batch_size": batch_size,
-            "avg_loss": avg_loss,
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id,
-            "state_hash": self.state_tracker.state.get_state_hash()
-        })
-
-class SleepTrainer:
-    """Manages sleep training and dream cycles."""
-    def __init__(self, context: SystemContext, config_handler: ConfigHandler, 
-                 model_loader: ModelLoader, state_tracker: StateTracker):
-        self.context = context
-        self.config_handler = config_handler
-        self.model_loader = model_loader
-        self.state_tracker = state_tracker
-        self.trainer = CycleTrainer(context, config_handler, model_loader, state_tracker).trainer
-
-    def sleep_train(self):
-        try:
-            log_entries = self.context.logger.read()
-            self.trainer.training_cycle_manager.run_sleep_training(log_entries)
-            self.context.logger.clear()
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Sleep training failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-    def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
-        self.state_tracker.update_dream_metrics(dream_prompt, is_novel, memory_count)
-        self.context.logger.record({
-            "event": "dream_complete_handled",
-            "dream_prompt": dream_prompt,
-            "is_novel": is_novel,
-            "memory_count": memory_count,
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id,
-            "state_hash": self.state_tracker.state.get_state_hash()
-        })
-
-    def handle_sleep_train_complete(self, batch_size: int, data_exposure: float):
-        self.state_tracker.update_sleep_metrics(batch_size, data_exposure)
-        self.context.logger.record({
-            "event": "sleep_train_complete_handled",
-            "batch_size": batch_size,
-            "data_exposure": data_exposure,
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id,
-            "state_hash": self.state_tracker.state.get_state_hash()
-        })
-
-class TrainingManager:
-    """Coordinates all training activities."""
-    def __init__(self, context: SystemContext, config_handler: ConfigHandler, 
-                 model_loader: ModelLoader, state_tracker: StateTracker, 
-                 error_manager: ErrorManager):
-        self.context = context
-        self.config_handler = config_handler
-        self.model_loader = model_loader
-        self.state_tracker = state_tracker
-        self.error_manager = error_manager
-        
-        # Initialize training data
-        self.train_data, self.valid_data = self._load_training_data()
-        
-        # Initialize PluginManager
-        self.plugin_manager = PluginManager(
-            config_manager=context.config_manager,
-            logger=context.logger,
-            state=state_tracker.state
-        )
-        
-        # Initialize components
-        self.cycle_trainer = CycleTrainer(context, config_handler, model_loader, state_tracker)
-        self.gestation_trainer = GestationTrainer(context, config_handler, model_loader, state_tracker)
-        self.sleep_trainer = SleepTrainer(context, config_handler, model_loader, state_tracker)
-        self.tuner = SOVLTuner(
-            config_manager=context.config_manager,
-            logger=context.logger,
-            curiosity_manager=None,  # Set after CuriosityEngine
-            trainer=self.cycle_trainer.trainer,
-            cross_attention_injector=CrossAttentionInjector(context.config_manager, context.logger)
-        )
-
-    def _load_training_data(self) -> Tuple[List, List]:
-        """
-        Load and validate training data from configuration.
-        
-        Returns:
-            Tuple[List, List]: Training and validation data
-            
-        Raises:
-            ValueError: If data loading fails
-            InsufficientDataError: If insufficient data is available
-        """
-        try:
-            data_path = self.context.config_manager.get("training_config.data_path", "data/train.json")
-            valid_split_ratio = self.context.config_manager.get("core_config.valid_split_ratio", 0.2)
-            
             self.context.logger.record_event(
-                event_type="data_loading",
-                message="Loading training data",
-                level="info",
-                additional_info={
-                    "data_path": data_path,
-                    "valid_split_ratio": valid_split_ratio
-                }
-            )
-            
-            data = load_training_data(
-                path=data_path,
-                valid_split_ratio=valid_split_ratio
-            )
-            
-            train_data = data.get("train", [])
-            valid_data = data.get("valid", [])
-            
-            if not train_data:
-                raise InsufficientDataError("No training data available")
-            if not valid_data:
-                raise InsufficientDataError("No validation data available")
-            
-            self.context.logger.record_event(
-                event_type="data_loaded",
-                message="Training data loaded successfully",
-                level="info",
-                additional_info={
-                    "train_samples": len(train_data),
-                    "valid_samples": len(valid_data)
-                }
-            )
-            
-            return train_data, valid_data
-            
-        except InsufficientDataError as e:
-            self.context.logger.record_event(
-                event_type="data_error",
-                message="Insufficient training data",
+                event_type="curiosity_error",
+                message=f"Failed to generate question: {str(e)}",
                 level="error",
                 additional_info={
                     "error": str(e)

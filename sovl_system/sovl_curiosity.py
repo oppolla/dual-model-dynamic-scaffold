@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Deque, Tuple
 from collections import deque
 import traceback
 import json
+import threading
 
 import torch
 from torch import nn
@@ -178,6 +179,7 @@ class CuriosityManager:
         self.state_hash = None
         self.pressure_mgr = CuriosityPressure()
         self.metrics: Deque[Dict[str, Any]] = deque(maxlen=config_manager.config.get("metrics_maxlen", 1000))
+        self.lock = threading.Lock()
         self._initialize_components()
         
         # Log device initialization
@@ -199,40 +201,56 @@ class CuriosityManager:
         self.last_question_time: float = time.time()
         
     def set_state(self, state: SOVLState) -> None:
-        """Set the SOVLState reference and validate synchronization."""
-        if not isinstance(state, SOVLState):
-            raise ValueError("State must be an instance of SOVLState")
-            
-        self.state = state
-        self.conversation_id = state.history.conversation_id
-        self.state_hash = state.state_hash
-        
-        # Validate state synchronization
-        self._validate_state_sync()
-        self._log_event(
-            "state_sync_initialized",
-            conversation_id=self.conversation_id,
-            state_hash=self.state_hash,
-            pressure=self.pressure
-        )
-
-    def _validate_state_sync(self) -> None:
-        """Validate synchronization between CuriosityManager and SOVLState."""
-        if self.state is None:
-            raise StateError("SOVLState not set")
-            
-        if not hasattr(self.state, 'curiosity'):
-            raise StateError("SOVLState missing curiosity attribute")
-            
-        # Validate pressure synchronization
-        if abs(self.pressure - self.state.curiosity.pressure) > 0.01:
-            self._log_warning(
-                "pressure_mismatch",
-                manager_pressure=self.pressure,
-                state_pressure=self.state.curiosity.pressure
-            )
-            # Align pressures
-            self.pressure = self.state.curiosity.pressure
+        """Set the SOVL state and synchronize with CuriosityState."""
+        with self.lock:
+            try:
+                self.state = state
+                
+                # Validate and synchronize curiosity state
+                if not hasattr(state, 'curiosity'):
+                    self._log_error("Missing curiosity state in SOVLState")
+                    return
+                    
+                # Validate required attributes
+                required_attrs = [
+                    'pressure', 'novelty_threshold_spontaneous',
+                    'novelty_threshold_response', 'pressure_threshold',
+                    'pressure_drop', 'silence_threshold',
+                    'question_cooldown', 'queue_maxlen'
+                ]
+                
+                missing_attrs = [attr for attr in required_attrs 
+                               if not hasattr(state.curiosity, attr)]
+                
+                if missing_attrs:
+                    self._log_error(f"Missing required attributes in CuriosityState: {missing_attrs}")
+                    return
+                
+                # Validate and clamp parameter ranges
+                if not (0 <= state.curiosity.pressure <= 1):
+                    self._log_warning(f"Invalid pressure value: {state.curiosity.pressure}, clamping to [0,1]")
+                    state.curiosity.pressure = max(0, min(1, state.curiosity.pressure))
+                
+                if not (0 <= state.curiosity.novelty_threshold_spontaneous <= 1):
+                    self._log_warning(f"Invalid novelty_threshold_spontaneous: {state.curiosity.novelty_threshold_spontaneous}, clamping to [0,1]")
+                    state.curiosity.novelty_threshold_spontaneous = max(0, min(1, state.curiosity.novelty_threshold_spontaneous))
+                
+                if not (0 <= state.curiosity.novelty_threshold_response <= 1):
+                    self._log_warning(f"Invalid novelty_threshold_response: {state.curiosity.novelty_threshold_response}, clamping to [0,1]")
+                    state.curiosity.novelty_threshold_response = max(0, min(1, state.curiosity.novelty_threshold_response))
+                
+                # Synchronize pressure
+                self.pressure = state.curiosity.pressure
+                
+                # Log successful synchronization
+                self._log_event("state_sync", {
+                    "pressure": self.pressure,
+                    "novelty_threshold_spontaneous": state.curiosity.novelty_threshold_spontaneous,
+                    "novelty_threshold_response": state.curiosity.novelty_threshold_response
+                })
+                
+            except Exception as e:
+                self._log_error(f"Error synchronizing with SOVLState: {str(e)}")
 
     def update_pressure(self, new_pressure: float) -> None:
         """Update curiosity pressure and ensure state synchronization."""

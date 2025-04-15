@@ -463,6 +463,9 @@ class SOVLState(StateBase):
             # Initialize gestation state
             self.gestation_state = "normal"
             
+            # Initialize token map
+            self.token_map = {}
+            
             # Initialize other state components
             self.history = ConversationHistory(
                 maxlen=self.config_manager.get("controls_config.conversation_history_maxlen", 10)
@@ -473,6 +476,37 @@ class SOVLState(StateBase):
                 device=self.device
             )
             
+    def update_token_map(self, token_map: Dict[int, Dict[str, Any]]) -> None:
+        """Update the token map with validation."""
+        with self.lock:
+            try:
+                # Validate token map structure
+                for base_id, mapping in token_map.items():
+                    if not isinstance(base_id, int):
+                        raise ValueError(f"Invalid base_id type: {type(base_id)}")
+                    if not isinstance(mapping, dict):
+                        raise ValueError(f"Invalid mapping type for base_id {base_id}")
+                    if 'ids' not in mapping or 'weight' not in mapping:
+                        raise ValueError(f"Missing required fields in mapping for base_id {base_id}")
+                    if not isinstance(mapping['ids'], list):
+                        raise ValueError(f"Invalid ids type for base_id {base_id}")
+                    if not isinstance(mapping['weight'], (int, float)):
+                        raise ValueError(f"Invalid weight type for base_id {base_id}")
+
+                self.token_map = token_map
+                self._log_event("token_map_updated", {
+                    "token_map_size": len(token_map),
+                    "state_hash": self.state_hash()
+                })
+            except Exception as e:
+                self._log_error(f"Failed to update token map: {str(e)}")
+                raise
+
+    def get_token_map(self) -> Dict[int, Dict[str, Any]]:
+        """Get a copy of the current token map."""
+        with self.lock:
+            return dict(self.token_map)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
         with self.lock:
@@ -555,6 +589,7 @@ class SOVLState(StateBase):
                 )
                 self._log_event("state_validation", {"field": "history", "action": "initialized"})
                 
+            # Enhanced CuriosityState validation
             if not hasattr(self, 'curiosity'):
                 self.curiosity = CuriosityState(
                     config_manager=self.config_manager,
@@ -562,6 +597,57 @@ class SOVLState(StateBase):
                     device=self.device
                 )
                 self._log_event("state_validation", {"field": "curiosity", "action": "initialized"})
+            else:
+                # Validate CuriosityState attributes
+                required_curiosity_attrs = [
+                    'pressure', 'novelty_threshold_spontaneous',
+                    'novelty_threshold_response', 'pressure_threshold',
+                    'pressure_drop', 'silence_threshold',
+                    'question_cooldown', 'queue_maxlen'
+                ]
+                
+                missing_attrs = [attr for attr in required_curiosity_attrs 
+                               if not hasattr(self.curiosity, attr)]
+                
+                if missing_attrs:
+                    self._log_event("state_validation", {
+                        "field": "curiosity",
+                        "action": "reinitialized",
+                        "missing_attrs": missing_attrs
+                    })
+                    self.curiosity = CuriosityState(
+                        config_manager=self.config_manager,
+                        logger=self.logger,
+                        device=self.device
+                    )
+                
+                # Validate curiosity parameter ranges
+                if not (0 <= self.curiosity.pressure <= 1):
+                    self._log_event("state_validation", {
+                        "field": "curiosity.pressure",
+                        "action": "clamped",
+                        "old_value": self.curiosity.pressure,
+                        "new_value": max(0, min(1, self.curiosity.pressure))
+                    })
+                    self.curiosity.pressure = max(0, min(1, self.curiosity.pressure))
+                
+                if not (0 <= self.curiosity.novelty_threshold_spontaneous <= 1):
+                    self._log_event("state_validation", {
+                        "field": "curiosity.novelty_threshold_spontaneous",
+                        "action": "clamped",
+                        "old_value": self.curiosity.novelty_threshold_spontaneous,
+                        "new_value": max(0, min(1, self.curiosity.novelty_threshold_spontaneous))
+                    })
+                    self.curiosity.novelty_threshold_spontaneous = max(0, min(1, self.curiosity.novelty_threshold_spontaneous))
+                
+                if not (0 <= self.curiosity.novelty_threshold_response <= 1):
+                    self._log_event("state_validation", {
+                        "field": "curiosity.novelty_threshold_response",
+                        "action": "clamped",
+                        "old_value": self.curiosity.novelty_threshold_response,
+                        "new_value": max(0, min(1, self.curiosity.novelty_threshold_response))
+                    })
+                    self.curiosity.novelty_threshold_response = max(0, min(1, self.curiosity.novelty_threshold_response))
 
 class StateManager:
     """Manages state initialization and persistence for the SOVL system."""
