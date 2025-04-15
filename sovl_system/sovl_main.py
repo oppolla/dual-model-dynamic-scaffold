@@ -34,6 +34,7 @@ from sovl_error import ErrorHandler
 from sovl_state_manager import StateManager
 from sovl_logging import LoggingManager
 import logging
+from sovl_training_cycle import TrainingCycleManager
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Calculate confidence score for generated tokens."""
@@ -64,6 +65,13 @@ class SOVLSystem:
         # Initialize state manager and load state
         self.state_manager = StateManager(self.config_manager, self.logger, self.device)
         self.state = self.state_manager.load_state()
+
+        # Initialize training cycle manager
+        self.training_cycle_manager = TrainingCycleManager(
+            trainer=self.trainer,
+            config_manager=self.config_manager,
+            logger=self.logger
+        )
 
         # Post-initialization setup
         self._post_initialize()
@@ -475,73 +483,18 @@ class SOVLSystem:
     def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
                          epochs: Optional[int] = None, batch_size: Optional[int] = None) -> None:
         """Run a full training cycle."""
-        train_data = train_data or self.train_data
-        valid_data = valid_data or self.valid_data
-        epochs = epochs or self.training_config.get("train_epochs", 3)
-        batch_size = batch_size or self.training_config.get("batch_size", 1)
-
-        if len(train_data) < batch_size or not valid_data:
-            self.logger.record({
-                "warning": "Insufficient data for training",
-                "train_data_size": len(train_data),
-                "valid_data_size": len(valid_data),
-                "batch_size": batch_size,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print("Not enough data for training.")
-            return
-
-        influence_weight = (
-            self.trainer.get_life_curve_weight()
-            if self.controls_config.get("enable_lifecycle_weighting", True)
-            else self.last_weight
-        )
-        self.set_scaffold_influence(influence_weight)
-        self.logger.record({
-            "event": "training_cycle_start",
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "data_exposure": self.trainer.data_exposure,
-            "scaffold_influence": influence_weight,
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        })
-        print(f"Data exposure: {self.trainer.data_exposure} | Scaffold influence: {influence_weight:.3f}")
-
-        dry_run = self.training_config.get("dry_run", False)
-        dry_run_params = self.training_config.get("dry_run_params", {})
-        if dry_run and dry_run_params.get("skip_training", True):
-            print("\n=== DRY RUN TRAINING ===")
-            dry_batch = train_data[:dry_run_params.get("max_samples", 2)]
-            loss = self.train_step(dry_batch, dry_run=True, dry_run_params=dry_run_params)
-            self.logger.record({
-                "event": "dry_run_training_complete",
-                "loss": loss,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id,
-                "state_hash": self.state.state_hash()
-            })
-            print(f"Dry run training complete: Loss = {loss}")
-            return
-
-        print(f"\n--- Training ({epochs} epochs) ---")
-        start_time = time.time()
-
-        def scaffold_provider(batch):
-            prompts = batch.get("prompt", [])
-            scaffold_inputs = self.tokenize_and_map(prompts)
-            return self.get_scaffold_hidden_states(scaffold_inputs)
-
         try:
-            training_results = self.trainer.run_training_cycle(
-                train_data=train_data,
-                validation_data=valid_data,
+            def scaffold_provider(batch):
+                prompts = batch.get("prompt", [])
+                scaffold_inputs = self.tokenize_and_map(prompts)
+                return self.get_scaffold_hidden_states(scaffold_inputs)
+
+            self.training_cycle_manager.run_training_cycle(
+                train_data=train_data or self.train_data,
+                valid_data=valid_data or self.valid_data,
                 scaffold_provider=scaffold_provider,
-                max_epochs=epochs,
-                early_stopping_patience=self.training_config.get("max_patience", 3)
+                epochs=epochs,
+                batch_size=batch_size
             )
         except Exception as e:
             self.logger.record({
@@ -552,50 +505,12 @@ class SOVLSystem:
             })
             raise
 
-        self.last_weight = self.trainer.get_life_curve_weight()
-        self.set_scaffold_influence(self.last_weight)
-        self.logger.record({
-            "event": "training_cycle_complete",
-            "duration": time.time() - start_time,
-            "last_weight": self.last_weight,
-            "training_history": training_results.get("training_history", []),
-            "best_val_loss": training_results.get("best_val_loss", float("inf")),
-            "final_epoch": training_results.get("final_epoch", 0),
-            "early_stopped": training_results.get("early_stopped", False),
-            "timestamp": time.time(),
-            "conversation_id": self.history.conversation_id,
-            "state_hash": self.state.state_hash()
-        })
-        print(f"--- Training Finished ({time.time() - start_time:.2f}s) ---")
-
     def _sleep_train(self) -> None:
         """Train on dream-generated content."""
-        if not self.controls_config.get("enable_sleep_training", True):
-            self.logger.record({
-                "event": "sleep_training_skipped",
-                "reason": "Sleep training disabled",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id
-            })
-            return
-
-        print("\n--- Sleep Training Initiated ---")
         try:
             log_entries = self.logger.read()
-            self.trainer.sleep_train(log_entries)
-            self.last_trained = time.time()
+            self.training_cycle_manager.run_sleep_training(log_entries)
             self.logger.clear()
-            self.last_weight = self.trainer.get_life_curve_weight()
-
-            if self.controls_config.get("enable_temperament", True):
-                self._update_temperament()
-                self.last_temperament_score = self.temperament_system.score
-
-            self.logger.record({
-                "event": "sleep_training_complete",
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id
-            })
         except Exception as e:
             self.logger.record({
                 "error": f"Sleep training failed: {str(e)}",
@@ -604,7 +519,6 @@ class SOVLSystem:
                 "stack_trace": traceback.format_exc()
             })
             raise
-        print("--- Sleep Training Complete ---")
 
     def has_repetition(self, output_ids: List[int], n: int = 3) -> bool:
         """Check for repetition in generated output."""

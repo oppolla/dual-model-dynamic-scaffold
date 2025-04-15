@@ -640,6 +640,145 @@ class TrainingWorkflowManager:
             self.logger.error(f"Error in dream cycle: {str(e)}")
             raise
 
+class TrainingCycleManager:
+    """Manages the orchestration of training cycles, including sleep training."""
+    
+    def __init__(self, trainer: 'SOVLTrainer', config_manager: ConfigManager, logger: Logger):
+        self.trainer = trainer
+        self.config_manager = config_manager
+        self.logger = logger
+        self.training_config = config_manager.get_section("training_config")
+        self.controls_config = config_manager.get_section("controls_config")
+        
+    def run_training_cycle(
+        self,
+        train_data: List[Dict[str, Any]],
+        valid_data: List[Dict[str, Any]],
+        scaffold_provider: Optional[Callable] = None,
+        epochs: Optional[int] = None,
+        batch_size: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Run a complete training cycle with validation."""
+        try:
+            epochs = epochs or self.training_config.get("train_epochs", 3)
+            batch_size = batch_size or self.training_config.get("batch_size", 1)
+            
+            # Validate data
+            if len(train_data) < batch_size or not valid_data:
+                self.logger.record({
+                    "warning": "Insufficient data for training",
+                    "train_data_size": len(train_data),
+                    "valid_data_size": len(valid_data),
+                    "batch_size": batch_size,
+                    "timestamp": time.time()
+                })
+                return {"status": "insufficient_data"}
+            
+            # Get lifecycle weight
+            influence_weight = (
+                self.trainer.get_life_curve_weight()
+                if self.controls_config.get("enable_lifecycle_weighting", True)
+                else self.trainer.last_weight
+            )
+            
+            # Log cycle start
+            self.logger.record({
+                "event": "training_cycle_start",
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "data_exposure": self.trainer.data_exposure,
+                "scaffold_influence": influence_weight,
+                "timestamp": time.time()
+            })
+            
+            # Handle dry run if configured
+            if self.training_config.get("dry_run", False):
+                dry_run_params = self.training_config.get("dry_run_params", {})
+                if dry_run_params.get("skip_training", True):
+                    dry_batch = train_data[:dry_run_params.get("max_samples", 2)]
+                    loss, metrics = self.trainer.train_step_with_scaffold(
+                        batch=dry_batch,
+                        scaffold_provider=scaffold_provider,
+                        dry_run=True,
+                        dry_run_params=dry_run_params
+                    )
+                    self.logger.record({
+                        "event": "dry_run_training_complete",
+                        "loss": loss,
+                        "timestamp": time.time()
+                    })
+                    return {"status": "dry_run_complete", "loss": loss}
+            
+            # Run actual training
+            start_time = time.time()
+            training_results = self.trainer.run_training_cycle(
+                train_data=train_data,
+                validation_data=valid_data,
+                scaffold_provider=scaffold_provider,
+                max_epochs=epochs,
+                early_stopping_patience=self.training_config.get("max_patience", 3)
+            )
+            
+            # Update weights and log completion
+            self.trainer.last_weight = self.trainer.get_life_curve_weight()
+            self.logger.record({
+                "event": "training_cycle_complete",
+                "duration": time.time() - start_time,
+                "last_weight": self.trainer.last_weight,
+                "training_history": training_results.get("training_history", []),
+                "best_val_loss": training_results.get("best_val_loss", float("inf")),
+                "final_epoch": training_results.get("final_epoch", 0),
+                "early_stopped": training_results.get("early_stopped", False),
+                "timestamp": time.time()
+            })
+            
+            return training_results
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Training cycle failed: {str(e)}",
+                "timestamp": time.time()
+            })
+            raise
+            
+    def run_sleep_training(self, log_entries: List[Dict[str, Any]]) -> None:
+        """Run sleep training on dream-generated content."""
+        try:
+            if not self.controls_config.get("enable_sleep_training", True):
+                self.logger.record({
+                    "event": "sleep_training_skipped",
+                    "reason": "Sleep training disabled",
+                    "timestamp": time.time()
+                })
+                return
+                
+            self.logger.record({
+                "event": "sleep_training_start",
+                "timestamp": time.time()
+            })
+            
+            # Run sleep training
+            self.trainer.sleep_train(log_entries)
+            self.trainer.last_trained = time.time()
+            self.trainer.last_weight = self.trainer.get_life_curve_weight()
+            
+            # Update temperament if enabled
+            if self.controls_config.get("enable_temperament", True):
+                self.trainer._update_temperament()
+                self.trainer.last_temperament_score = self.trainer.temperament_system.score
+                
+            self.logger.record({
+                "event": "sleep_training_complete",
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Sleep training failed: {str(e)}",
+                "timestamp": time.time()
+            })
+            raise
+
 class SOVLTrainer:
     """Main trainer class coordinating training, dreaming, and lifecycle management."""
     
