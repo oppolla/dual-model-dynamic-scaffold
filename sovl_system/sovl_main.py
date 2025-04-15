@@ -72,12 +72,12 @@ class SystemContext:
                 config_manager=self.config_manager,
                 log_dir="logs",
                 system_log_file="sovl_system.log",
-                error_log_file="sovl_errors.log",
                 debug_log_file="sovl_debug.log"
             )
             
-            # Get main logger instance
-            self.logger = self.logging_manager.setup_logging()
+            # Get both system and debug logger instances
+            self.logger = self.logging_manager.get_logger("system")
+            self.debug_logger = self.logging_manager.get_logger("debug")
             
             # Log initialization
             self.logger.record_event(
@@ -87,6 +87,19 @@ class SystemContext:
                 additional_info={
                     "device": str(self.device),
                     "config_path": config_path
+                }
+            )
+            
+            # Log debug information
+            self.debug_logger.record_event(
+                event_type="system_initialization_debug",
+                message="System context initialized with debug logging enabled",
+                level="debug",
+                additional_info={
+                    "device": str(self.device),
+                    "config_path": config_path,
+                    "cuda_available": torch.cuda.is_available(),
+                    "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0
                 }
             )
             

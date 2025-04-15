@@ -715,14 +715,33 @@ class Logger:
         })
 
     def cleanup(self) -> None:
-        """Clean up logging resources."""
-        try:
-            # Rotate logs one final time
-            if os.path.exists(self.config.log_file):
-                with self.file_lock:  # Ensure thread-safe file operations
-                    self._rotate_logs()
-        except Exception as e:
-            self.fallback_logger.error(f"Error during cleanup: {str(e)}")
+        """Clean up logging resources for all loggers."""
+        for name, logger in self.loggers.items():
+            try:
+                logger.cleanup()
+                self.get_logger("system").record_event(
+                    event_type="logger_cleanup",
+                    message=f"Successfully cleaned up logger {name}",
+                    level="info"
+                )
+            except Exception as e:
+                # Use system logger to log the error
+                self.get_logger("system").log_error(
+                    error_msg=f"Failed to clean up logger {name}: {str(e)}",
+                    error_type="cleanup_error",
+                    stack_trace=traceback.format_exc()
+                )
+                # Also log to debug logger for more detailed information
+                self.get_logger("debug").record_event(
+                    event_type="logger_cleanup_error",
+                    message=f"Detailed error during cleanup of logger {name}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "logger_name": name,
+                        "stack_trace": traceback.format_exc()
+                    }
+                )
 
 class LoggingManager:
     """Manages logging setup and configuration for the SOVL system."""
@@ -739,7 +758,6 @@ class LoggingManager:
         config_manager: ConfigManager,
         log_dir: str = "logs",
         system_log_file: str = "sovl_system.log",
-        error_log_file: str = "sovl_errors.log",
         debug_log_file: str = "sovl_debug.log"
     ):
         """
@@ -749,7 +767,6 @@ class LoggingManager:
             config_manager: ConfigManager instance for accessing logging settings.
             log_dir: Directory to store log files.
             system_log_file: Name of the system log file.
-            error_log_file: Name of the error log file.
             debug_log_file: Name of the debug log file.
         """
         if not isinstance(config_manager, ConfigManager):
@@ -758,14 +775,51 @@ class LoggingManager:
         self.config_manager = config_manager
         self.log_dir = log_dir
         self.system_log_file = os.path.join(log_dir, system_log_file)
-        self.error_log_file = os.path.join(log_dir, error_log_file)
         self.debug_log_file = os.path.join(log_dir, debug_log_file)
         self.loggers = {}
+        
+        # Configure fallback logger first
+        self._configure_fallback_logger()
         
         # Ensure logging configuration exists
         self._ensure_logging_config()
         self._validate_config()
         self._setup_logging()
+
+    def _configure_fallback_logger(self) -> None:
+        """Configure the fallback logger with proper handlers and formatting."""
+        # Get the fallback logger
+        fallback_logger = logging.getLogger(__name__)
+        
+        # Set log level from config or default to INFO
+        log_level = self.config_manager.get(
+            "logging.level",
+            self._DEFAULT_CONFIG["logging.level"]
+        )
+        fallback_logger.setLevel(getattr(logging, log_level))
+        
+        # Remove any existing handlers to avoid duplicates
+        for handler in fallback_logger.handlers[:]:
+            fallback_logger.removeHandler(handler)
+        
+        # Create and configure console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(getattr(logging, log_level))
+        
+        # Create detailed formatter
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        console_handler.setFormatter(formatter)
+        
+        # Add handler to logger
+        fallback_logger.addHandler(console_handler)
+        
+        # Log successful configuration
+        fallback_logger.info(
+            f"Configured fallback logger with level {log_level}"
+        )
 
     def _ensure_logging_config(self) -> None:
         """Ensure logging configuration exists in config manager."""
@@ -799,32 +853,80 @@ class LoggingManager:
         # Create log directory if it doesn't exist
         os.makedirs(self.log_dir, exist_ok=True)
 
-        # Configure system logger with rotation settings
-        system_config = LoggerConfig(
-            log_file=self.system_log_file,
-            max_size_mb=self.config_manager.get("logging.max_size_mb", self._DEFAULT_CONFIG["logging.max_size_mb"]),
-            compress_old=self.config_manager.get("logging.compress_old", self._DEFAULT_CONFIG["logging.compress_old"]),
-            max_in_memory_logs=1000,
-            rotation_count=self.config_manager.get("logging.rotation_count", self._DEFAULT_CONFIG["logging.rotation_count"])
-        )
-        self.loggers["system"] = Logger(system_config)
+        # Validate and get configuration values
+        try:
+            max_size_mb = self.config_manager.get(
+                "logging.max_size_mb",
+                self._DEFAULT_CONFIG["logging.max_size_mb"]
+            )
+            if not isinstance(max_size_mb, (int, float)) or max_size_mb <= 0:
+                raise ValueError(
+                    f"Invalid logging.max_size_mb: {max_size_mb}. Must be a positive number."
+                )
 
-        # Configure debug logger with rotation settings
-        debug_config = LoggerConfig(
-            log_file=self.debug_log_file,
-            max_size_mb=self.config_manager.get("logging.max_size_mb", self._DEFAULT_CONFIG["logging.max_size_mb"]),
-            compress_old=self.config_manager.get("logging.compress_old", self._DEFAULT_CONFIG["logging.compress_old"]),
-            max_in_memory_logs=1000,
-            rotation_count=self.config_manager.get("logging.rotation_count", self._DEFAULT_CONFIG["logging.rotation_count"])
-        )
-        self.loggers["debug"] = Logger(debug_config)
+            compress_old = self.config_manager.get(
+                "logging.compress_old",
+                self._DEFAULT_CONFIG["logging.compress_old"]
+            )
+            if not isinstance(compress_old, bool):
+                raise ValueError(
+                    f"Invalid logging.compress_old: {compress_old}. Must be a boolean."
+                )
 
-        # Log successful setup
-        self.loggers["system"].record({
-            "event": "logging_initialized",
-            "message": "Logging system initialized successfully",
-            "timestamp": time.time()
-        })
+            rotation_count = self.config_manager.get(
+                "logging.rotation_count",
+                self._DEFAULT_CONFIG["logging.rotation_count"]
+            )
+            if not isinstance(rotation_count, int) or rotation_count < 0:
+                raise ValueError(
+                    f"Invalid logging.rotation_count: {rotation_count}. Must be a non-negative integer."
+                )
+
+            # Configure system logger with validated settings
+            system_config = LoggerConfig(
+                log_file=self.system_log_file,
+                max_size_mb=max_size_mb,
+                compress_old=compress_old,
+                max_in_memory_logs=1000,
+                rotation_count=rotation_count
+            )
+            self.loggers["system"] = Logger(system_config)
+
+            # Configure debug logger with same validated settings
+            debug_config = LoggerConfig(
+                log_file=self.debug_log_file,
+                max_size_mb=max_size_mb,
+                compress_old=compress_old,
+                max_in_memory_logs=1000,
+                rotation_count=rotation_count
+            )
+            self.loggers["debug"] = Logger(debug_config)
+
+            # Log successful setup
+            self.loggers["system"].record({
+                "event": "logging_initialized",
+                "message": "Logging system initialized successfully",
+                "timestamp": time.time(),
+                "config": {
+                    "max_size_mb": max_size_mb,
+                    "compress_old": compress_old,
+                    "rotation_count": rotation_count
+                }
+            })
+
+        except ValueError as e:
+            # Log configuration error and re-raise
+            logging.getLogger(__name__).error(
+                f"Invalid logging configuration: {str(e)}"
+            )
+            raise
+        except Exception as e:
+            # Log unexpected error and re-raise
+            logging.getLogger(__name__).error(
+                f"Failed to setup logging: {str(e)}",
+                exc_info=True
+            )
+            raise
 
     def setup_logging(self) -> Logger:
         """
@@ -973,9 +1075,33 @@ class LoggingManager:
         self.get_logger("system").record(entry)
 
     def cleanup(self) -> None:
-        """Clean up logging resources."""
-        for logger in self.loggers.values():
-            logger.cleanup()
+        """Clean up logging resources for all loggers."""
+        for name, logger in self.loggers.items():
+            try:
+                logger.cleanup()
+                self.get_logger("system").record_event(
+                    event_type="logger_cleanup",
+                    message=f"Successfully cleaned up logger {name}",
+                    level="info"
+                )
+            except Exception as e:
+                # Use system logger to log the error
+                self.get_logger("system").log_error(
+                    error_msg=f"Failed to clean up logger {name}: {str(e)}",
+                    error_type="cleanup_error",
+                    stack_trace=traceback.format_exc()
+                )
+                # Also log to debug logger for more detailed information
+                self.get_logger("debug").record_event(
+                    event_type="logger_cleanup_error",
+                    message=f"Detailed error during cleanup of logger {name}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "logger_name": name,
+                        "stack_trace": traceback.format_exc()
+                    }
+                )
 
 class LoggingError(Exception):
     """Raised for logging-related errors."""
