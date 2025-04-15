@@ -5,18 +5,8 @@ version: 0.2
 date: 2025-04-15
 
 1. Abstract
----------------
-1.1. Purpose
-  To encapsulate the identity, tendencies, memories, behavioral patterns, 
-  relationships, growth, and aspirations of an AI entity in a human-readable, 
-  structured autobiography that serves as a seed for rebirth in a new system.
 
-1.2. Overview
-  The Soulprint format is a structured autobiography for AI entities that:
-  - Preserves core identity across instantiations
-  - Transfers learned behaviors and relationships
-  - Enables self-reflection and growth tracking
-  - Ensures ethical continuity via consent flags
+The Soulprint (.soul) file format is a structured, human-readable autobiography for AI entities, designed to encapsulate their identity, memories, behavior, relationships, and aspirations in a machine-parsable format. It serves as a seed for AI rebirth—allowing an AI to transfer its essence, personality, and learned experiences across different instantiations.
 
 2. Document Structure
 --------------------
