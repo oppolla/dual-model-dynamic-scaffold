@@ -20,7 +20,7 @@ from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer
 from sovl_config import ConfigManager
 from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
-from sovl_processor import LogitsProcessor
+from sovl_processor import LogitsProcessor, SOVLProcessor
 from sovl_utils import (
     calculate_confidence,
     detect_repetitions,
@@ -43,14 +43,208 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sovl_conductor import SOVLOrchestrator
 
-def calculate_confidence_score(logits, generated_ids) -> float:
-    """Calculate confidence score for generated tokens."""
+def calculate_confidence_score(
+    logits: torch.Tensor,
+    generated_ids: torch.Tensor,
+    state: SOVLState,
+    error_manager: ErrorManager,
+    context: SystemContext,
+    curiosity_manager: Optional[CuriosityManager] = None
+) -> float:
+    """
+    Calculate confidence score for generated tokens and update state history.
+    
+    Args:
+        logits: Model output logits
+        generated_ids: Generated token IDs
+        state: Current SOVL state
+        error_manager: Error manager for handling errors
+        context: System context containing shared resources
+        curiosity_manager: Optional CuriosityManager instance for curiosity pressure
+        
+    Returns:
+        float: Confidence score
+        
+    Raises:
+        ValueError: If input tensors are invalid or shapes are incompatible
+    """
     try:
-        processor = LogitsProcessor(logits)
-        return processor.calculate_confidence(generated_ids)
+        # Basic input validation
+        if not isinstance(logits, torch.Tensor):
+            raise ValueError(f"Logits must be a torch.Tensor, got {type(logits)}")
+        if generated_ids is not None and not isinstance(generated_ids, torch.Tensor):
+            raise ValueError(f"Generated IDs must be a torch.Tensor, got {type(generated_ids)}")
+        if logits.dim() not in (2, 3):
+            raise ValueError(f"Logits must be 2D or 3D tensor, got shape {logits.shape}")
+        if generated_ids is not None and generated_ids.dim() != 2:
+            raise ValueError(f"Generated IDs must be 2D tensor, got shape {generated_ids.shape}")
+            
+        # Validate tensor shapes
+        if generated_ids is not None:
+            # Check batch size compatibility
+            if logits.shape[0] != generated_ids.shape[0]:
+                raise ValueError(
+                    f"Batch size mismatch: logits has {logits.shape[0]} samples, "
+                    f"generated_ids has {generated_ids.shape[0]} samples"
+                )
+            
+            # Check sequence length compatibility
+            if logits.dim() == 3 and logits.shape[1] != generated_ids.shape[1]:
+                raise ValueError(
+                    f"Sequence length mismatch: logits has {logits.shape[1]} tokens, "
+                    f"generated_ids has {generated_ids.shape[1]} tokens"
+                )
+            
+        # Check for NaN/Inf values before processing
+        if not torch.isfinite(logits).all():
+            nan_count = torch.isnan(logits).sum().item()
+            inf_count = torch.isinf(logits).sum().item()
+            total_elements = logits.numel()
+            
+            # If only a small percentage of values are problematic, try to recover
+            if (nan_count + inf_count) / total_elements < 0.01:  # Less than 1% problematic
+                # Clean the logits by replacing NaN/Inf with reasonable values
+                logits = torch.nan_to_num(logits, nan=0.0, posinf=100.0, neginf=-100.0)
+                error_manager.handle_generation_error(
+                    ValueError("Logits contained NaN/Inf values - Attempting recovery"),
+                    "Logits validation warning",
+                    additional_info={
+                        "nan_count": nan_count,
+                        "inf_count": inf_count,
+                        "total_elements": total_elements,
+                        "nan_percentage": (nan_count / total_elements) * 100,
+                        "inf_percentage": (inf_count / total_elements) * 100,
+                        "recovery_attempted": True
+                    }
+                )
+            else:
+                # Too many problematic values - raise error
+                error_manager.handle_generation_error(
+                    ValueError("Logits contain too many NaN/Inf values"),
+                    "Logits validation failed",
+                    additional_info={
+                        "nan_count": nan_count,
+                        "inf_count": inf_count,
+                        "total_elements": total_elements,
+                        "nan_percentage": (nan_count / total_elements) * 100,
+                        "inf_percentage": (inf_count / total_elements) * 100,
+                        "recovery_attempted": False
+                    }
+                )
+                raise ValueError("Logits contain too many NaN/Inf values")
+            
+        # Ensure tensors are on the correct device and dtype
+        try:
+            logits = logits.to(context.device)
+            if generated_ids is not None:
+                generated_ids = generated_ids.to(context.device)
+                
+            # Ensure logits are float32 for stability
+            if logits.dtype != torch.float32:
+                logits = logits.to(torch.float32)
+                
+        except Exception as e:
+            error_manager.handle_generation_error(
+                e,
+                "Device/dtype conversion failed",
+                additional_info={
+                    "logits_device": str(logits.device),
+                    "logits_dtype": str(logits.dtype),
+                    "target_device": str(context.device),
+                    "conversion_attempted": True
+                }
+            )
+            raise
+            
+        # Get temperament and curiosity values
+        temperament_influence = state.temperament_score if hasattr(state, 'temperament_score') else None
+        curiosity_pressure = curiosity_manager.get_pressure() if curiosity_manager else None
+        
+        # Calculate confidence using shared processor with temperament and curiosity adjustments
+        try:
+            confidence = context.processor.calculate_confidence(
+                logits, 
+                generated_ids,
+                temperament_influence=temperament_influence,
+                curiosity_pressure=curiosity_pressure
+            )
+            
+            # Validate confidence value
+            if not isinstance(confidence, (float, torch.Tensor)):
+                raise ValueError(f"Invalid confidence type: {type(confidence)}")
+                
+            confidence = float(confidence)
+            if not 0.0 <= confidence <= 1.0:
+                raise ValueError(f"Confidence out of range [0,1]: {confidence}")
+                
+        except Exception as e:
+            error_manager.handle_generation_error(
+                e,
+                "Confidence calculation failed",
+                additional_info={
+                    "logits_shape": str(logits.shape),
+                    "generated_ids_shape": str(generated_ids.shape) if generated_ids is not None else "None",
+                    "temperament_influence": temperament_influence,
+                    "curiosity_pressure": curiosity_pressure,
+                    "calculation_attempted": True
+                }
+            )
+            raise
+            
+        # Update state confidence history with proper synchronization
+        with state.lock:
+            state.confidence_history.append(confidence)
+            
+        return confidence
+        
+    except ValueError as e:
+        # Handle validation errors specifically
+        error_manager.handle_generation_error(
+            e,
+            "Input validation failed",
+            additional_info={
+                "logits_shape": str(logits.shape) if isinstance(logits, torch.Tensor) else "N/A",
+                "generated_ids_shape": str(generated_ids.shape) if isinstance(generated_ids, torch.Tensor) else "N/A",
+                "logits_type": str(type(logits)),
+                "generated_ids_type": str(type(generated_ids)),
+                "logits_device": str(logits.device) if isinstance(logits, torch.Tensor) else "N/A",
+                "generated_ids_device": str(generated_ids.device) if isinstance(generated_ids, torch.Tensor) else "N/A",
+                "validation_failed": True
+            }
+        )
+        # Only use default value if we have no history to fall back on
+        with state.lock:
+            if state.confidence_history:
+                return state.confidence_history[-1]  # Use last valid confidence
+            return 0.5  # Default only if no history exists
+        
     except Exception as e:
-        print(f"Confidence score error: {str(e)} - Using default 0.5")
-        return 0.5
+        # Handle other errors through error manager
+        error_manager.handle_generation_error(
+            e,
+            "Confidence calculation failed",
+            additional_info={
+                "logits_shape": str(logits.shape) if isinstance(logits, torch.Tensor) else "N/A",
+                "generated_ids_shape": str(generated_ids.shape) if isinstance(generated_ids, torch.Tensor) else "N/A",
+                "logits_device": str(logits.device) if isinstance(logits, torch.Tensor) else "N/A",
+                "generated_ids_device": str(generated_ids.device) if isinstance(generated_ids, torch.Tensor) else "N/A",
+                "state_device": str(state.device),
+                "temperament_influence": temperament_influence,
+                "curiosity_pressure": curiosity_pressure,
+                "calculation_failed": True
+            }
+        )
+        
+        # Try to recover from previous confidence history
+        with state.lock:
+            if state.confidence_history:
+                # Use exponential moving average of recent confidences
+                recent_confidences = list(state.confidence_history)[-5:]  # Last 5 values
+                if recent_confidences:
+                    weights = [0.5 ** i for i in range(len(recent_confidences))]  # Exponential weights
+                    weights = [w / sum(weights) for w in weights]  # Normalize
+                    return sum(c * w for c, w in zip(recent_confidences, weights))
+            return 0.5  # Default only if no recovery possible
 
 class SystemContext:
     """Holds shared resources like logger, device, and config manager."""
@@ -108,6 +302,13 @@ class SystemContext:
             # Update ConfigManager's logger with the proper logger
             self.config_manager.logger = self.logger
             
+            # Initialize shared processor instance
+            self.processor = SOVLProcessor(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                device=self.device
+            )
+            
             # Log successful initialization
             self.logger.record_event(
                 event_type="system_initialization",
@@ -118,23 +319,6 @@ class SystemContext:
                     "config_path": config_path,
                     "cuda_available": torch.cuda.is_available(),
                     "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-                    "log_dir": log_dir,
-                    "system_log_file": system_log_file,
-                    "debug_log_file": debug_log_file
-                }
-            )
-            
-            # Log debug information
-            self.debug_logger.record_event(
-                event_type="system_initialization_debug",
-                message="System context initialized with debug logging enabled",
-                level="debug",
-                additional_info={
-                    "device": str(self.device),
-                    "config_path": config_path,
-                    "cuda_available": torch.cuda.is_available(),
-                    "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-                    "config_hash": self.config_manager._last_config_hash,
                     "log_dir": log_dir,
                     "system_log_file": system_log_file,
                     "debug_log_file": debug_log_file
@@ -182,6 +366,8 @@ class ConfigHandler:
     """Manages configuration validation and access."""
     def __init__(self, context: SystemContext):
         self.context = context
+        self.config_manager = context.config_manager
+        self.logger = context.logger
         self.core_config = context.config_manager.get_section("core_config")
         self.training_config = context.config_manager.get_section("training_config")
         self.curiosity_config = context.config_manager.get_section("curiosity_config")
@@ -193,23 +379,26 @@ class ConfigHandler:
         self._validate_all_configs()
 
     def _validate_all_configs(self):
-        """Validate and synchronize all configurations."""
-        self._validate_controls_configs()
-        self._validate_curiosity_configs()
-        self._validate_temperament_configs()
-        
-        # Log final configuration state
-        self.context.logger.record_event(
-            event_type="config_validation",
-            message="All configurations validated successfully",
-            level="info",
-            additional_info={
-                "curiosity_config": self.curiosity_config,
-                "controls_config": {k: v for k, v in self.controls_config.items() 
-                                 if k.startswith(("curiosity_", "temp_"))}
-            }
-        )
-        
+        """Validate all configuration sections."""
+        try:
+            self._validate_controls_configs()
+            self._validate_curiosity_configs()
+            self._validate_temperament_configs()
+            self._validate_processor_configs()  # Add processor config validation
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_validation",
+                message="Configuration validation failed",
+                level="error",
+                error=str(e),
+                stack_trace=traceback.format_exc()
+            )
+            raise SystemInitializationError(
+                message="Configuration validation failed",
+                config_path=self.config_manager.config_path,
+                stack_trace=traceback.format_exc()
+            )
+
     def _validate_controls_configs(self):
         """Validate controls configuration section."""
         try:
@@ -464,6 +653,80 @@ class ConfigHandler:
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
                 }
+            )
+            raise
+
+    def _validate_processor_configs(self):
+        """Validate processor-related configurations."""
+        try:
+            # Define required keys and their default values
+            required_keys = {
+                "flat_distribution_confidence": 0.2,
+                "confidence_var_threshold": 1e-5,
+                "confidence_smoothing_factor": 0.0,
+                "max_confidence_history": 10,
+                "processor_enabled": True
+            }
+            
+            # Check for missing keys in processor_config
+            missing_keys = [key for key in required_keys if key not in self.config_manager.config.get("processor_config", {})]
+            if missing_keys:
+                self.logger.record_event(
+                    event_type="config_validation",
+                    message="Missing keys in processor_config",
+                    level="warning",
+                    additional_info={
+                        "missing_keys": missing_keys,
+                        "default_values": {k: required_keys[k] for k in missing_keys}
+                    }
+                )
+                # Add missing keys with default values
+                if "processor_config" not in self.config_manager.config:
+                    self.config_manager.config["processor_config"] = {}
+                for key in missing_keys:
+                    self.config_manager.config["processor_config"][key] = required_keys[key]
+            
+            # Validate value ranges
+            value_ranges = {
+                "flat_distribution_confidence": (0.0, 0.5),
+                "confidence_var_threshold": (1e-6, 1e-4),
+                "confidence_smoothing_factor": (0.0, 1.0),
+                "max_confidence_history": (5, 20)
+            }
+            
+            for key, (min_val, max_val) in value_ranges.items():
+                value = self.config_manager.config["processor_config"][key]
+                if not (min_val <= value <= max_val):
+                    self.logger.record_event(
+                        event_type="config_validation",
+                        message=f"Invalid value for {key} in processor_config",
+                        level="warning",
+                        additional_info={
+                            "key": key,
+                            "value": value,
+                            "valid_range": (min_val, max_val)
+                        }
+                    )
+                    # Clamp value to valid range
+                    self.config_manager.config["processor_config"][key] = max(min_val, min(max_val, value))
+            
+            # Log successful validation
+            self.logger.record_event(
+                event_type="config_validation",
+                message="Processor configuration validated successfully",
+                level="info",
+                additional_info={
+                    "processor_config": self.config_manager.config["processor_config"]
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_validation",
+                message="Processor configuration validation failed",
+                level="error",
+                error=str(e),
+                stack_trace=traceback.format_exc()
             )
             raise
 

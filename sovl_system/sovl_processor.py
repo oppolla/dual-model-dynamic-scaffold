@@ -8,6 +8,7 @@ import traceback
 from dataclasses import dataclass
 from sovl_utils import NumericalGuard, safe_divide
 from sovl_logger import Logger
+from sovl_config import ConfigManager
 
 
 class LogitsError(Exception):
@@ -84,6 +85,9 @@ class TensorValidator:
     def __init__(self, device: torch.device, logger: Logger):
         self.device = device
         self.logger = logger
+        self._valid_dtypes = (torch.float16, torch.float32, torch.float64)
+        self._valid_dims = (2, 3)
+        self._clamp_range = (-100.0, 100.0)  # Reasonable range for logits
 
     def validate_logits(self, logits: Union[List[torch.Tensor], torch.Tensor]) -> torch.Tensor:
         """
@@ -99,22 +103,60 @@ class TensorValidator:
             LogitsError: If validation fails.
         """
         try:
+            # Fast path for common case: single tensor on correct device
+            if isinstance(logits, torch.Tensor) and logits.device == self.device:
+                if logits.dim() in self._valid_dims and logits.dtype in self._valid_dtypes:
+                    return self._handle_nan_inf(logits)
+                
+            # Handle list of tensors
             if isinstance(logits, list):
                 logits = torch.stack(logits)
+                
+            # Type check
             if not isinstance(logits, torch.Tensor):
                 raise LogitsError(f"Expected tensor/list, got {type(logits)}")
-            if logits.dim() == 2:
-                logits = logits.unsqueeze(0)
-            elif logits.dim() != 3:
+                
+            # Dimension check
+            if logits.dim() not in self._valid_dims:
                 raise LogitsError(f"Logits must be 2D or 3D, got {logits.dim()}D")
-            if not torch.isfinite(logits).all():
-                raise LogitsError("Logits contain NaN or inf values")
-            if logits.dtype not in (torch.float16, torch.float32, torch.float64):
+                
+            # Dtype check
+            if logits.dtype not in self._valid_dtypes:
                 raise LogitsError(f"Logits must be float type, got {logits.dtype}")
-            return logits.to(self.device)
+                
+            # Move to device and handle NaN/Inf
+            logits = logits.to(self.device)
+            return self._handle_nan_inf(logits)
+            
         except Exception as e:
             self._log_error("Logits validation failed", str(e), logits=logits)
             raise LogitsError(f"Logits validation failed: {str(e)}")
+
+    def _handle_nan_inf(self, logits: torch.Tensor) -> torch.Tensor:
+        """Handle NaN and Inf values in logits with logging and fallback strategy."""
+        if not torch.isfinite(logits).all():
+            # Count problematic values
+            nan_count = torch.isnan(logits).sum().item()
+            inf_count = torch.isinf(logits).sum().item()
+            total_elements = logits.numel()
+            
+            # Log the issue
+            self.logger.record({
+                "event": EventType.WARNING.value,
+                "message": "Logits contain NaN/Inf values",
+                "timestamp": time.time(),
+                "nan_count": nan_count,
+                "inf_count": inf_count,
+                "total_elements": total_elements,
+                "nan_percentage": (nan_count / total_elements) * 100,
+                "inf_percentage": (inf_count / total_elements) * 100
+            })
+            
+            # Apply fallback strategy: clamp values and replace NaN with 0
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=self._clamp_range[1], neginf=self._clamp_range[0])
+            logits = torch.clamp(logits, *self._clamp_range)
+            
+        return logits
 
     def validate_generated_ids(self, generated_ids: Optional[torch.Tensor], logits: torch.Tensor) -> Optional[torch.Tensor]:
         """
@@ -132,12 +174,25 @@ class TensorValidator:
         """
         if generated_ids is None:
             return None
+            
         try:
+            # Fast path for common case: tensor on correct device with matching shape
+            if (isinstance(generated_ids, torch.Tensor) and 
+                generated_ids.device == self.device and 
+                generated_ids.dtype == torch.long and
+                generated_ids.dim() == 2 and 
+                generated_ids.shape[:2] == logits.shape[:2]):
+                return generated_ids
+                
+            # Basic validation
             if not isinstance(generated_ids, torch.Tensor) or generated_ids.dtype != torch.long:
                 raise LogitsError("Generated IDs must be LongTensor")
+                
             if generated_ids.dim() != 2 or generated_ids.shape[:2] != logits.shape[:2]:
                 raise LogitsError("Generated IDs shape mismatch with logits")
+                
             return generated_ids.to(self.device)
+            
         except Exception as e:
             self._log_error(
                 "Generated IDs validation failed", str(e),
@@ -168,24 +223,110 @@ class SOVLProcessor:
     MIN_CONFIDENCE: float = 0.0
     PADDING_ID: int = -100
 
-    def __init__(self, config: ProcessorConfig, logger: Logger, device: torch.device):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         """
         Initialize the processor.
 
         Args:
-            config: Configuration instance.
+            config_manager: Configuration manager instance.
             logger: Logger for event recording.
             device: Device for tensor operations.
         """
-        self.config = config
+        self.config_manager = config_manager
         self.logger = logger
         self.device = device
-        self._confidence_history: deque = deque(maxlen=config.max_confidence_history)
+        
+        # Load processor configuration
+        processor_config = self.config_manager.get_section("processor_config", {})
+        self.config = ProcessorConfig(
+            flat_distribution_confidence=processor_config.get("flat_distribution_confidence", 0.2),
+            confidence_var_threshold=processor_config.get("confidence_var_threshold", 1e-5),
+            confidence_smoothing_factor=processor_config.get("confidence_smoothing_factor", 0.0),
+            max_confidence_history=processor_config.get("max_confidence_history", 10)
+        )
+        
+        # Initialize token mapping components
+        self._initialize_token_mapping()
+        
         self._lock = Lock()
         self._validator = TensorValidator(device, logger)
-        self.scaffold_unk_id: Optional[int] = None
-        self.token_map: Dict = {}
         self._log_init()
+
+    def _initialize_token_mapping(self) -> None:
+        """Initialize token mapping components with validation."""
+        try:
+            # Get token mapping configuration
+            token_config = self.config_manager.get_section("token_config", {})
+            
+            # Initialize scaffold_unk_id with validation
+            self.scaffold_unk_id = token_config.get("scaffold_unk_id", 0)
+            if not isinstance(self.scaffold_unk_id, int) or self.scaffold_unk_id < 0:
+                self.logger.record({
+                    "event": EventType.WARNING.value,
+                    "message": f"Invalid scaffold_unk_id: {self.scaffold_unk_id}, using default 0",
+                    "timestamp": time.time()
+                })
+                self.scaffold_unk_id = 0
+            
+            # Initialize token map with validation
+            self.token_map = token_config.get("token_map", {})
+            if not isinstance(self.token_map, dict):
+                self.logger.record({
+                    "event": EventType.WARNING.value,
+                    "message": "Invalid token_map type, using empty dict",
+                    "timestamp": time.time()
+                })
+                self.token_map = {}
+            
+            # Validate token map entries
+            valid_entries = {}
+            for base_id, scaffold_ids in self.token_map.items():
+                try:
+                    # Ensure base_id is a valid integer
+                    base_id = int(base_id)
+                    if base_id < 0:
+                        continue
+                        
+                    # Ensure scaffold_ids is a list of valid integers
+                    if not isinstance(scaffold_ids, (list, tuple)):
+                        continue
+                        
+                    valid_scaffold_ids = []
+                    for sid in scaffold_ids:
+                        try:
+                            sid = int(sid)
+                            if sid >= 0:
+                                valid_scaffold_ids.append(sid)
+                        except (ValueError, TypeError):
+                            continue
+                            
+                    if valid_scaffold_ids:
+                        valid_entries[base_id] = valid_scaffold_ids
+                        
+                except (ValueError, TypeError):
+                    continue
+                    
+            self.token_map = valid_entries
+            
+            # Log initialization
+            self.logger.record({
+                "event": EventType.PROCESSOR_INIT.value,
+                "message": "Token mapping initialized",
+                "timestamp": time.time(),
+                "scaffold_unk_id": self.scaffold_unk_id,
+                "token_map_size": len(self.token_map)
+            })
+            
+        except Exception as e:
+            self.logger.record({
+                "event": EventType.ERROR.value,
+                "message": f"Failed to initialize token mapping: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            # Use safe defaults
+            self.scaffold_unk_id = 0
+            self.token_map = {}
 
     def _log_init(self) -> None:
         """Log initialization event."""
@@ -193,6 +334,10 @@ class SOVLProcessor:
             "event": EventType.PROCESSOR_INIT.value,
             "config": vars(self.config),
             "device": str(self.device),
+            "token_mapping": {
+                "scaffold_unk_id": self.scaffold_unk_id,
+                "token_map_size": len(self.token_map)
+            },
             "timestamp": time.time()
         })
 
@@ -247,7 +392,6 @@ class SOVLProcessor:
         conf = self._apply_temperament(conf, temperament_influence)
         conf = self._apply_curiosity(conf, curiosity_pressure)
         conf = self._smooth_confidence(conf)
-        self._update_history(conf)
 
         self._log_confidence(conf, logits, temperament_influence, curiosity_pressure)
         return conf.squeeze()
@@ -289,18 +433,8 @@ class SOVLProcessor:
 
     def _smooth_confidence(self, conf: torch.Tensor) -> torch.Tensor:
         """Apply confidence smoothing based on history."""
-        if self._confidence_history and self.config.confidence_smoothing_factor > 0:
-            avg_hist_conf = torch.tensor(list(self._confidence_history), device=self.device).mean()
-            conf = (1 - self.config.confidence_smoothing_factor) * conf + \
-                   self.config.confidence_smoothing_factor * avg_hist_conf
+        # Note: Confidence history is now managed by SOVLState
         return conf
-
-    def _update_history(self, conf: torch.Tensor) -> None:
-        """Update confidence history."""
-        if conf.dim() == 0:
-            self._confidence_history.append(float(conf.item()))
-        else:
-            self._confidence_history.extend(conf.tolist())
 
     def _log_confidence(
         self,
@@ -351,10 +485,12 @@ class SOVLProcessor:
             with self._lock:
                 old_config = vars(self.config).copy()
                 self.config.update(**kwargs)
-                if "max_confidence_history" in kwargs:
-                    self._confidence_history = deque(
-                        self._confidence_history, maxlen=self.config.max_confidence_history
-                    )
+                
+                # Update config in config_manager
+                processor_config = self.config_manager.get_section("processor_config", {})
+                processor_config.update(kwargs)
+                self.config_manager.update_section("processor_config", processor_config)
+                
                 self.logger.record({
                     "event": EventType.PROCESSOR_TUNE.value,
                     "old_config": old_config,
@@ -374,7 +510,7 @@ class SOVLProcessor:
     def get_state(self) -> Dict[str, Any]:
         """Export processor state."""
         with self._lock:
-            return {"confidence_history": list(self._confidence_history)}
+            return {}
 
     def load_state(self, state: Dict[str, Any]) -> None:
         """
@@ -385,10 +521,6 @@ class SOVLProcessor:
         """
         try:
             with self._lock:
-                self._confidence_history = deque(
-                    state.get("confidence_history", []),
-                    maxlen=self.config.max_confidence_history
-                )
                 self.logger.record({
                     "event": EventType.PROCESSOR_LOAD_STATE.value,
                     "state": state,
@@ -406,116 +538,7 @@ class SOVLProcessor:
     def reset(self) -> None:
         """Reset processor state."""
         with self._lock:
-            self._confidence_history.clear()
             self.logger.record({
                 "event": EventType.PROCESSOR_RESET.value,
-                "timestamp": time.time()
-            })
-
-    # Token Mapping Methods
-    def validate_and_map_tokens(self, base_ids: torch.Tensor, max_expanded_len: int, max_seq_length: int) -> torch.Tensor:
-        """
-        Map and validate token IDs.
-
-        Args:
-            base_ids: Input token IDs (batch, seq_len).
-            max_expanded_len: Maximum expanded length.
-            max_seq_length: Maximum sequence length.
-
-        Returns:
-            Mapped token IDs tensor.
-        """
-        batch_size, seq_len = base_ids.shape
-        mapped_ids = torch.full(
-            (batch_size, max_expanded_len),
-            self.scaffold_unk_id,
-            dtype=torch.long,
-            device=self.device
-        )
-
-        for batch_idx in range(batch_size):
-            position = 0
-            truncated = False
-
-            for base_id in base_ids[batch_idx]:
-                if base_id == self.PADDING_ID:
-                    continue
-
-                mapped_tokens = self._get_mapped_tokens(base_id)
-                if position + len(mapped_tokens) > max_expanded_len:
-                    truncated = True
-                    break
-
-                for token in mapped_tokens:
-                    if position >= max_expanded_len:
-                        truncated = True
-                        break
-                    mapped_ids[batch_idx, position] = token
-                    position += 1
-
-                if truncated:
-                    break
-
-            if truncated:
-                self.logger.record({
-                    "event": EventType.WARNING.value,
-                    "warning": f"Token mapping truncated to {max_expanded_len}",
-                    "original_length": seq_len,
-                    "allowed_length": max_expanded_len,
-                    "timestamp": time.time()
-                })
-
-        return mapped_ids[:, :min(max_expanded_len, max_seq_length)]
-
-    def _get_mapped_tokens(self, base_id: torch.Tensor) -> List[int]:
-        """Get mapped tokens for a base ID with error handling."""
-        try:
-            mapped_entry = self.token_map.get(int(base_id.item()), [self.scaffold_unk_id])
-            return mapped_entry['ids'] if isinstance(mapped_entry, dict) else mapped_entry
-        except Exception as e:
-            self.logger.record({
-                "event": EventType.WARNING.value,
-                "warning": f"Token mapping error for ID {base_id}: {str(e)}",
-                "timestamp": time.time()
-            })
-            return [self.scaffold_unk_id]
-
-    def set_token_map(self, token_map: Dict, scaffold_unk_id: int) -> None:
-        """
-        Set token mapping and unknown token ID.
-
-        Args:
-            token_map: Mapping of base to scaffold tokens.
-            scaffold_unk_id: Unknown token ID.
-        """
-        with self._lock:
-            self.token_map = token_map
-            self.scaffold_unk_id = scaffold_unk_id
-
-    def update_token_map_memory(self, prompt: str, confidence: float, tokenizer: Any, memory_decay_rate: float = 0.95) -> None:
-        """
-        Update token map weights.
-
-        Args:
-            prompt: Input prompt text.
-            confidence: Confidence score.
-            tokenizer: Tokenizer instance.
-            memory_decay_rate: Memory decay rate.
-        """
-        with self._lock:
-            tokens = tokenizer.encode(prompt, add_special_tokens=False)
-            for token_id in tokens:
-                if token_id in self.token_map:
-                    self.token_map[token_id]['weight'] = min(
-                        self.token_map[token_id]['weight'] + confidence * 0.1,
-                        2.0
-                    )
-            for token_id in self.token_map:
-                self.token_map[token_id]['weight'] *= memory_decay_rate
-
-            self.logger.record({
-                "event": EventType.TOKEN_MAP_UPDATE.value,
-                "prompt_length": len(prompt),
-                "confidence": confidence,
                 "timestamp": time.time()
             })
