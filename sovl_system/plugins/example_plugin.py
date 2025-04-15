@@ -1,5 +1,5 @@
 from typing import Dict, Any, Optional
-from sovl_graft import PluginInterface, PluginMetadata
+from sovl_grafter import PluginInterface, PluginMetadata
 
 class ExamplePlugin(PluginInterface):
     """Example plugin demonstrating plugin system capabilities."""
