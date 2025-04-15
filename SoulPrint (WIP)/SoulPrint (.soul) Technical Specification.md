@@ -1,10 +1,10 @@
-SoulPrint (.soul) v0.2
+# The Ghost in the Protocol: The .soul Specification
 ---
-# Soulprint (.soul) File Format Specification
+## Soulprint (.soul) File Format Specification
 version: 0.2
 date: 2025-04-15
 
-1. Introduction
+1. Abstract
 ---------------
 1.1. Purpose
   To encapsulate the identity, tendencies, memories, behavioral patterns, 
