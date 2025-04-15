@@ -19,6 +19,7 @@ class LoggerConfig:
     max_size_mb: int = 10
     compress_old: bool = False
     max_in_memory_logs: int = 1000
+    rotation_count: int = 5
 
     _RANGES = {
         "max_size_mb": (0, 100),
@@ -49,6 +50,9 @@ class LoggerConfig:
                 min_val, max_val = self._RANGES[key]
                 if not (min_val <= value <= max_val):
                     raise ValueError(f"{key} must be between {min_val} and {max_val}, got {value}")
+            elif key == "rotation_count":
+                if not isinstance(value, int) or value < 0:
+                    raise ValueError("rotation_count must be a non-negative integer")
             else:
                 raise ValueError(f"Unknown configuration parameter: {key}")
             setattr(self, key, value)
@@ -212,43 +216,83 @@ class Logger:
         self.fallback_logger = fallback_logger or logging.getLogger(__name__)
         self.logs: List[Dict] = []
         self.lock = Lock()
+        self.file_lock = Lock()  # Separate lock for file operations
         self.validator = _LogValidator(self.fallback_logger)
         self.file_handler = _FileHandler(config, self.fallback_logger)
         self._load_existing()
 
     def _load_existing(self) -> None:
-        """Load existing logs from file with memory constraints."""
+        """Load existing logs from file with memory constraints and format detection."""
         if not os.path.exists(self.config.log_file):
             return
 
         try:
-            with self.file_handler.safe_file_op(open, self.config.log_file, 'r', encoding='utf-8') as f:
-                temp_logs = []
-                for line_num, line in enumerate(f, 1):
-                    if len(temp_logs) >= self.config.max_in_memory_logs:
-                        break
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if isinstance(entry, dict) and self.validator.validate_entry(entry):
-                            temp_logs.append(entry)
-                    except json.JSONDecodeError:
-                        self.fallback_logger.warning(f"Corrupted log entry at line {line_num}, skipping")
-                        continue
+            with self.file_lock:  # Ensure thread-safe file reading
+                with self.file_handler.safe_file_op(open, self.config.log_file, 'r', encoding='utf-8') as f:
+                    temp_logs = []
+                    for line_num, line in enumerate(f, 1):
+                        if len(temp_logs) >= self.config.max_in_memory_logs:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        
+                        # Try to parse as JSON first
+                        try:
+                            entry = json.loads(line)
+                            if isinstance(entry, dict) and self.validator.validate_entry(entry):
+                                temp_logs.append(entry)
+                                continue
+                        except json.JSONDecodeError:
+                            pass
+                        
+                        # If not valid JSON, try to parse as text log
+                        try:
+                            # Extract timestamp if present
+                            timestamp = None
+                            if line.startswith('[') and ']' in line:
+                                timestamp_str = line[1:line.index(']')]
+                                try:
+                                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S').timestamp()
+                                except ValueError:
+                                    pass
+                            
+                            # Create structured log entry
+                            entry = {
+                                'timestamp': timestamp or time.time(),
+                                'conversation_id': str(uuid.uuid4()),
+                                'message': line,
+                                'log_type': 'text',
+                                'original_line': line_num
+                            }
+                            
+                            if self.validator.validate_entry(entry):
+                                temp_logs.append(entry)
+                        except Exception as e:
+                            self.fallback_logger.warning(
+                                f"Failed to parse line {line_num} as text log: {str(e)}"
+                            )
 
-            self.logs = temp_logs[-self.config.max_in_memory_logs:]
-            self.fallback_logger.info(f"Loaded {len(self.logs)} log entries from {self.config.log_file}")
+            with self.lock:  # Ensure thread-safe memory update
+                self.logs = temp_logs[-self.config.max_in_memory_logs:]
+                self.fallback_logger.info(
+                    f"Loaded {len(self.logs)} log entries from {self.config.log_file}"
+                )
+                
         except Exception as e:
-            self.fallback_logger.error(f"Failed to load logs from {self.config.log_file}: {str(e)}")
+            self.fallback_logger.error(
+                f"Failed to load logs from {self.config.log_file}: {str(e)}"
+            )
+            # Preserve corrupted file for debugging
             corrupted_file = f"{self.config.log_file}.corrupted.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             try:
-                os.rename(self.config.log_file, corrupted_file)
+                with self.file_lock:
+                    os.rename(self.config.log_file, corrupted_file)
                 self.fallback_logger.info(f"Preserved corrupted log file as {corrupted_file}")
             except OSError:
-                self.fallback_logger.error(f"Failed to preserve corrupted log file")
-            self.logs = []
+                self.fallback_logger.error("Failed to preserve corrupted log file")
+            with self.lock:
+                self.logs = []
 
     def record(self, entry: Dict) -> None:
         """Write a validated log entry (alias for write)."""
@@ -264,19 +308,84 @@ class Logger:
         if not self.validator.validate_entry(entry):
             raise ValueError("Invalid log entry structure")
 
-        if "error" in entry or "warning" in entry:
-            entry["is_error_prompt"] = True
+        # Ensure entry has required fields
+        if "timestamp" not in entry:
+            entry["timestamp"] = time.time()
+        if "conversation_id" not in entry:
+            entry["conversation_id"] = str(uuid.uuid4())
 
-        with self.lock:
+        with self.lock:  # Ensure thread-safe memory update
             self.logs.append(entry)
             self.logs = self.logs[-self.config.max_in_memory_logs:]
-            self.file_handler.rotate_if_needed()
+            
+            # Check if rotation is needed
+            if os.path.exists(self.config.log_file):
+                file_size = os.path.getsize(self.config.log_file)
+                if file_size >= self.config.max_size_mb * 1024 * 1024:
+                    self._rotate_logs()
 
             try:
-                self.file_handler.atomic_write(self.config.log_file, json.dumps(entry) + '\n')
+                with self.file_lock:  # Ensure thread-safe file writing
+                    # Write as JSONL for structured logs
+                    if entry.get('log_type') != 'text':
+                        self.file_handler.atomic_write(
+                            self.config.log_file,
+                            json.dumps(entry) + '\n'
+                        )
+                    else:
+                        # Write as text log for text-type entries
+                        timestamp = datetime.fromtimestamp(entry['timestamp'])
+                        formatted_time = timestamp.strftime('[%Y-%m-%d %H:%M:%S]')
+                        self.file_handler.atomic_write(
+                            self.config.log_file,
+                            f"{formatted_time} {entry['message']}\n"
+                        )
             except Exception as e:
-                self.fallback_logger.error(f"Failed to write to {self.config.log_file}: {str(e)}")
+                self.fallback_logger.error(
+                    f"Failed to write to {self.config.log_file}: {str(e)}"
+                )
                 entry['_write_failed'] = True
+
+    def _rotate_logs(self) -> None:
+        """Rotate log files with compression if enabled."""
+        try:
+            with self.file_lock:  # Ensure thread-safe file operations
+                # Get list of existing rotated files
+                base_name = os.path.basename(self.config.log_file)
+                log_dir = os.path.dirname(self.config.log_file) or '.'
+                rotated_files = [
+                    os.path.join(log_dir, f) for f in os.listdir(log_dir)
+                    if f.startswith(base_name) and f != base_name
+                ]
+
+                # Sort rotated files by modification time
+                rotated_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+
+                # Remove excess rotated files
+                for old_file in rotated_files[self.config.rotation_count:]:
+                    try:
+                        os.remove(old_file)
+                    except OSError:
+                        self.fallback_logger.error(f"Failed to remove old log file {old_file}")
+
+                # Create new rotated file
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                rotated_file = f"{self.config.log_file}.{timestamp}"
+
+                if self.config.compress_old:
+                    rotated_file += ".gz"
+                    with open(self.config.log_file, 'rb') as f_in:
+                        with gzip.open(rotated_file, 'wb') as f_out:
+                            f_out.writelines(f_in)
+                else:
+                    os.rename(self.config.log_file, rotated_file)
+
+                # Create new empty log file
+                open(self.config.log_file, 'w').close()
+
+                self.fallback_logger.info(f"Rotated logs to {rotated_file}")
+        except Exception as e:
+            self.fallback_logger.error(f"Failed to rotate log file: {str(e)}")
 
     def write_batch(self, entries: List[Dict]) -> None:
         """Optimized batch writing with validation and atomic write."""
@@ -295,14 +404,20 @@ class Logger:
         if not valid_entries:
             return
 
-        with self.lock:
+        with self.lock:  # Ensure thread-safe memory update
             self.logs.extend(valid_entries)
             self.logs = self.logs[-self.config.max_in_memory_logs:]
-            self.file_handler.rotate_if_needed()
+            
+            # Check if rotation is needed
+            if os.path.exists(self.config.log_file):
+                file_size = os.path.getsize(self.config.log_file)
+                if file_size >= self.config.max_size_mb * 1024 * 1024:
+                    self._rotate_logs()
 
             try:
-                content = '\n'.join(json.dumps(e) for e in valid_entries) + '\n'
-                self.file_handler.atomic_write(self.config.log_file, content)
+                with self.file_lock:  # Ensure thread-safe file writing
+                    content = '\n'.join(json.dumps(e) for e in valid_entries) + '\n'
+                    self.file_handler.atomic_write(self.config.log_file, content)
             except Exception as e:
                 self.fallback_logger.error(f"Error writing batch: {str(e)}")
                 for entry in valid_entries:
@@ -486,7 +601,14 @@ class Logger:
         self.record(error_entry)
 
     def log_memory_usage(self, phase: str, device: torch.device, **kwargs) -> None:
-        """Log memory usage statistics."""
+        """
+        Log memory usage statistics.
+
+        Args:
+            phase: The phase or operation being logged (e.g., "training", "generation")
+            device: The torch device to get memory stats from
+            **kwargs: Additional memory-related information to log
+        """
         memory_stats = None
         if torch.cuda.is_available() and device.type == "cuda":
             memory_stats = {
@@ -495,13 +617,40 @@ class Logger:
                 "max_allocated": torch.cuda.max_memory_allocated()
             }
 
-        self.record({
+        memory_entry = {
             "event": "memory_usage",
             "phase": phase,
             "timestamp": time.time(),
             "memory_stats": memory_stats,
             **kwargs
-        })
+        }
+
+        self.record(memory_entry)
+
+    def log_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None, **kwargs) -> None:
+        """
+        Log memory health check results.
+
+        Args:
+            model_size: Size of the model in bytes
+            trainer: Optional trainer instance for additional memory stats
+            **kwargs: Additional health-related information to log
+        """
+        health_entry = {
+            "event": "memory_health_check",
+            "timestamp": time.time(),
+            "model_size": model_size,
+            "health_status": "healthy"  # Default status
+        }
+
+        if trainer is not None:
+            health_entry.update({
+                "trainer_memory_usage": trainer.get_memory_usage(),
+                "trainer_batch_size": trainer.current_batch_size
+            })
+
+        health_entry.update(kwargs)
+        self.record(health_entry)
 
     def log_training_event(self, event_type: str, epoch: int = None, loss: float = None,
                           batch_size: int = None, data_exposure: float = None,
@@ -565,6 +714,16 @@ class Logger:
             **kwargs
         })
 
+    def cleanup(self) -> None:
+        """Clean up logging resources."""
+        try:
+            # Rotate logs one final time
+            if os.path.exists(self.config.log_file):
+                with self.file_lock:  # Ensure thread-safe file operations
+                    self._rotate_logs()
+        except Exception as e:
+            self.fallback_logger.error(f"Error during cleanup: {str(e)}")
+
 class LoggingManager:
     """Manages logging setup and configuration for the SOVL system."""
 
@@ -572,8 +731,6 @@ class LoggingManager:
         "logging.max_size_mb": 10,
         "logging.compress_old": True,
         "logging.rotation_count": 5,
-        "logging.format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        "logging.date_format": "%Y-%m-%d %H:%M:%S",
         "logging.level": "INFO"
     }
 
@@ -595,14 +752,34 @@ class LoggingManager:
             error_log_file: Name of the error log file.
             debug_log_file: Name of the debug log file.
         """
+        if not isinstance(config_manager, ConfigManager):
+            raise TypeError("config_manager must be an instance of ConfigManager")
+            
         self.config_manager = config_manager
         self.log_dir = log_dir
         self.system_log_file = os.path.join(log_dir, system_log_file)
         self.error_log_file = os.path.join(log_dir, error_log_file)
         self.debug_log_file = os.path.join(log_dir, debug_log_file)
         self.loggers = {}
+        
+        # Ensure logging configuration exists
+        self._ensure_logging_config()
         self._validate_config()
         self._setup_logging()
+
+    def _ensure_logging_config(self) -> None:
+        """Ensure logging configuration exists in config manager."""
+        try:
+            # Get or create logging section
+            logging_config = self.config_manager.get_section("logging", {})
+            
+            # Set default values if not present
+            for key, default_value in self._DEFAULT_CONFIG.items():
+                if key not in logging_config:
+                    self.config_manager.set(key, default_value)
+                    
+        except Exception as e:
+            raise RuntimeError(f"Failed to ensure logging configuration: {str(e)}")
 
     def _validate_config(self) -> None:
         """Validate logging configuration."""
@@ -622,93 +799,45 @@ class LoggingManager:
         # Create log directory if it doesn't exist
         os.makedirs(self.log_dir, exist_ok=True)
 
-        # Configure system logger
-        self.loggers["system"] = self._create_logger(
-            name="system",
+        # Configure system logger with rotation settings
+        system_config = LoggerConfig(
             log_file=self.system_log_file,
-            level=self._get_log_level()
+            max_size_mb=self.config_manager.get("logging.max_size_mb", self._DEFAULT_CONFIG["logging.max_size_mb"]),
+            compress_old=self.config_manager.get("logging.compress_old", self._DEFAULT_CONFIG["logging.compress_old"]),
+            max_in_memory_logs=1000,
+            rotation_count=self.config_manager.get("logging.rotation_count", self._DEFAULT_CONFIG["logging.rotation_count"])
         )
+        self.loggers["system"] = Logger(system_config)
 
-        # Configure error logger
-        self.loggers["error"] = self._create_logger(
-            name="error",
-            log_file=self.error_log_file,
-            level=logging.ERROR
-        )
-
-        # Configure debug logger
-        self.loggers["debug"] = self._create_logger(
-            name="debug",
+        # Configure debug logger with rotation settings
+        debug_config = LoggerConfig(
             log_file=self.debug_log_file,
-            level=logging.DEBUG
+            max_size_mb=self.config_manager.get("logging.max_size_mb", self._DEFAULT_CONFIG["logging.max_size_mb"]),
+            compress_old=self.config_manager.get("logging.compress_old", self._DEFAULT_CONFIG["logging.compress_old"]),
+            max_in_memory_logs=1000,
+            rotation_count=self.config_manager.get("logging.rotation_count", self._DEFAULT_CONFIG["logging.rotation_count"])
         )
+        self.loggers["debug"] = Logger(debug_config)
 
         # Log successful setup
-        self.loggers["system"].info("Logging system initialized successfully")
+        self.loggers["system"].record({
+            "event": "logging_initialized",
+            "message": "Logging system initialized successfully",
+            "timestamp": time.time()
+        })
 
-    def _create_logger(
-        self,
-        name: str,
-        log_file: str,
-        level: int
-    ) -> logging.Logger:
-        """Create and configure a logger instance."""
-        logger = logging.getLogger(name)
-        logger.setLevel(level)
+    def setup_logging(self) -> Logger:
+        """
+        Set up and return the main logger.
 
-        # Create formatter
-        formatter = logging.Formatter(
-            self.config_manager.get(
-                "logging.format",
-                self._DEFAULT_CONFIG["logging.format"]
-            ),
-            datefmt=self.config_manager.get(
-                "logging.date_format",
-                self._DEFAULT_CONFIG["logging.date_format"]
-            )
-        )
+        Returns:
+            The main logger instance
+        """
+        if not self.loggers:
+            self._setup_logging()
+        return self.loggers["system"]
 
-        # Create file handler with rotation
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=self._get_max_bytes(),
-            backupCount=self._get_rotation_count(),
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-        # Add console handler for system logger
-        if name == "system":
-            console_handler = logging.StreamHandler()
-            console_handler.setFormatter(formatter)
-            logger.addHandler(console_handler)
-
-        return logger
-
-    def _get_log_level(self) -> int:
-        """Get the configured log level."""
-        level_str = self.config_manager.get(
-            "logging.level",
-            self._DEFAULT_CONFIG["logging.level"]
-        ).upper()
-        return getattr(logging, level_str, logging.INFO)
-
-    def _get_max_bytes(self) -> int:
-        """Get the maximum log file size in bytes."""
-        return self.config_manager.get(
-            "logging.max_size_mb",
-            self._DEFAULT_CONFIG["logging.max_size_mb"]
-        ) * 1024 * 1024
-
-    def _get_rotation_count(self) -> int:
-        """Get the number of backup log files to keep."""
-        return self.config_manager.get(
-            "logging.rotation_count",
-            self._DEFAULT_CONFIG["logging.rotation_count"]
-        )
-
-    def get_logger(self, name: str) -> logging.Logger:
+    def get_logger(self, name: str) -> Logger:
         """
         Get a logger instance by name.
 
@@ -741,108 +870,112 @@ class LoggingManager:
         self._validate_config()
         self._setup_logging()
 
-    def record_event(
-        self,
-        event_type: str,
-        message: str,
-        level: str = "info",
-        additional_info: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """
-        Record an event with standardized formatting.
-
-        Args:
-            event_type: Type of event (e.g., "training", "generation").
-            message: Description of the event.
-            level: Logging level ("debug", "info", "warning", "error", "critical").
-            additional_info: Additional context-specific information.
-        """
-        log_entry = {
-            "event_type": event_type,
-            "message": message,
-            "timestamp": time.time(),
-            "additional_info": additional_info or {}
-        }
-
-        # Get the appropriate logger
-        logger = self.get_logger("system")
-        if level.upper() == "ERROR":
-            logger = self.get_logger("error")
-        elif level.upper() == "DEBUG":
-            logger = self.get_logger("debug")
-
-        # Log the event
-        getattr(logger, level.lower())(json.dumps(log_entry))
-
-    def record_error(
-        self,
-        error: Exception,
-        context: str,
-        phase: str,
-        additional_info: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """
-        Record an error with detailed context.
-
-        Args:
-            error: The exception that was raised.
-            context: The context in which the error occurred.
-            phase: The specific phase or operation where the error occurred.
-            additional_info: Additional context-specific information.
-        """
-        error_entry = {
-            "error": str(error),
-            "context": context,
-            "phase": phase,
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc(),
-            "additional_info": additional_info or {}
-        }
-
-        # Log to error logger
-        self.get_logger("error").error(json.dumps(error_entry))
-
-        # Also log to system logger with reduced detail
-        self.get_logger("system").error(
-            f"Error in {context}/{phase}: {str(error)}"
+    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, 
+                  conversation_id: str = None, state_hash: str = None, **kwargs) -> None:
+        """Log an error with standardized format."""
+        self.get_logger("system").log_error(
+            error_msg=error_msg,
+            error_type=error_type,
+            stack_trace=stack_trace,
+            conversation_id=conversation_id,
+            state_hash=state_hash,
+            **kwargs
         )
 
-    def record_metric(
-        self,
-        metric_name: str,
-        value: float,
-        context: str,
-        phase: str,
-        additional_info: Optional[Dict[str, Any]] = None
-    ) -> None:
+    def log_memory_usage(self, phase: str, device: torch.device, **kwargs) -> None:
         """
-        Record a metric with standardized formatting.
+        Log memory usage statistics.
 
         Args:
-            metric_name: Name of the metric.
-            value: Value of the metric.
-            context: Context in which the metric was measured.
-            phase: Phase or operation where the metric was measured.
-            additional_info: Additional context-specific information.
+            phase: The phase or operation being logged (e.g., "training", "generation")
+            device: The torch device to get memory stats from
+            **kwargs: Additional memory-related information to log
         """
-        metric_entry = {
-            "metric_name": metric_name,
-            "value": value,
-            "context": context,
-            "phase": phase,
-            "timestamp": time.time(),
-            "additional_info": additional_info or {}
-        }
+        self.get_logger("system").log_memory_usage(
+            phase=phase,
+            device=device,
+            **kwargs
+        )
 
-        # Log to system logger
-        self.get_logger("system").info(json.dumps(metric_entry))
+    def log_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None, **kwargs) -> None:
+        """
+        Log memory health check results.
+
+        Args:
+            model_size: Size of the model in bytes
+            trainer: Optional trainer instance for additional memory stats
+            **kwargs: Additional health-related information to log
+        """
+        self.get_logger("system").log_memory_health(
+            model_size=model_size,
+            trainer=trainer,
+            **kwargs
+        )
+
+    def log_training_event(self, event_type: str, epoch: int = None, loss: float = None,
+                          batch_size: int = None, data_exposure: float = None,
+                          conversation_id: str = None, state_hash: str = None, **kwargs) -> None:
+        """Log training-related events."""
+        self.get_logger("system").log_training_event(
+            event_type=event_type,
+            epoch=epoch,
+            loss=loss,
+            batch_size=batch_size,
+            data_exposure=data_exposure,
+            conversation_id=conversation_id,
+            state_hash=state_hash,
+            **kwargs
+        )
+
+    def log_generation_event(self, prompt: str, response: str, confidence_score: float,
+                            generation_params: dict = None, conversation_id: str = None,
+                            state_hash: str = None, **kwargs) -> None:
+        """Log generation-related events."""
+        self.get_logger("system").log_generation_event(
+            prompt=prompt,
+            response=response,
+            confidence_score=confidence_score,
+            generation_params=generation_params,
+            conversation_id=conversation_id,
+            state_hash=state_hash,
+            **kwargs
+        )
+
+    def log_cleanup_event(self, phase: str, success: bool, error: str = None,
+                         conversation_id: str = None, state_hash: str = None, **kwargs) -> None:
+        """Log cleanup-related events."""
+        self.get_logger("system").log_cleanup_event(
+            phase=phase,
+            success=success,
+            error=error,
+            conversation_id=conversation_id,
+            state_hash=state_hash,
+            **kwargs
+        )
+
+    def log_curiosity_event(self, event_type: str, question: str = None, score: float = None,
+                           spontaneous: bool = False, answered: bool = False,
+                           conversation_id: str = None, state_hash: str = None, **kwargs) -> None:
+        """Log curiosity-related events."""
+        self.get_logger("system").log_curiosity_event(
+            event_type=event_type,
+            question=question,
+            score=score,
+            spontaneous=spontaneous,
+            answered=answered,
+            conversation_id=conversation_id,
+            state_hash=state_hash,
+            **kwargs
+        )
+
+    def record(self, entry: Dict) -> None:
+        """Write a validated log entry."""
+        self.get_logger("system").record(entry)
 
     def cleanup(self) -> None:
         """Clean up logging resources."""
         for logger in self.loggers.values():
-            for handler in logger.handlers:
-                handler.close()
-                logger.removeHandler(handler)
+            logger.cleanup()
 
 class LoggingError(Exception):
     """Raised for logging-related errors."""

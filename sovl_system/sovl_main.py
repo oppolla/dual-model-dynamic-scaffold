@@ -54,16 +54,46 @@ def calculate_confidence_score(logits, generated_ids) -> float:
 class SystemContext:
     """Holds shared resources like logger, device, and config manager."""
     def __init__(self, config_path: str):
+        """
+        Initialize system context with configuration and core components.
+
+        Args:
+            config_path: Path to the configuration file
+        """
+        # Initialize device first
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.logging_manager = LoggingManager(config_path)
-        self.logger, self.error_logger = self.logging_manager.setup_logging()
-        self.config_manager = ConfigManager(config_path)
-        self.logger.record_event(
-            event_type="system_initialization",
-            message="System context initialized",
-            level="info",
-            additional_info={"device": str(self.device)}
-        )
+        
+        try:
+            # Initialize ConfigManager first
+            self.config_manager = ConfigManager(config_path)
+            
+            # Initialize LoggingManager with ConfigManager
+            self.logging_manager = LoggingManager(
+                config_manager=self.config_manager,
+                log_dir="logs",
+                system_log_file="sovl_system.log",
+                error_log_file="sovl_errors.log",
+                debug_log_file="sovl_debug.log"
+            )
+            
+            # Get main logger instance
+            self.logger = self.logging_manager.setup_logging()
+            
+            # Log initialization
+            self.logger.record_event(
+                event_type="system_initialization",
+                message="System context initialized",
+                level="info",
+                additional_info={
+                    "device": str(self.device),
+                    "config_path": config_path
+                }
+            )
+            
+        except Exception as e:
+            # If logging isn't available, print error
+            print(f"Failed to initialize system context: {str(e)}")
+            raise
 
 class ConfigHandler:
     """Manages configuration validation and access."""
@@ -238,7 +268,37 @@ class MemoryMonitor:
         )
 
     def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
-        return self.memory_manager.check_memory_health(model_size, trainer)
+        """
+        Check memory health and log the results.
+
+        Args:
+            model_size: Size of the model in bytes
+            trainer: Optional trainer instance for additional memory stats
+
+        Returns:
+            bool: True if memory health is good, False otherwise
+        """
+        try:
+            # Get memory health status
+            is_healthy = self.memory_manager.check_memory_health(model_size, trainer)
+            
+            # Log memory health check
+            self.context.logger.log_memory_health(
+                model_size=model_size,
+                trainer=trainer,
+                health_status="healthy" if is_healthy else "unhealthy",
+                device=self.context.device
+            )
+            
+            return is_healthy
+        except Exception as e:
+            # Log error if memory check fails
+            self.context.logger.log_error(
+                error_msg=f"Memory health check failed: {str(e)}",
+                error_type="memory_error",
+                stack_trace=traceback.format_exc()
+            )
+            return False
 
 class TemperamentAdjuster:
     """Modulates model behavior based on temperament."""
@@ -567,7 +627,7 @@ class ResponseGenerator:
             scaffold_tokenizer=model_loader.scaffold_tokenizer,
             state=state_tracker.state,
             logger=context.logger,
-            error_logger=context.error_logger,
+            error_logger=context.logger,
             cross_attention_injector=CrossAttentionInjector(context.config_manager, context.logger),
             scaffold_manager=model_loader.scaffold_manager,
             temperament=None,  # Set after TemperamentAdjuster
@@ -632,6 +692,97 @@ class ResponseGenerator:
             })
             raise
 
+class ComponentManager:
+    """Manages initialization and lifecycle of SOVL system components."""
+    def __init__(self, context: SystemContext, state_tracker: StateTracker, error_manager: ErrorManager):
+        self.context = context
+        self.state_tracker = state_tracker
+        self.error_manager = error_manager
+        self._initialized = False
+        self._components = {}
+
+    def initialize(self) -> None:
+        """Initialize all system components in the correct order."""
+        if self._initialized:
+            return
+
+        try:
+            # Initialize core components first
+            self._initialize_core_components()
+            
+            # Initialize specialized components
+            self._initialize_specialized_components()
+            
+            # Initialize plugin manager last
+            self._initialize_plugin_manager()
+            
+            self._initialized = True
+            
+            self.context.logger.record_event(
+                event_type="components_initialized",
+                message="All system components initialized successfully",
+                level="info"
+            )
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Component initialization failed: {str(e)}",
+                error_type="initialization_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+
+    def _initialize_core_components(self) -> None:
+        """Initialize core system components."""
+        # Initialize temperament system
+        self._components['temperament_system'] = TemperamentSystem.create_from_config(
+            self.context.config_manager,
+            self.context.logger,
+            self.context.device
+        )
+        
+        # Initialize generation manager
+        self._components['generation_manager'] = GenerationManager(
+            config_manager=self.context.config_manager,
+            logger=self.context.logger,
+            state=self.state_tracker.state
+        )
+
+    def _initialize_specialized_components(self) -> None:
+        """Initialize specialized system components."""
+        # Initialize training manager
+        self._components['training_manager'] = TrainingManager(
+            context=self.context,
+            config_handler=self.context.config_handler,
+            model_loader=self.context.model_loader,
+            state_tracker=self.state_tracker,
+            error_manager=self.error_manager
+        )
+        
+        # Initialize curiosity engine
+        self._components['curiosity_engine'] = CuriosityEngine(
+            context=self.context,
+            model_loader=self.context.model_loader,
+            state_tracker=self.state_tracker,
+            error_manager=self.error_manager
+        )
+
+    def _initialize_plugin_manager(self) -> None:
+        """Initialize plugin manager."""
+        self._components['plugin_manager'] = PluginManager(
+            config_manager=self.context.config_manager,
+            logger=self.context.logger,
+            state=self.state_tracker.state
+        )
+
+    def get_component(self, name: str) -> Any:
+        """Get a component by name."""
+        if not self._initialized:
+            raise RuntimeError("Components not initialized")
+        if name not in self._components:
+            raise KeyError(f"Component {name} not found")
+        return self._components[name]
+
 class SOVLSystem:
     """Main system class for SOVL."""
     def __init__(self, config_path: str):
@@ -640,16 +791,19 @@ class SOVLSystem:
         self.state_tracker = StateTracker(self.context)
         self.error_manager = ErrorManager(self.context, self.state_tracker)
         
-        # Initialize components with dependency injection
-        self._initialize_components()
-        
-        # Initialize plugin manager
-        self.plugin_manager = PluginManager(
-            config_manager=self.context.config_manager,
-            logger=self.context.logger,
-            state=self.state_tracker.state
+        # Initialize component manager
+        self.component_manager = ComponentManager(
+            context=self.context,
+            state_tracker=self.state_tracker,
+            error_manager=self.error_manager
         )
-        self.plugin_manager.set_system(self)  # Set system reference
+        
+        # Initialize all components
+        self.component_manager.initialize()
+        
+        # Set system reference in plugin manager
+        self.plugin_manager = self.component_manager.get_component('plugin_manager')
+        self.plugin_manager.set_system(self)
         
         self.context.logger.record_event(
             event_type="system_initialization",
@@ -661,36 +815,25 @@ class SOVLSystem:
             }
         )
 
-    def _initialize_components(self):
-        """Initialize system components with proper dependency injection."""
-        # Initialize temperament system
-        self.temperament_system = TemperamentSystem.create_from_config(
-            self.context.config_manager,
-            self.context.logger,
-            self.context.device
-        )
-        
-        # Initialize other components with proper dependencies
-        self.generation_manager = GenerationManager(
-            config_manager=self.context.config_manager,
-            logger=self.context.logger,
-            state=self.state_tracker.state
-        )
-        
-        self.training_manager = TrainingManager(
-            context=self.context,
-            config_handler=self.context.config_handler,
-            model_loader=self.context.model_loader,
-            state_tracker=self.state_tracker,
-            error_manager=self.error_manager
-        )
-        
-        self.curiosity_engine = CuriosityEngine(
-            context=self.context,
-            model_loader=self.context.model_loader,
-            state_tracker=self.state_tracker,
-            error_manager=self.error_manager
-        )
+    @property
+    def generation_manager(self) -> GenerationManager:
+        """Get generation manager instance."""
+        return self.component_manager.get_component('generation_manager')
+
+    @property
+    def training_manager(self) -> TrainingManager:
+        """Get training manager instance."""
+        return self.component_manager.get_component('training_manager')
+
+    @property
+    def curiosity_engine(self) -> CuriosityEngine:
+        """Get curiosity engine instance."""
+        return self.component_manager.get_component('curiosity_engine')
+
+    @property
+    def temperament_system(self) -> TemperamentSystem:
+        """Get temperament system instance."""
+        return self.component_manager.get_component('temperament_system')
 
     def _update_temperament(self) -> None:
         try:
