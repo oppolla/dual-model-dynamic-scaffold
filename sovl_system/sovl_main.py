@@ -277,48 +277,16 @@ class SOVLSystem:
     def _load_training_data(self) -> None:
         """Load and split training data."""
         try:
-            self.train_data = load_training_data("sovl_seed.jsonl", min_entries=0)
-            if not self.train_data:
-                self.logger.record({
-                    "warning": "No data loaded from sovl_seed.jsonl",
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
-                print("Warning: No data loaded from sovl_seed.jsonl!")
-        except InsufficientDataError as e:
-            self.logger.record({
-                "error": str(e),
-                "timestamp": time.time(),
-                "conversation_id": "init",
-                "is_error_prompt": True
-            })
-            print(f"Data loading error: {e}")
-            self.train_data = []
+            self.train_data, self.valid_data = load_training_data(self.config_manager, self.logger)
         except Exception as e:
             self.logger.record({
-                "error": f"Unexpected error during data loading: {e}",
+                "error": f"Failed to load training data: {str(e)}",
                 "timestamp": time.time(),
                 "conversation_id": "init",
-                "is_error_prompt": True,
                 "stack_trace": traceback.format_exc()
             })
-            print(f"Unexpected error during data loading: {e}")
             self.train_data = []
-
-        # Split data
-        valid_split_ratio = self.core_config.get("valid_split_ratio", 0.2)
-        if self.train_data:
-            random.seed(self.core_config.get("random_seed", 42))
-            random.shuffle(self.train_data)
-            split_idx = int(len(self.train_data) * (1 - valid_split_ratio))
-            self.train_data, self.valid_data = self.train_data[:split_idx], self.train_data[split_idx:]
-        else:
             self.valid_data = []
-            self.logger.record({
-                "warning": "No training data available",
-                "timestamp": time.time(),
-                "conversation_id": "init"
-            })
 
     def _initialize_state(self) -> None:
         """Initialize system state and related components."""

@@ -221,9 +221,14 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
         A tuple containing the training and validation data lists
     """
     try:
-        train_data = load_jsonl("sovl_seed.jsonl", min_entries=0)
+        # Initialize JSONL loader
+        loader = JSONLLoader(config_manager, logger)
+        
+        # Load training data
+        train_data = loader.load_jsonl("sovl_seed.jsonl", min_entries=0)
+        
         if not train_data:
-            logger.write({
+            logger.record({
                 "warning": "No data loaded from sovl_seed.jsonl",
                 "timestamp": time.time(),
                 "conversation_id": "init"
@@ -231,13 +236,25 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
             print("Warning: No data loaded from sovl_seed.jsonl!")
             return [], []
 
+        # Get validation split ratio from config
         valid_split_ratio = config_manager.get("core_config.valid_split_ratio", 0.2, expected_type=float)
+        
+        # Split data into training and validation sets
         train_data, valid_data = load_and_split_data(config_manager, logger, train_data, valid_split_ratio)
+        
+        # Log successful data loading
+        logger.record({
+            "event": "training_data_loaded",
+            "train_samples": len(train_data),
+            "valid_samples": len(valid_data),
+            "timestamp": time.time(),
+            "conversation_id": "init"
+        })
         
         return train_data, valid_data
 
     except InsufficientDataError as e:
-        logger.write({
+        logger.record({
             "error": str(e),
             "timestamp": time.time(),
             "conversation_id": "init",
@@ -247,8 +264,8 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
         return [], []
 
     except Exception as e:
-        logger.write({
-            "error": f"Unexpected error during data loading: {e}",
+        logger.record({
+            "error": f"Unexpected error during data loading: {str(e)}",
             "timestamp": time.time(),
             "conversation_id": "init",
             "is_error_prompt": True,
