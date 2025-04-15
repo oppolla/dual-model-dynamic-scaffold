@@ -1,7 +1,7 @@
 import torch
 import math
 import time
-from typing import Union, Tuple, Optional, List, Dict, Deque, Set
+from typing import Union, Tuple, Optional, List, Dict, Deque, Set, Callable, Any
 from collections import deque
 import numpy as np
 import random
@@ -263,13 +263,25 @@ def adjust_temperature(
             })
         return base_temp
 
-def synchronized(lock_name: str):
-    """Thread synchronization decorator."""
-    def decorator(func):
+def synchronized(lock: Optional[Lock] = None) -> Callable:
+    """
+    Thread synchronization decorator.
+    
+    Args:
+        lock: Optional Lock instance. If not provided, will use the instance's lock attribute.
+        
+    Returns:
+        Decorated function with thread synchronization.
+    """
+    def decorator(func: Callable) -> Callable:
         @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            lock = getattr(self, lock_name)
-            with lock:
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            # Use provided lock or instance lock
+            lock_to_use = lock if lock is not None else getattr(self, 'lock')
+            if not isinstance(lock_to_use, Lock):
+                raise AttributeError(f"Lock attribute not found or invalid: {lock_to_use}")
+                
+            with lock_to_use:
                 return func(self, *args, **kwargs)
         return wrapper
     return decorator

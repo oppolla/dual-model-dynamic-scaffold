@@ -228,6 +228,23 @@ class Logger:
         self.file_handler = _FileHandler(config, self.fallback_logger)
         self._load_existing()
         self._last_prune_time = time.time()
+        self._log_batch = []
+        self._batch_size = 100  # Number of logs to batch before writing
+        self._last_batch_write = time.time()
+        self._batch_interval = 1.0  # Seconds between batch writes
+        self._cached_logs = {}  # Cache for frequently logged data
+        self._cache_ttl = 60  # Cache TTL in seconds
+        self._last_cache_cleanup = time.time()
+        
+        # Log levels in order of severity
+        self.levels = {
+            "debug": 0,
+            "info": 1,
+            "warning": 2,
+            "error": 3,
+            "critical": 4
+        }
+        self.min_level = "info"  # Default minimum log level
 
     def _load_existing(self) -> None:
         """Load existing logs from file with memory constraints and format detection."""
@@ -346,6 +363,7 @@ class Logger:
             self.record_event(
                 event_type="system",
                 message="Log pruning completed",
+                level="info",
                 additional_info={
                     "remaining_logs": len(self.logs),
                     "memory_usage_mb": self._get_memory_usage(),
@@ -353,29 +371,138 @@ class Logger:
                 }
             )
 
-    def record(self, entry: Dict) -> None:
-        """Write a validated log entry (alias for write)."""
-        self.write(entry)
-
-    def record_event(self, event_type: str, message: str, additional_info: Optional[Dict] = None) -> None:
-        """Record an event with automatic memory management."""
+    def set_min_level(self, level: str) -> None:
+        """Set the minimum log level.
+        
+        Args:
+            level: One of "debug", "info", "warning", "error", "critical"
+        """
+        if level not in self.levels:
+            raise ValueError(f"Invalid log level: {level}")
+        self.min_level = level
+        
+    def _should_log(self, level: str) -> bool:
+        """Check if a log level should be recorded.
+        
+        Args:
+            level: Log level to check
+            
+        Returns:
+            bool: True if the level should be logged
+        """
+        return self.levels.get(level, 0) >= self.levels.get(self.min_level, 0)
+        
+    def _get_cached_log(self, key: str) -> Optional[Dict]:
+        """Get a cached log entry if it exists and hasn't expired.
+        
+        Args:
+            key: Cache key
+            
+        Returns:
+            Optional[Dict]: Cached log entry or None
+        """
+        if key in self._cached_logs:
+            entry, timestamp = self._cached_logs[key]
+            if time.time() - timestamp < self._cache_ttl:
+                return entry
+            del self._cached_logs[key]
+        return None
+        
+    def _cache_log(self, key: str, entry: Dict) -> None:
+        """Cache a log entry.
+        
+        Args:
+            key: Cache key
+            entry: Log entry to cache
+        """
+        self._cached_logs[key] = (entry, time.time())
+        
+    def _cleanup_cache(self) -> None:
+        """Remove expired cache entries."""
+        current_time = time.time()
+        if current_time - self._last_cache_cleanup > self._cache_ttl:
+            self._cached_logs = {
+                k: v for k, v in self._cached_logs.items()
+                if current_time - v[1] < self._cache_ttl
+            }
+            self._last_cache_cleanup = current_time
+            
+    def _write_batch(self) -> None:
+        """Write batched logs to file."""
+        if not self._log_batch:
+            return
+            
+        with self.file_lock:
+            try:
+                # Write as JSONL for structured logs
+                with open(self.config.log_file, 'a') as f:
+                    for entry in self._log_batch:
+                        f.write(json.dumps(entry) + '\n')
+                self._log_batch = []
+                self._last_batch_write = time.time()
+            except Exception as e:
+                self.fallback_logger.error(
+                    f"Failed to write batch to {self.config.log_file}: {str(e)}"
+                )
+                
+    def record_event(self, event_type: str, message: str, level: str = "info", additional_info: Optional[Dict] = None) -> None:
+        """Record an event with automatic memory management and batching.
+        
+        Args:
+            event_type: Type of event
+            message: Event message
+            level: Log level ("debug", "info", "warning", "error", "critical")
+            additional_info: Additional event information
+        """
+        if not self._should_log(level):
+            return
+            
         # Check if we need to prune before adding new log
         self._prune_old_logs()
         
+        # Create log entry
         log_entry = {
             "timestamp": time.time(),
             "event_type": event_type,
             "message": message,
+            "level": level,
             "additional_info": additional_info or {}
         }
         
+        # Check cache for similar entries
+        cache_key = f"{event_type}:{message}"
+        cached_entry = self._get_cached_log(cache_key)
+        if cached_entry:
+            # Update timestamp and merge additional info
+            cached_entry["timestamp"] = log_entry["timestamp"]
+            if additional_info:
+                cached_entry["additional_info"].update(additional_info)
+            log_entry = cached_entry
+        else:
+            self._cache_log(cache_key, log_entry)
+            
         with self.lock:
             self.logs.append(log_entry)
             self.logs = self.logs[-self.config.max_in_memory_logs:]
             
+            # Add to batch
+            self._log_batch.append(log_entry)
+            
+            # Write batch if size or time threshold reached
+            if (len(self._log_batch) >= self._batch_size or 
+                time.time() - self._last_batch_write >= self._batch_interval):
+                self._write_batch()
+                
+            # Clean up cache periodically
+            self._cleanup_cache()
+            
             # If we're over the memory limit after adding, prune again
             if len(self.logs) > self.config.max_in_memory_logs:
                 self._prune_old_logs()
+
+    def record(self, entry: Dict) -> None:
+        """Write a validated log entry (alias for write)."""
+        self.write(entry)
 
     def write(self, entry: Dict) -> None:
         """

@@ -14,6 +14,7 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
 from sovl_error import ErrorHandler
+from sovl_main import confidence_calculator
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""

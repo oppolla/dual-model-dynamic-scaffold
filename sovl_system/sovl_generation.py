@@ -10,6 +10,7 @@ from sovl_state import SOVLState, ConversationHistory
 from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
 from sovl_error_manager import ErrorManager
+from sovl_main import confidence_calculator
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
@@ -518,6 +519,7 @@ class GenerationManager:
                 stack_trace=traceback.format_exc()
             )
 
+    @synchronized()
     def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: List[int]) -> float:
         """Calculate confidence score for generated output."""
         try:

@@ -1,6 +1,6 @@
 import unittest
 import torch
-from sovl_system.sovl_main import SOVLSystem, calculate_confidence_score
+from sovl_system.sovl_main import SOVLSystem, calculate_confidence_score, confidence_calculator
 
 """
 This test suite validates the confidence scoring and behavior of the SOVL System under various scenarios.
@@ -132,6 +132,23 @@ class TestSOVLSystemConfidence(unittest.TestCase):
                         f"Confidence {confidence:.2f} unexpectedly exceeded the threshold {threshold}."
                     )
 
+def test_confidence_calculation():
+    """Test confidence score calculation."""
+    # Setup test data
+    logits = torch.randn(10, 1000)  # Example logits
+    base_inputs = torch.randint(0, 1000, (10,))  # Example input IDs
+    
+    # Calculate confidence
+    confidence = confidence_calculator.calculate_confidence_score(
+        logits=logits,
+        generated_ids=base_inputs,
+        state=test_state,
+        error_manager=test_error_manager,
+        context=test_context
+    )
+    
+    # Verify confidence is between 0 and 1
+    assert 0 <= confidence <= 1
 
 if __name__ == "__main__":
     unittest.main()

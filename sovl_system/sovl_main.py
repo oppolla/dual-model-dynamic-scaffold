@@ -1,4 +1,4 @@
-from typing import Optional, Any, List, Dict, Tuple
+from typing import Optional, Any, List, Dict, Tuple, Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -48,112 +48,191 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sovl_conductor import SOVLOrchestrator
 
-@synchronized("lock")
-def calculate_confidence_score(
-    logits: torch.Tensor,
-    generated_ids: torch.Tensor,
-    state: SOVLState,
-    error_manager: ErrorManager,
-    context: SystemContext,
-    curiosity_manager: Optional[CuriosityManager] = None
-) -> float:
-    """Calculate confidence score with robust error recovery.
+class ConfidenceCalculator:
+    """Handles confidence score calculation with thread safety."""
     
-    Args:
-        logits: Model output logits
-        generated_ids: Generated token IDs
-        state: Current SOVL state
-        error_manager: Error handling manager
-        context: System context
-        curiosity_manager: Optional curiosity manager
+    def __init__(self):
+        """Initialize the confidence calculator with a thread lock."""
+        self.lock = Lock()
         
-    Returns:
-        Confidence score between 0.0 and 1.0
-    """
-    try:
-        # Input validation
-        if not isinstance(logits, torch.Tensor) or not isinstance(generated_ids, torch.Tensor):
-            raise ValueError("logits and generated_ids must be tensors")
+    @synchronized()
+    def calculate_confidence_score(
+        self,
+        logits: torch.Tensor,
+        generated_ids: torch.Tensor,
+        state: SOVLState,
+        error_manager: ErrorManager,
+        context: SystemContext,
+        curiosity_manager: Optional[CuriosityManager] = None
+    ) -> float:
+        """Calculate confidence score with robust error recovery.
+        
+        Args:
+            logits: Model output logits
+            generated_ids: Generated token IDs
+            state: Current SOVL state
+            error_manager: Error handling manager
+            context: System context
+            curiosity_manager: Optional curiosity manager
             
-        if logits.dim() != 2 or generated_ids.dim() != 1:
-            raise ValueError("Invalid tensor dimensions")
-            
-        # Calculate base confidence using softmax probabilities
-        with NumericalGuard():
-            probs = torch.softmax(logits, dim=-1)
-            max_probs = probs.max(dim=-1).values
-            base_confidence = max_probs.mean().item()
-            
-        # Apply curiosity pressure adjustment if available
-        if curiosity_manager is not None:
-            pressure = curiosity_manager.get_pressure()
-            base_confidence *= (1.0 - pressure * 0.1)  # Reduce confidence under high pressure
-            
-        # Apply temperament influence
-        temperament_influence = context.config_manager.get("temperament_config.influence", 0.3)
-        base_confidence *= (1.0 + state.temperament_score * temperament_influence)
-        
-        # Constrain final confidence
-        final_confidence = max(0.0, min(1.0, base_confidence))
-        
-        # Update confidence history
-        state.confidence_history.append(final_confidence)
-        
-        return final_confidence
-        
-    except Exception as e:
-        # Attempt recovery using recent valid confidences
+        Returns:
+            Confidence score between 0.0 and 1.0
+        """
         try:
-            if len(state.confidence_history) >= 3:
-                # Use weighted average of recent confidences
-                recent_confidences = list(state.confidence_history)[-3:]
-                weights = [0.5, 0.3, 0.2]  # More weight to recent values
-                recovered_confidence = sum(c * w for c, w in zip(recent_confidences, weights))
-                
-                # Log recovery
-                error_manager.logger.record_event(
-                    event_type="confidence_recovery",
-                    message="Recovered confidence from history",
-                    level="warning",
-                    additional_info={
-                        "error": str(e),
-                        "recovered_confidence": recovered_confidence,
-                        "history_length": len(state.confidence_history)
-                    }
-                )
-                
-                return recovered_confidence
-                
-            # If recovery fails, use conservative default
+            _validate_inputs(logits, generated_ids)
+            probs = _calculate_probabilities(logits)
+            base_confidence = _compute_base_confidence(probs)
+            adjusted_confidence = _apply_adjustments(
+                base_confidence, state, context, curiosity_manager
+            )
+            final_confidence = _finalize_confidence(adjusted_confidence, state)
+            return final_confidence
+        except Exception as e:
+            return _recover_confidence(e, state, error_manager)
+
+def _validate_inputs(logits: torch.Tensor, generated_ids: torch.Tensor) -> None:
+    """Validate input tensors for confidence calculation."""
+    if not isinstance(logits, torch.Tensor) or not isinstance(generated_ids, torch.Tensor):
+        raise ValueError("logits and generated_ids must be tensors")
+    if logits.dim() != 2 or generated_ids.dim() != 1:
+        raise ValueError("Invalid tensor dimensions")
+
+def _calculate_probabilities(logits: torch.Tensor) -> torch.Tensor:
+    """Calculate softmax probabilities from logits."""
+    with NumericalGuard():
+        return torch.softmax(logits, dim=-1)
+
+def _compute_base_confidence(probs: torch.Tensor) -> float:
+    """Compute base confidence from probabilities."""
+    max_probs = probs.max(dim=-1).values
+    return max_probs.mean().item()
+
+def _apply_adjustments(
+    base_confidence: float,
+    state: SOVLState,
+    context: SystemContext,
+    curiosity_manager: Optional[CuriosityManager]
+) -> float:
+    """Apply curiosity and temperament adjustments to confidence."""
+    confidence = base_confidence
+    
+    # Apply curiosity pressure adjustment if available
+    if curiosity_manager is not None:
+        pressure = curiosity_manager.get_pressure()
+        confidence *= (1.0 - pressure * 0.1)  # Reduce confidence under high pressure
+        
+    # Apply temperament influence
+    temperament_influence = context.config_manager.get("temperament_config.influence", 0.3)
+    confidence *= (1.0 + state.temperament_score * temperament_influence)
+    
+    return confidence
+
+def _finalize_confidence(confidence: float, state: SOVLState) -> float:
+    """Finalize confidence score and update history."""
+    final_confidence = max(0.0, min(1.0, confidence))
+    state.confidence_history.append(final_confidence)
+    return final_confidence
+
+def _recover_confidence(error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
+    """Attempt to recover confidence from history or use default."""
+    try:
+        if len(state.confidence_history) >= 3:
+            # Use weighted average of recent confidences
+            recent_confidences = list(state.confidence_history)[-3:]
+            weights = [0.5, 0.3, 0.2]  # More weight to recent values
+            recovered_confidence = sum(c * w for c, w in zip(recent_confidences, weights))
+            
+            # Log recovery
             error_manager.logger.record_event(
-                event_type="confidence_default",
-                message="Using default confidence due to insufficient history",
-                level="error",
+                event_type="confidence_recovery",
+                message="Recovered confidence from history",
+                level="warning",
                 additional_info={
-                    "error": str(e),
+                    "error": str(error),
+                    "recovered_confidence": recovered_confidence,
                     "history_length": len(state.confidence_history)
                 }
             )
-            return 0.5  # Conservative default
             
-        except Exception as recovery_error:
-            error_manager.logger.record_event(
-                event_type="confidence_error",
-                message="Failed to recover confidence",
-                level="critical",
-                additional_info={
-                    "original_error": str(e),
-                    "recovery_error": str(recovery_error)
-                }
-            )
-            return 0.5  # Fallback default
+            return recovered_confidence
+            
+        # If recovery fails, use conservative default
+        error_manager.logger.record_event(
+            event_type="confidence_default",
+            message="Using default confidence due to insufficient history",
+            level="error",
+            additional_info={
+                "error": str(error),
+                "history_length": len(state.confidence_history)
+            }
+        )
+        return 0.5  # Conservative default
+        
+    except Exception as recovery_error:
+        error_manager.logger.record_event(
+            event_type="confidence_error",
+            message="Failed to recover confidence",
+            level="critical",
+            additional_info={
+                "original_error": str(error),
+                "recovery_error": str(recovery_error)
+            }
+        )
+        return 0.5  # Fallback default
+
+class EventDispatcher:
+    """Manages event subscriptions and notifications."""
+    
+    def __init__(self):
+        """Initialize the event dispatcher."""
+        self._subscribers = defaultdict(list)
+        
+    def subscribe(self, event_type: str, callback: callable) -> None:
+        """
+        Subscribe to an event type.
+        
+        Args:
+            event_type: Type of event to subscribe to
+            callback: Function to call when event occurs
+        """
+        self._subscribers[event_type].append(callback)
+        
+    def unsubscribe(self, event_type: str, callback: callable) -> None:
+        """
+        Unsubscribe from an event type.
+        
+        Args:
+            event_type: Type of event to unsubscribe from
+            callback: Function to remove from subscribers
+        """
+        if event_type in self._subscribers:
+            self._subscribers[event_type] = [
+                cb for cb in self._subscribers[event_type]
+                if cb != callback
+            ]
+            
+    def notify(self, event_type: str, *args, **kwargs) -> None:
+        """
+        Notify all subscribers of an event.
+        
+        Args:
+            event_type: Type of event to notify
+            *args: Positional arguments to pass to callbacks
+            **kwargs: Keyword arguments to pass to callbacks
+        """
+        for callback in self._subscribers.get(event_type, []):
+            try:
+                callback(*args, **kwargs)
+            except Exception as e:
+                # Log error but don't break the notification chain
+                logging.error(f"Error in event handler for {event_type}: {str(e)}")
 
 class SystemContext:
     """Manages system-wide context and resources."""
     
     def __init__(self, config_path: str, device: str = "cuda"):
         """
-        Initialize system context.
+        Initialize system context with shared resources.
         
         Args:
             config_path: Path to configuration file
@@ -161,92 +240,28 @@ class SystemContext:
         """
         self.config_path = config_path
         self.device = device
-        self.config_handler = ConfigHandler(self)
         self.logger = Logger()
+        self.event_dispatcher = EventDispatcher()
+        
+        # Initialize config manager with event dispatcher
         self.config_manager = ConfigManager(config_path, self.logger)
+        self.config_manager.set_event_dispatcher(self.event_dispatcher)
         
-        # Subscribe to configuration changes
-        self.config_manager.subscribe(self._on_config_change)
-        
-        # Initialize state
-        self._initialize_state()
-
     def _on_config_change(self) -> None:
         """Handle configuration changes and propagate them to affected components."""
         try:
-            # Refresh all configurations
-            self.config_handler._refresh_configs()
-            
-            # Validate configurations
-            warnings = self.config_handler._validate_all_configs()
-            if warnings:
-                self.logger.record({
-                    "event": "config_validation_warnings",
-                    "warnings": warnings,
-                    "timestamp": time.time()
-                })
-            
-            # Notify components that need to react to config changes
-            if hasattr(self, 'temperament_adjuster'):
-                self.temperament_adjuster._on_config_change()
-            
-            if hasattr(self, 'curiosity_engine'):
-                self.curiosity_engine._validate_configuration()
-            
-            if hasattr(self, 'model_loader'):
-                self.model_loader._validate_cross_attention_weights()
-            
-        except Exception as e:
-            error_msg = f"Configuration sync failed: {str(e)}"
-            self.logger.record({
-                "event": "config_sync_error",
-                "error": error_msg,
-                "stack_trace": traceback.format_exc(),
-                "timestamp": time.time()
-            })
-            raise RuntimeError(error_msg)  # Propagate to CLI
-
-    def _initialize_state(self) -> None:
-        """Initialize system state components."""
-        try:
-            # Initialize state tracker
-            self.state_tracker = StateTracker(self, self.config_handler)
-            
-            # Initialize error manager
-            self.error_manager = ErrorManager(self, self.state_tracker)
-            
-            # Initialize temperament adjuster
-            self.temperament_adjuster = TemperamentAdjuster(self, self.state_tracker)
-            
-            # Initialize model loader
-            self.model_loader = ModelLoader(self, self.config_handler)
-            
-            # Initialize curiosity engine
-            self.curiosity_engine = CuriosityEngine(
-                self,
-                self.model_loader,
-                self.state_tracker,
-                self.error_manager
+            # Log configuration change
+            self.logger.record_event(
+                event_type="config_change",
+                message="Configuration changed",
+                level="info"
             )
-            
-            # Log successful initialization
-            self.logger.record({
-                "event": "system_initialized",
-                "timestamp": time.time()
-            })
-            
         except Exception as e:
-            error_msg = f"System initialization failed: {str(e)}"
-            self.logger.record({
-                "event": "system_init_error",
-                "error": error_msg,
-                "stack_trace": traceback.format_exc(),
-                "timestamp": time.time()
-            })
-            raise SystemInitializationError(
-                message=error_msg,
-                config_path=self.config_path,
-                stack_trace=traceback.format_exc()
+            self.logger.record_event(
+                event_type="config_change_error",
+                message=f"Failed to handle config change: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
             )
 
 class SystemInitializationError(Exception):
@@ -261,17 +276,57 @@ class SystemInitializationError(Exception):
 class ConfigHandler:
     """Handles configuration validation and management."""
     
-    def __init__(self, context: SystemContext):
-        self.context = context
-        self.logger = context.logger
+    def __init__(self, config_path: str, logger: Logger, event_dispatcher: EventDispatcher):
+        """
+        Initialize config handler with explicit dependencies.
+        
+        Args:
+            config_path: Path to configuration file
+            logger: Logger instance for logging events
+            event_dispatcher: Event dispatcher for handling events
+        """
+        self.logger = logger
+        self.event_dispatcher = event_dispatcher
+        self.config_manager = ConfigManager(config_path, logger)
+        self.config_manager.set_event_dispatcher(event_dispatcher)
+        
+        # Subscribe to configuration changes
+        self.event_dispatcher.subscribe("config_change", self._on_config_change)
         self._refresh_configs()
         
-    def _refresh_configs(self):
+    def _on_config_change(self) -> None:
+        """Handle configuration changes."""
+        try:
+            # Refresh configurations
+            self._refresh_configs()
+            
+            # Validate configurations
+            warnings = self._validate_all_configs()
+            if warnings:
+                self.logger.record_event(
+                    event_type="config_validation_warnings",
+                    message="Configuration validation warnings",
+                    level="warning",
+                    additional_info={"warnings": warnings}
+                )
+                
+            # Notify other components
+            self.event_dispatcher.notify("config_validated", warnings)
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_change_error",
+                message=f"Failed to handle config change: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            
+    def _refresh_configs(self) -> None:
         """Refresh configuration sections from ConfigManager."""
-        self.core_config = self.context.config_manager.get_section("core_config")
-        self.controls_config = self.context.config_manager.get_section("controls_config")
-        self.curiosity_config = self.context.config_manager.get_section("curiosity_config")
-        self.training_config = self.context.config_manager.get_section("training_config")
+        self.core_config = self.config_manager.get_section("core_config")
+        self.controls_config = self.config_manager.get_section("controls_config")
+        self.curiosity_config = self.config_manager.get_section("curiosity_config")
+        self.training_config = self.config_manager.get_section("training_config")
         
         self.logger.record_event(
             event_type="config_refresh",
@@ -279,92 +334,117 @@ class ConfigHandler:
             level="info"
         )
         
-    def _validate_all_configs(self):
-        """Validate all configuration sections."""
-        self._validate_controls_configs()
-        self._validate_curiosity_configs()
-        self._validate_temperament_configs()
-        self._validate_processor_configs()
+    def _validate_all_configs(self) -> List[str]:
+        """
+        Validate all configuration sections.
         
-    def _validate_controls_configs(self):
-        """Validate controls configuration section."""
-        for key, value in self.controls_config.items():
-            is_valid, error_msg = ValidationSchema.validate_value(
-                "controls_config", key, value, self.logger
+        Returns:
+            List of warning messages, empty if no warnings
+        """
+        warnings = []
+        
+        # Define validation sections and their specific validation rules
+        validation_sections = [
+            ("controls_config", self.controls_config, {}),
+            ("curiosity_config", self.curiosity_config, {}),
+            ("core_config", self.core_config, {
+                "processor": lambda k, v: k.startswith("processor_"),
+                "temperament": lambda k, v: k.startswith("temp_")
+            })
+        ]
+        
+        # Validate each section
+        for section_name, config, filters in validation_sections:
+            section_warnings = self._validate_config_section(
+                section_name=section_name,
+                config=config,
+                filters=filters
             )
-            if not is_valid:
-                self.logger.record_event(
-                    event_type="config_validation_error",
-                    message=f"Invalid controls config value: {error_msg}",
-                    level="error",
-                    additional_info={
-                        "key": key,
-                        "value": value
-                    }
-                )
-                raise ValueError(f"Invalid controls config: {error_msg}")
+            warnings.extend(section_warnings)
+            
+        return warnings
+        
+    def _validate_config_section(
+        self,
+        section_name: str,
+        config: Dict[str, Any],
+        filters: Dict[str, Callable[[str, Any], bool]] = None
+    ) -> List[str]:
+        """
+        Validate a configuration section.
+        
+        Args:
+            section_name: Name of the configuration section
+            config: Configuration dictionary to validate
+            filters: Optional dictionary of filter functions for specific validation rules
+            
+        Returns:
+            List of warning messages, empty if no warnings
+        """
+        warnings = []
+        
+        try:
+            for key, value in config.items():
+                # Apply filters if specified
+                if filters:
+                    for filter_name, filter_func in filters.items():
+                        if filter_func(key, value):
+                            # Skip validation for filtered keys
+                            continue
                 
-    def _validate_curiosity_configs(self):
-        """Validate curiosity configuration section."""
-        for key, value in self.curiosity_config.items():
-            is_valid, error_msg = ValidationSchema.validate_value(
-                "curiosity_config", key, value, self.logger
-            )
-            if not is_valid:
-                self.logger.record_event(
-                    event_type="config_validation_error",
-                    message=f"Invalid curiosity config value: {error_msg}",
-                    level="error",
-                    additional_info={
-                        "key": key,
-                        "value": value
-                    }
-                )
-                raise ValueError(f"Invalid curiosity config: {error_msg}")
-                
-    def _validate_temperament_configs(self):
-        """Validate temperament configuration section."""
-        for key, value in self.controls_config.items():
-            if key.startswith("temp_"):
+                # Validate the value
                 is_valid, error_msg = ValidationSchema.validate_value(
-                    "controls_config", key, value, self.logger
+                    section_name, key, value, self.logger
                 )
+                
                 if not is_valid:
+                    warnings.append(f"{section_name}.{key}: {error_msg}")
                     self.logger.record_event(
                         event_type="config_validation_error",
-                        message=f"Invalid temperament config value: {error_msg}",
+                        message=f"Invalid {section_name} config value: {error_msg}",
                         level="error",
                         additional_info={
                             "key": key,
                             "value": value
                         }
                     )
-                    raise ValueError(f"Invalid temperament config: {error_msg}")
                     
-    def _validate_processor_configs(self):
-        """Validate processor configuration section."""
-        for key, value in self.core_config.items():
-            is_valid, error_msg = ValidationSchema.validate_value(
-                "core_config", key, value, self.logger
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_validation_error",
+                message=f"Failed to validate {section_name} config: {str(e)}",
+                level="error",
+                additional_info={
+                    "section": section_name,
+                    "error": str(e)
+                }
             )
-            if not is_valid:
-                self.logger.record_event(
-                    event_type="config_validation_error",
-                    message=f"Invalid processor config value: {error_msg}",
-                    level="error",
-                    additional_info={
-                        "key": key,
-                        "value": value
-                    }
-                )
-                raise ValueError(f"Invalid processor config: {error_msg}")
-                
+            warnings.append(f"Failed to validate {section_name} config: {str(e)}")
+            
+        return warnings
+        
     def validate(self, model_config: Any = None) -> bool:
-        """Validate all configurations."""
+        """
+        Validate all configurations.
+        
+        Args:
+            model_config: Optional model configuration for additional validation
+            
+        Returns:
+            bool: True if validation succeeds, False otherwise
+        """
         try:
-            self._validate_all_configs()
+            warnings = self._validate_all_configs()
+            if warnings:
+                self.logger.record_event(
+                    event_type="config_validation_failed",
+                    message="Configuration validation failed with warnings",
+                    level="error",
+                    additional_info={"warnings": warnings}
+                )
+                return False
             return True
-        except ValueError as e:
+        except Exception as e:
             self.logger.record_event(
                 event_type="config_validation_failed",
                 message=f"Configuration validation failed: {str(e)}",
@@ -373,12 +453,23 @@ class ConfigHandler:
             return False
             
     def validate_with_model(self, model_config: Any) -> bool:
-        """Validate configurations with model-specific checks."""
+        """
+        Validate configurations with model-specific checks.
+        
+        Args:
+            model_config: Model configuration for additional validation
+            
+        Returns:
+            bool: True if validation succeeds, False otherwise
+        """
         try:
-            self._validate_all_configs()
+            # First validate basic configurations
+            if not self.validate():
+                return False
+                
             # Add model-specific validation here if needed
             return True
-        except ValueError as e:
+        except Exception as e:
             self.logger.record_event(
                 event_type="config_validation_failed",
                 message=f"Configuration validation failed: {str(e)}",
@@ -390,12 +481,24 @@ class ModelLoader:
     """Handles model loading, initialization, and cross-attention injection."""
     
     def __init__(self, context: SystemContext, config_handler: ConfigHandler):
+        """Initialize model loader with required dependencies."""
         self.context = context
         self.config_handler = config_handler
         self.model = None
         self.scaffold_model = None
         self.token_map = None
         self._cross_attention_injector = None
+        self._initialize()
+        
+    def _initialize(self) -> None:
+        """Initialize cross-attention injector and validate configuration."""
+        if not self.context or not self.config_handler:
+            raise ValueError("Missing required dependencies")
+            
+        # Initialize cross-attention injector if needed
+        cross_attn_config = self.context.config_manager.get_section("cross_attn_config", {})
+        if cross_attn_config.get("enabled", False):
+            self._cross_attention_injector = CrossAttentionInjector()
         
     def _validate_cross_attention_weights(self) -> None:
         """Validate cross-attention layer weights before injection."""
@@ -471,10 +574,19 @@ class StateTracker:
         """Initialize the state tracker with context and configuration."""
         self.context = context
         self.config_handler = config_handler
+        self.state_manager = None
+        self.state = None
+        self._initialize()
+        
+    def _initialize(self) -> None:
+        """Initialize state manager and state."""
+        if not self.context or not self.config_handler:
+            raise ValueError("Missing required dependencies")
+            
         self.state_manager = StateManager(
-            config_manager=context.config_manager,
-            logger=context.logger,
-            device=context.device
+            config_manager=self.context.config_manager,
+            logger=self.context.logger,
+            device=self.context.device
         )
         # Auto-initialize state
         self.state = self.state_manager.initialize_state()
@@ -548,16 +660,22 @@ class ErrorManager:
     """Manages error handling and recovery for the SOVL system."""
     
     def __init__(self, context: SystemContext, state_tracker: StateTracker):
+        """Initialize error manager with required dependencies."""
         self.context = context
         self.state_tracker = state_tracker
         self.logger = context.logger
         self.error_counts = defaultdict(int)
-        self.recent_errors = deque(maxlen=100)  # Track recent errors to detect duplicates
-        self.error_cooldown = 1.0  # seconds
+        self.recent_errors = deque(maxlen=100)
+        self._initialize()
+        
+    def _initialize(self) -> None:
+        """Initialize error handling configuration."""
+        config = self.context.config_manager.get_section("error_config", {})
+        self.error_cooldown = config.get("error_cooldown", 1.0)
         self.severity_thresholds = {
-            "warning": 3.0,  # Convert to float for safe comparison
-            "error": 5.0,
-            "critical": 10.0
+            "warning": float(config.get("warning_threshold", 3.0)),
+            "error": float(config.get("error_threshold", 5.0)),
+            "critical": float(config.get("critical_threshold", 10.0))
         }
         self.recovery_actions = {
             "training": self._recover_training,
@@ -1101,17 +1219,86 @@ class MemoryMonitor:
 class TemperamentAdjuster:
     """Manages temperament adjustments and state updates."""
     
-    def __init__(self, context: SystemContext, state_tracker: StateTracker):
-        self.context = context
+    def __init__(
+        self,
+        config_handler: ConfigHandler,
+        state_tracker: StateTracker,
+        logger: Logger,
+        event_dispatcher: EventDispatcher
+    ):
+        """Initialize temperament adjuster with required dependencies."""
+        self.config_handler = config_handler
         self.state_tracker = state_tracker
+        self.logger = logger
+        self.event_dispatcher = event_dispatcher
         self.temperament_system = None
         self._last_parameter_hash = None
         self._last_state_hash = None
+        
+        # Initialize components
+        self._initialize_events()
         self._initialize_temperament_system()
         
-        # Subscribe to config changes
-        self.context.config_manager.subscribe(self._on_config_change)
+    def _initialize_events(self) -> None:
+        """Initialize event subscriptions."""
+        self.event_dispatcher.subscribe("config_change", self._on_config_change)
+        self.event_dispatcher.subscribe("state_update", self._on_state_update)
         
+    def _on_config_change(self) -> None:
+        """Handle configuration changes."""
+        try:
+            current_params = self._get_validated_parameters()
+            current_hash = self._compute_parameter_hash(current_params)
+            
+            if current_hash != self._last_parameter_hash:
+                self.logger.record_event(
+                    event_type="temperament_parameters_changed",
+                    message="Temperament parameters changed, reinitializing system",
+                    level="info",
+                    additional_info=current_params
+                )
+                self._initialize_temperament_system()
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="temperament_config_change_error",
+                message=f"Failed to handle config change: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            
+    def _on_state_update(self, state: SOVLState) -> None:
+        """Handle state updates."""
+        try:
+            # Validate state consistency
+            if not self._validate_state_consistency(state):
+                # Reset history if inconsistent
+                state.temperament_history.clear()
+                self.logger.record_event(
+                    event_type="temperament_history_reset",
+                    message="Temperament history reset due to inconsistency",
+                    level="info"
+                )
+            
+            # Update state with current temperament
+            state.temperament_score = self.temperament_system.current_score
+            state.temperament_history.append(state.temperament_score)
+            
+            # Update state hash
+            self._last_state_hash = self._compute_state_hash(state)
+            
+            # Notify other components
+            self.event_dispatcher.notify("temperament_updated", state)
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="state_synchronization_error",
+                message=f"Failed to synchronize state: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            raise
+            
     def _validate_state_consistency(self, state: SOVLState) -> bool:
         """Validate consistency between current state and temperament history."""
         try:
@@ -1120,7 +1307,7 @@ class TemperamentAdjuster:
                 
             # Check for significant deviation between current score and history
             if abs(state.temperament_history[-1] - state.temperament_score) > 0.5:
-                self.context.logger.record_event(
+                self.logger.record_event(
                     event_type="temperament_inconsistency",
                     message="Temperament history inconsistent with current score",
                     level="warning",
@@ -1135,7 +1322,7 @@ class TemperamentAdjuster:
             # Check for parameter changes that might invalidate history
             current_hash = self._compute_parameter_hash(self._get_validated_parameters())
             if current_hash != self._last_parameter_hash:
-                self.context.logger.record_event(
+                self.logger.record_event(
                     event_type="temperament_history_invalidated",
                     message="Temperament parameters changed, history may be invalid",
                     level="warning",
@@ -1149,43 +1336,13 @@ class TemperamentAdjuster:
             return True
             
         except Exception as e:
-            self.context.logger.record_event(
+            self.logger.record_event(
                 event_type="temperament_validation_error",
                 message=f"Failed to validate state consistency: {str(e)}",
                 level="error",
                 additional_info={"error": str(e)}
             )
             return False
-            
-    def _synchronize_state(self, state: SOVLState) -> None:
-        """Synchronize state with current temperament system."""
-        try:
-            with state.lock:
-                # Validate state consistency
-                if not self._validate_state_consistency(state):
-                    # Reset history if inconsistent
-                    state.temperament_history.clear()
-                    self.context.logger.record_event(
-                        event_type="temperament_history_reset",
-                        message="Temperament history reset due to inconsistency",
-                        level="info"
-                    )
-                
-                # Update state with current temperament
-                state.temperament_score = self.temperament_system.current_score
-                state.temperament_history.append(state.temperament_score)
-                
-                # Update state hash
-                self._last_state_hash = self._compute_state_hash(state)
-                
-        except Exception as e:
-            self.context.logger.record_event(
-                event_type="state_synchronization_error",
-                message=f"Failed to synchronize state: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            raise
             
     def _compute_state_hash(self, state: SOVLState) -> str:
         """Compute a hash of the current state."""
@@ -1210,7 +1367,7 @@ class TemperamentAdjuster:
             # Update parameter hash
             self._last_parameter_hash = self._compute_parameter_hash(params)
             
-            self.context.logger.record_event(
+            self.logger.record_event(
                 event_type="temperament_system_initialized",
                 message="Temperament system initialized with validated parameters",
                 level="info",
@@ -1218,7 +1375,7 @@ class TemperamentAdjuster:
             )
             
         except Exception as e:
-            self.context.logger.record_event(
+            self.logger.record_event(
                 event_type="temperament_system_error",
                 message=f"Failed to initialize temperament system: {str(e)}",
                 level="error",
@@ -1228,7 +1385,7 @@ class TemperamentAdjuster:
             
     def _get_validated_parameters(self) -> Dict[str, Any]:
         """Get and validate temperament parameters."""
-        config = self.context.config_manager
+        config = self.config_handler.config_manager
         
         # Define safe parameter ranges
         safe_ranges = {
@@ -1248,7 +1405,7 @@ class TemperamentAdjuster:
         for key, (min_val, max_val) in safe_ranges.items():
             value = config.get(f"controls_config.{key}", (min_val + max_val) / 2)
             if not (min_val <= value <= max_val):
-                self.context.logger.record_event(
+                self.logger.record_event(
                     event_type="temperament_parameter_warning",
                     message=f"Parameter {key} out of safe range, clamping to bounds",
                     level="warning",
@@ -1267,115 +1424,87 @@ class TemperamentAdjuster:
     def _compute_parameter_hash(self, params: Dict[str, Any]) -> str:
         """Compute a hash of the current parameters."""
         return str(sorted(params.items()))
-        
-    def _on_config_change(self) -> None:
-        """Handle configuration changes."""
-        try:
-            current_params = self._get_validated_parameters()
-            current_hash = self._compute_parameter_hash(current_params)
-            
-            if current_hash != self._last_parameter_hash:
-                self.context.logger.record_event(
-                    event_type="temperament_parameters_changed",
-                    message="Temperament parameters changed, reinitializing system",
-                    level="info",
-                    additional_info=current_params
-                )
-                self._initialize_temperament_system()
-                
-        except Exception as e:
-            self.context.logger.record_event(
-                event_type="temperament_config_change_error",
-                message=f"Failed to handle config change: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            
-    def update_temperament(self, curiosity_manager: Optional[CuriosityManager] = None) -> None:
-        """Update temperament based on current state and curiosity pressure."""
-        try:
-            if not self.temperament_system:
-                self._initialize_temperament_system()
-                
-            state = self.state_tracker.get_state()
-            lifecycle_stage = self._determine_lifecycle_stage(state)
-            
-            # Get current curiosity pressure and update state
-            state.curiosity_pressure = curiosity_manager.get_pressure() if curiosity_manager else 0.0
-            
-            # Get confidence from history or use default
-            confidence = state.confidence_history[-1] if state.confidence_history else 0.5
-            
-            # Update temperament with current curiosity pressure
-            self.temperament_system.update(
-                confidence=confidence,
-                lifecycle_stage=lifecycle_stage,
-                curiosity_pressure=state.curiosity_pressure
-            )
-            
-            # Synchronize state after update
-            self._synchronize_state(state)
-            
-            # Log the update
-            self.context.logger.record_event(
-                event_type="temperament_updated",
-                message="Temperament updated with current state",
-                level="info",
-                additional_info={
-                    "temperament_score": state.temperament_score,
-                    "curiosity_pressure": state.curiosity_pressure,
-                    "lifecycle_stage": lifecycle_stage,
-                    "confidence": confidence
-                }
-            )
-            
-        except Exception as e:
-            self.context.logger.record_event(
-                event_type="temperament_update_error",
-                message=f"Failed to update temperament: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            raise
-            
-    def _determine_lifecycle_stage(self, state: SOVLState) -> str:
-        """Determine the current lifecycle stage based on state."""
-        # Implementation depends on your lifecycle logic
-        return "active"  # Placeholder
 
 class CuriosityEngine:
     """Manages curiosity-driven exploration and learning."""
     
     def __init__(
         self,
-        context: SystemContext,
+        config_handler: ConfigHandler,
         model_loader: ModelLoader,
         state_tracker: StateTracker,
-        error_manager: ErrorManager
+        error_manager: ErrorManager,
+        logger: Logger,
+        device: str
     ):
-        self.context = context
+        """
+        Initialize the curiosity engine with explicit dependencies.
+        
+        Args:
+            config_handler: Configuration handler
+            model_loader: Model loader instance
+            state_tracker: State tracker instance
+            error_manager: Error manager instance
+            logger: Logger instance
+            device: Device to use for tensor operations
+        """
+        self.config_handler = config_handler
         self.model_loader = model_loader
         self.state_tracker = state_tracker
         self.error_manager = error_manager
-        self.logger = context.logger
+        self.logger = logger
+        self.device = device
         
         # Initialize components
-        self._initialize_curiosity_manager()
-        self._initialize_training_cycle_manager()
+        self.curiosity_manager = self._create_curiosity_manager()
+        self.cycle_manager = self._create_training_cycle_manager()
         
+        # Log initialization
+        self.logger.record_event(
+            event_type="curiosity_engine_initialized",
+            message="Curiosity engine initialized successfully",
+            level="info"
+        )
+        
+    def _create_curiosity_manager(self) -> CuriosityManager:
+        """Create and initialize the curiosity manager."""
+        try:
+            return CuriosityManager(
+                config_manager=self.config_handler.config_manager,
+                logger=self.logger,
+                device=self.device
+            )
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, "manager_creation")
+            raise
+            
+    def _create_training_cycle_manager(self) -> TrainingCycleManager:
+        """Create and initialize the training cycle manager."""
+        try:
+            return TrainingCycleManager(
+                config=self.config_handler.config_manager.get_section("sovl_config"),
+                logger=self.logger,
+                device=self.device,
+                state_manager=self.state_tracker,
+                curiosity_manager=self.curiosity_manager
+            )
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, "cycle_manager_creation")
+            raise
+            
     def _validate_configuration(self) -> bool:
         """Validate current configuration state."""
         try:
-            if not self.context.config_handler.validate():
+            if not self.config_handler.validate():
                 self.logger.record_event(
                     event_type="config_validation_failed",
                     message="Configuration validation failed, attempting recovery",
                     level="error"
                 )
                 # Attempt to refresh configuration
-                self.context.config_handler._refresh_configs()
+                self.config_handler._refresh_configs()
                 # Re-validate after refresh
-                if not self.context.config_handler.validate():
+                if not self.config_handler.validate():
                     self.logger.record_event(
                         event_type="config_recovery_failed",
                         message="Configuration recovery failed",
@@ -1443,43 +1572,7 @@ class CuriosityEngine:
         except Exception as e:
             self.error_manager.handle_training_error(e, batch_size or 1)
             raise
-
-    def _initialize_training_cycle_manager(self) -> None:
-        """Initialize training cycle manager."""
-        try:
-            self.cycle_manager = TrainingCycleManager(
-                config=self.context.config_manager.get_section("sovl_config"),
-                logger=self.logger,
-                device=self.context.device,
-                state_manager=self.state_tracker,
-                curiosity_manager=self.curiosity_manager
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "cycle_manager_init")
-            raise
             
-    def _initialize_curiosity_manager(self) -> None:
-        """Initialize the curiosity manager with proper error handling."""
-        try:
-            curiosity_manager = CuriosityManager(
-                config_manager=self.context.config_manager,
-                logger=self.context.logger,
-                device=self.context.device
-            )
-            self.context.logger.info("Curiosity manager initialized successfully")
-            self.curiosity_manager = curiosity_manager
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to initialize curiosity manager: {str(e)}",
-                error_type="initialization_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise SystemInitializationError(
-                message="Failed to initialize curiosity manager",
-                config_path=self.context.config_path,
-                stack_trace=traceback.format_exc()
-            )
-
     def _log_event(self, event: str, data: Optional[Dict] = None) -> None:
         """Log an event with standardized fields."""
         self.logger.record_event(
@@ -1492,28 +1585,115 @@ class CuriosityEngine:
 class SOVLSystem:
     """Main SOVL system class that manages all components and state."""
     
-    def __init__(self, config_path: str, device: str = "cuda"):
+    def __init__(
+        self,
+        context: SystemContext,
+        config_handler: ConfigHandler,
+        temperament_adjuster: TemperamentAdjuster,
+        model_loader: ModelLoader,
+        curiosity_engine: CuriosityEngine,
+        memory_monitor: MemoryMonitor,
+        state_tracker: StateTracker,
+        error_manager: ErrorManager
+    ):
         """
-        Initialize the SOVL system.
+        Initialize the SOVL system with pre-initialized components.
+        
+        Args:
+            context: System context containing shared resources
+            config_handler: Configuration handler component
+            temperament_adjuster: Temperament adjustment component
+            model_loader: Model loading component
+            curiosity_engine: Curiosity engine component
+            memory_monitor: Memory monitoring component
+            state_tracker: State tracking component
+            error_manager: Error management component
+        """
+        # Store injected components
+        self.context = context
+        self.config_handler = config_handler
+        self.temperament_adjuster = temperament_adjuster
+        self.model_loader = model_loader
+        self.curiosity_engine = curiosity_engine
+        self.memory_monitor = memory_monitor
+        self.state_tracker = state_tracker
+        self.error_manager = error_manager
+        
+        # Log successful initialization
+        self.context.logger.record_event(
+            event_type="system_initialized",
+            message="SOVL system initialized successfully with dependency injection",
+            level="info",
+            additional_info={
+                "config_path": self.config_handler.config_path,
+                "device": self.context.device
+            }
+        )
+
+    @classmethod
+    def create_from_config(cls, config_path: str, device: str = "cuda") -> 'SOVLSystem':
+        """
+        Factory method to create a SOVLSystem instance from configuration.
         
         Args:
             config_path: Path to the configuration file
             device: Device to use for tensor operations
+            
+        Returns:
+            SOVLSystem: A new instance initialized with components created from config
         """
-        self.context = SystemContext(config_path, device)
-        self.config_handler = ConfigHandler(self.context)
-        self.model_loader = ModelLoader(self.context, self.config_handler)
-        self.state_tracker = StateTracker(self.context, self.config_handler)
-        self.error_manager = ErrorManager(self.context, self.state_tracker)
-        self.temperament_adjuster = TemperamentAdjuster(self.context, self.state_tracker)
-        self.curiosity_engine = CuriosityEngine(
-            self.context,
-            self.model_loader,
-            self.state_tracker,
-            self.error_manager
+        # Initialize shared context
+        context = SystemContext(config_path, device)
+        
+        # Initialize state tracker and error manager first
+        state_tracker = StateTracker()
+        error_manager = ErrorManager()
+        
+        # Initialize components with explicit dependencies
+        config_handler = ConfigHandler(
+            config_path=config_path,
+            logger=context.logger,
+            state_tracker=state_tracker
         )
-        self.memory_monitor = MemoryMonitor(self.context)
-        self.logger = self.context.logger
+        
+        temperament_adjuster = TemperamentAdjuster(
+            config_handler=config_handler,
+            state_tracker=state_tracker,
+            logger=context.logger,
+            event_dispatcher=context.event_dispatcher
+        )
+        
+        model_loader = ModelLoader(
+            config_handler=config_handler,
+            logger=context.logger,
+            device=context.device
+        )
+        
+        curiosity_engine = CuriosityEngine(
+            config_handler=config_handler,
+            model_loader=model_loader,
+            state_tracker=state_tracker,
+            error_manager=error_manager,
+            logger=context.logger,
+            device=context.device
+        )
+        
+        memory_monitor = MemoryMonitor(
+            logger=context.logger,
+            device=context.device
+        )
+        
+        # Create and return new instance with all components
+        return cls(
+            context=context,
+            config_handler=config_handler,
+            temperament_adjuster=temperament_adjuster,
+            model_loader=model_loader,
+            curiosity_engine=curiosity_engine,
+            memory_monitor=memory_monitor,
+            state_tracker=state_tracker,
+            error_manager=error_manager
+        )
 
     def generate_curiosity_question(self) -> Optional[str]:
         """Generate a curiosity-driven question."""
@@ -1641,3 +1821,36 @@ class SOVLSystem:
                 }
             )
             return {"error": str(e)}
+
+# Create a global instance of ConfidenceCalculator
+confidence_calculator = ConfidenceCalculator()
+
+def calculate_confidence_score(
+    logits: torch.Tensor,
+    generated_ids: torch.Tensor,
+    state: SOVLState,
+    error_manager: ErrorManager,
+    context: SystemContext,
+    curiosity_manager: Optional[CuriosityManager] = None
+) -> float:
+    """Calculate confidence score with robust error recovery.
+    
+    Args:
+        logits: Model output logits
+        generated_ids: Generated token IDs
+        state: Current SOVL state
+        error_manager: Error handling manager
+        context: System context
+        curiosity_manager: Optional curiosity manager
+        
+    Returns:
+        Confidence score between 0.0 and 1.0
+    """
+    return confidence_calculator.calculate_confidence_score(
+        logits=logits,
+        generated_ids=generated_ids,
+        state=state,
+        error_manager=error_manager,
+        context=context,
+        curiosity_manager=curiosity_manager
+    )
