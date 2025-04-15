@@ -114,16 +114,40 @@ class ScaffoldTokenMapper:
                 if base_id not in self.special_token_map:
                     raise ValueError(f"Special token {token} not mapped")
                     
+            # Validate token ID ranges
+            base_vocab_size = len(self.base_tokenizer)
+            scaffold_vocab_size = len(self.scaffold_tokenizer)
+            
+            # Validate special token map IDs
+            for base_id, scaffold_id in self.special_token_map.items():
+                if not (0 <= base_id < base_vocab_size):
+                    raise ValueError(f"Invalid base token ID in special token map: {base_id}")
+                if not (0 <= scaffold_id < scaffold_vocab_size):
+                    raise ValueError(f"Invalid scaffold token ID in special token map: {scaffold_id}")
+            
+            # Validate main token map IDs
+            for base_id, mapping in self.token_map.items():
+                if not (0 <= base_id < base_vocab_size):
+                    raise ValueError(f"Invalid base token ID in token map: {base_id}")
+                for scaffold_id in mapping["ids"]:
+                    if not (0 <= scaffold_id < scaffold_vocab_size):
+                        raise ValueError(f"Invalid scaffold token ID in token map: {scaffold_id}")
+                    
             self.logger.record({
                 "event": "token_maps_validated",
+                "base_vocab_size": base_vocab_size,
+                "scaffold_vocab_size": scaffold_vocab_size,
+                "token_map_size": len(self.token_map),
+                "special_token_map_size": len(self.special_token_map),
                 "timestamp": time.time()
             })
+            
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Token map validation failed: {str(e)}",
-                error_type="validation_error",
-                stack_trace=traceback.format_exc()
-            )
+            self.logger.record({
+                "error": f"Token map validation failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
             raise
         
     def _normalize_token(self, token: str) -> str:
@@ -677,7 +701,7 @@ class CrossAttentionInjector:
             cross_attn_layer = CrossAttentionLayer(
                 config=self.config_manager.get("core_config"),
                 logger=self.logger,
-                device=str(model.device)
+                device=model.device
             )
             
             # Create wrapped layer
@@ -1057,24 +1081,11 @@ class ScaffoldManager:
         self._initialized = False
         self._hidden_size = None
         self._device = None
-
-    def initialize(self, base_tokenizer, scaffold_tokenizer) -> None:
-        """Initialize scaffold manager with tokenizers and build token map."""
-        try:
-            with self.lock:
-                if self._initialized:
-                    return
-                    
-                # Build token map
+        
+        # Initialize token map if tokenizers are provided
+        if base_tokenizer and scaffold_tokenizer:
+            try:
                 self.token_map = self.build_token_map(base_tokenizer, scaffold_tokenizer)
-                
-                # Initialize scaffold config
-                self.scaffold_config = self.config_manager.get_section("scaffold_config")
-                
-                # Validate initialization
-                if not self.token_map:
-                    raise ValueError("Token map initialization failed")
-                    
                 self._initialized = True
                 
                 self.logger.record({
@@ -1082,14 +1093,13 @@ class ScaffoldManager:
                     "token_map_size": len(self.token_map),
                     "timestamp": time.time()
                 })
-                
-        except Exception as e:
-            self.logger.record({
-                "error": f"Scaffold manager initialization failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
+            except Exception as e:
+                self.logger.record({
+                    "error": f"Failed to initialize token map: {str(e)}",
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                })
+                raise
 
     def validate_scaffold_config(self) -> bool:
         """Validate scaffold-specific configuration settings."""
@@ -1355,19 +1365,24 @@ class ScaffoldManager:
         finally:
             self.scaffold_hidden_states = prev_states
 
-    def get_scaffold_hidden_states(self, scaffold_inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def get_scaffold_hidden_states(
+        self, 
+        scaffold_inputs: Dict[str, torch.Tensor],
+        scaffold_model: nn.Module
+    ) -> torch.Tensor:
         """
         Get hidden states from scaffold model.
         
         Args:
             scaffold_inputs: Dictionary containing scaffold model inputs
+            scaffold_model: The scaffold model to use for inference
             
         Returns:
             torch.Tensor: Hidden states from the scaffold model
             
         Raises:
             RuntimeError: If scaffold manager is not initialized
-            ValueError: If scaffold hidden states are not initialized
+            ValueError: If scaffold hidden states are not initialized or inputs are invalid
         """
         try:
             if not self._initialized:
@@ -1384,7 +1399,7 @@ class ScaffoldManager:
                 
             # Update hidden states with scaffold model output
             with torch.no_grad():
-                scaffold_outputs = self.scaffolds[0](
+                scaffold_outputs = scaffold_model(
                     **{k: v for k, v in scaffold_inputs.items() if k in ['input_ids', 'attention_mask']},
                     output_hidden_states=True
                 )
@@ -1405,43 +1420,17 @@ class ScaffoldManager:
             })
             raise
 
-    def clear_scaffold_cache(self):
-        """Clear scaffold hidden states cache."""
-        self.scaffold_hidden_states = None
-
-    def map_sequence(self, base_input_ids: torch.Tensor) -> torch.Tensor:
-        """Map base model token IDs to scaffold token IDs."""
-        try:
-            if not self._initialized:
-                raise RuntimeError("ScaffoldManager not initialized")
-                
-            if not self.token_map:
-                raise ValueError("Token map not initialized")
-                
-            if not self.validate_token_map():
-                raise ValueError("Token map validation failed")
-                
-            scaffold_ids = []
-            for base_id in base_input_ids.tolist():
-                if base_id in self.token_map:
-                    scaffold_ids.append(self.token_map[base_id]['ids'])
-                else:
-                    scaffold_ids.append([self.config_manager.get("controls_config.scaffold_unk_id", 0)])
-            return torch.tensor(scaffold_ids, device=base_input_ids.device)
-        except Exception as e:
-            self.logger.record({
-                "error": f"Sequence mapping failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-    def get_scaffold_context(self, scaffold_inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def get_scaffold_context(
+        self, 
+        scaffold_inputs: Dict[str, torch.Tensor],
+        scaffold_model: nn.Module
+    ) -> torch.Tensor:
         """
         Get scaffold context from inputs.
         
         Args:
             scaffold_inputs: Dictionary containing scaffold model inputs
+            scaffold_model: The scaffold model to use for inference
             
         Returns:
             torch.Tensor: Hidden states from the scaffold model
@@ -1461,7 +1450,9 @@ class ScaffoldManager:
                 raise ValueError("scaffold_inputs must contain 'input_ids' and 'attention_mask'")
                 
             # Get hidden states from scaffold model
-            with self.scaffold_context(self.get_scaffold_hidden_states(scaffold_inputs)):
+            with self.scaffold_context(
+                self.get_scaffold_hidden_states(scaffold_inputs, scaffold_model)
+            ):
                 return self.scaffold_hidden_states
                 
         except Exception as e:
