@@ -12,6 +12,7 @@ from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare
 import json
 import os
+import threading
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -431,539 +432,136 @@ class ConversationHistory:
 
 class SOVLState(StateBase):
     """Manages the overall state of the SOVL system."""
+    
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
+        """Initialize SOVL state with configuration and device."""
         super().__init__(config_manager, logger)
-        self._config = self._load_sovl_config()
         self.device = device
-        self.state_version = "1.1"
-        self.state_hash: Optional[str] = None
-
-        # Conversation and memory
-        self.history = ConversationHistory(config_manager)
-        self.dream_memory: Deque[Dict[str, Any]] = deque(maxlen=self._config.dream_memory_maxlen)
-        self.seen_prompts: Deque[Tuple[str, float]] = deque(maxlen=self._config.max_seen_prompts)
-        self.token_map: DefaultDict[int, List[int]] = defaultdict(lambda: [self._config.scaffold_unk_id])
-        self.last_prompt_embedding: Optional[torch.Tensor] = None
-
-        # Training state
-        self.data_exposure: int = 0
-        self.last_trained: float = 0.0
-        self.global_step: int = 0
-        self.best_valid_loss: float = float('inf')
-        self.patience: int = 0
-        self.lora_capacity: int = self._config.lora_capacity
-
-        # Behavioral state
-        self.temperament_score: float = 0.5  # Default neutral score
-        self.temperament_history: Deque[float] = deque(maxlen=self._config.temperament_history_maxlen)
-        self.temperament_history.append(self.temperament_score)
-        self.confidence_history: Deque[float] = deque(maxlen=self._config.confidence_history_maxlen)
-        self.sleep_confidence_sum: float = 0.0
-        self.sleep_confidence_count: int = 0
-
-        # Dynamic controls
-        self.last_weight: float = 0.0
-        self.is_sleeping: bool = False
-        self.sleep_progress: int = 0
-        self.sleep_batch: List = []
-        self.sleep_total_loss: float = 0.0
-        self.sleep_steps: int = 0
-
-        # Initialize curiosity state with validation
-        try:
-            self.curiosity = CuriosityState(config_manager, logger, device)
-            self._validate_curiosity_state()
-            self._log_event(
-                "curiosity_state_initialized",
-                pressure=self.curiosity.pressure,
-                unanswered_count=len(self.curiosity.unanswered_questions),
-                novelty_scores_count=len(self.curiosity.novelty_scores)
-            )
-        except Exception as e:
-            self._log_error("Failed to initialize curiosity state", error=str(e))
-            raise StateError(f"Curiosity state initialization failed: {str(e)}")
-
-        self._update_state_hash()
-        self._log_event(
-            "state_initialized",
-            hidden_size=self._config.hidden_size,
-            dream_memory_maxlen=self._config.dream_memory_maxlen,
-            state_hash=self.state_hash,
-            device=str(device),
-            conversation_id=self.history.conversation_id
-        )
-
-    def _load_sovl_config(self) -> SOVLConfig:
-        """Load SOVL configuration."""
-        return SOVLConfig(
-            dream_memory_maxlen=_load_config(self.config_manager, "controls_config", "dream_memory_maxlen", 10),
-            temperament_history_maxlen=_load_config(self.config_manager, "controls_config", "temperament_history_maxlen", 5),
-            confidence_history_maxlen=_load_config(self.config_manager, "controls_config", "confidence_history_maxlen", 5),
-            hidden_size=_load_config(self.config_manager, "core_config", "hidden_size", 768),
-            max_seen_prompts=_load_config(self.config_manager, "controls_config", "max_seen_prompts", 1000),
-            quantization_mode=_load_config(self.config_manager, "core_config", "quantization", "fp16"),
-            sleep_max_steps=_load_config(self.config_manager, "training_config", "sleep_max_steps", 100),
-            prompt_timeout=_load_config(self.config_manager, "controls_config", "prompt_timeout", 86400.0),
-            temperament_decay_rate=_load_config(self.config_manager, "controls_config", "temperament_decay_rate", 0.95),
-            scaffold_unk_id=_load_config(self.config_manager, "controls_config", "scaffold_unk_id", 0),
-            lora_capacity=_load_config(self.config_manager, "training_config", "lora_capacity", 0)
-        )
-
-    def _update_state_hash(self):
-        """Compute a hash of critical state components."""
-        try:
-            state_str = (
-                f"{self.temperament_score}:{self.curiosity.question_count}:"
-                f"{len(self.dream_memory)}:{len(self.seen_prompts)}"
-            )
-            self.state_hash = hashlib.sha256(state_str.encode()).hexdigest()[:16]
-        except Exception as e:
-            self._log_error("State hash update failed")
-
-    def set_scaffold_unk_id(self, unk_id: int):
-        """Set the unknown token ID for the scaffold model."""
-        try:
-            if not isinstance(unk_id, int) or unk_id < 0:
-                raise ValueError("unk_id must be a non-negative integer")
-            with self.lock:
-                self.token_map = defaultdict(lambda: [unk_id], {k: v for k, v in self.token_map.items()})
-                self._update_state_hash()
-                self._log_event(
-                    "scaffold_unk_id_set",
-                    unk_id=unk_id,
-                    token_map_size=len(self.token_map),
-                    state_hash=self.state_hash
-                )
-        except Exception as e:
-            self._log_error("Failed to set scaffold unk_id", unk_id=unk_id)
-            raise StateError(f"Set scaffold unk_id failed: {str(e)}")
-
-    def append_dream_memory(self, tensor: torch.Tensor, weight: float, source: str = "unknown"):
-        """Append a tensor to dream_memory with metadata."""
-        try:
-            self._validate_tensor(tensor, self._config.hidden_size, "Tensor")
-            weight = self._validate_number(weight, "Weight", min_value=0.0)
-            
-            # Ensure tensor is on the correct device
-            tensor = tensor.to(self.device)
-            
-            with self.lock:
-                with NumericalGuard(dtype=torch.float16 if self._config.quantization_mode == "fp16" else torch.float32):
-                    memory_entry = {
-                        "tensor": tensor.to(dtype=torch.float16 if self._config.quantization_mode == "fp16" else torch.float32),
-                        "weight": weight,
-                        "source": source,
-                        "timestamp": time.time(),
-                        "device": str(tensor.device)
-                    }
-                    self.dream_memory.append(memory_entry)
-                    self._update_state_hash()
-                    self._log_event(
-                        "dream_memory_appended",
-                        tensor_shape=list(tensor.shape),
-                        weight=weight,
-                        source=source,
-                        memory_length=len(self.dream_memory),
-                        state_hash=self.state_hash,
-                        device=str(tensor.device)
-                    )
-        except Exception as e:
-            self._log_error(
-                "Failed to append dream memory",
-                tensor_shape=list(tensor.shape) if isinstance(tensor, torch.Tensor) else None,
-                weight=weight,
-                source=source,
-                device=str(tensor.device) if isinstance(tensor, torch.Tensor) else None
-            )
-            raise StateError(f"Append dream memory failed: {str(e)}")
-
-    def get_weighted_memory(self) -> Optional[torch.Tensor]:
-        """Compute a weighted average of dream memory tensors."""
-        try:
-            with self.lock:
-                if not self.dream_memory:
-                    return None
-                    
-                # Ensure all tensors are on the correct device
-                tensors = [entry["tensor"].to(self.device) for entry in self.dream_memory]
-                weights = torch.tensor([entry["weight"] for entry in self.dream_memory], device=self.device)
-                
-                with NumericalGuard():
-                    weights = weights / (weights.sum() + 1e-8)
-                    stacked = torch.stack(tensors)
-                    weighted_avg = (stacked * weights.view(-1, *([1] * (stacked.dim() - 1)))).sum(dim=0)
-                    
-                    self._log_event(
-                        "weighted_memory_computed",
-                        tensor_shape=list(weighted_avg.shape),
-                        memory_length=len(self.dream_memory),
-                        device=str(weighted_avg.device)
-                    )
-                    return weighted_avg
-        except Exception as e:
-            self._log_error(
-                "Weighted memory computation failed",
-                memory_length=len(self.dream_memory),
-                device=str(self.device)
-            )
-            return None
-
-    def reset_conversation(self):
-        """Start fresh conversation while retaining memory."""
-        try:
-            with self.lock:
-                old_id = self.history.conversation_id
-                self.history = ConversationHistory(self.config_manager)
-                self._update_state_hash()
-                self._log_event(
-                    "conversation_reset",
-                    old_conversation_id=old_id,
-                    new_conversation_id=self.history.conversation_id,
-                    state_hash=self.state_hash,
-                    dream_memory_length=len(self.dream_memory),
-                    seen_prompts_count=len(self.seen_prompts)
-                )
-        except Exception as e:
-            self._log_error("Conversation reset failed")
-            raise StateError(f"Conversation reset failed: {str(e)}")
-
-    def add_seen_prompt(self, prompt: str):
-        """Add a seen prompt with timestamp."""
-        try:
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise ValueError("Prompt must be a non-empty string")
-            with self.lock:
-                current_time = time.time()
-                self.seen_prompts.append((prompt, current_time))
-                self._prune_seen_prompts(current_time)
-                self._update_state_hash()
-                self._log_event(
-                    "seen_prompt_added",
-                    prompt_length=len(prompt),
-                    seen_prompts_count=len(self.seen_prompts),
-                    state_hash=self.state_hash
-                )
-        except Exception as e:
-            self._log_error("Failed to add seen prompt", prompt=prompt)
-            raise StateError(f"Add seen prompt failed: {str(e)}")
-
-    def _prune_seen_prompts(self, current_time: float):
-        """Remove old prompts based on timeout."""
-        while self.seen_prompts and current_time - self.seen_prompts[0][1] > self._config.prompt_timeout:
-            prompt, _ = self.seen_prompts.popleft()
-            self._log_event("seen_prompt_pruned", prompt=prompt)
-
-    def update_temperament(self, new_score: float) -> None:
-        """
-        Update the temperament score with validation and logging.
+        self.lock = threading.Lock()
         
-        Args:
-            new_score: New temperament score (must be between 0.0 and 1.0)
-        """
-        if not isinstance(new_score, (int, float)):
-            raise ValueError(f"Temperament score must be numeric, got {type(new_score)}")
-            
-        if not 0.0 <= new_score <= 1.0:
-            raise ValueError(f"Temperament score must be between 0.0 and 1.0, got {new_score}")
-            
-        with self.lock:
-            self.temperament_score = float(new_score)
-            self.temperament_history.append(self.temperament_score)
-            self.state_hash = self._compute_state_hash()
-            
-    def _compute_state_hash(self) -> str:
-        """Compute a hash of the current state."""
-        state_data = {
-            "temperament_score": self.temperament_score,
-            "confidence_history": list(self.confidence_history),
-            "data_exposure": self.data_exposure,
-            "lora_capacity": self.lora_capacity,
+        # Initialize state components
+        self._initialize_state()
+        self._log_event("state_initialized", {
+            "state_hash": self.state_hash,
             "conversation_id": self.history.conversation_id
-        }
-        return hashlib.sha256(json.dumps(state_data, sort_keys=True).encode()).hexdigest()
+        })
         
-    @property
-    def current_temperament(self) -> float:
-        """Get the current temperament score with thread safety."""
+    def _initialize_state(self) -> None:
+        """Initialize all state components with proper validation."""
         with self.lock:
-            return self.temperament_score
-
-    def update_confidence(self, confidence: float):
-        """Update confidence history."""
-        try:
-            confidence = self._validate_number(confidence, "Confidence", min_value=0.0)
-            with self.lock:
-                with NumericalGuard():
-                    self.confidence_history.append(confidence)
-                    if self.is_sleeping:
-                        self.sleep_confidence_sum += confidence
-                        self.sleep_confidence_count += 1
-                    self._update_state_hash()
-                    self._log_event(
-                        "confidence_updated",
-                        confidence=confidence,
-                        history_length=len(self.confidence_history),
-                        is_sleeping=self.is_sleeping,
-                        state_hash=self.state_hash
-                    )
-        except Exception as e:
-            self._log_error("Confidence update failed", confidence=confidence)
-            raise StateError(f"Confidence update failed: {str(e)}")
-
-    def set_last_prompt_embedding(self, embedding: torch.Tensor):
-        """Set the last prompt embedding with validation."""
-        try:
-            self._validate_tensor(embedding, self._config.hidden_size, "Embedding")
+            # Initialize dream memory
+            self.dream_memory = deque(maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 100))
+            self.dream_memory_maxlen = self.config_manager.get("controls_config.dream_memory_maxlen", 100)
             
-            # Ensure embedding is on the correct device
-            embedding = embedding.to(self.device)
-            
-            with self.lock:
-                with NumericalGuard():
-                    self.last_prompt_embedding = embedding.to(
-                        dtype=torch.float16 if self._config.quantization_mode == "fp16" else torch.float32
-                    )
-                    self._update_state_hash()
-                    self._log_event(
-                        "last_prompt_embedding_set",
-                        embedding_shape=list(embedding.shape),
-                        state_hash=self.state_hash,
-                        device=str(embedding.device)
-                    )
-        except Exception as e:
-            self._log_error(
-                "Failed to set last prompt embedding",
-                embedding_shape=list(embedding.shape) if isinstance(embedding, torch.Tensor) else None,
-                device=str(embedding.device) if isinstance(embedding, torch.Tensor) else None
+            # Initialize confidence tracking
+            self.confidence_history = deque(
+                maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 1000)
             )
-            raise StateError(f"Set last prompt embedding failed: {str(e)}")
-
-    def to_dict(self, max_retries: int = 3) -> Dict[str, Any]:
-        """Serialize state to dictionary with retry logic."""
-        for attempt in range(max_retries):
-            try:
-                with self.lock:
-                    state_dict = {
-                        "version": self.state_version,
-                        "state_hash": self.state_hash,
-                        "history": {
-                            "conversation_id": self.history.conversation_id,
-                            "messages": list(self.history.messages)
-                        },
-                        "dream_memory": [
-                            {
-                                "tensor": entry["tensor"].cpu().numpy().tolist(),
-                                "weight": entry["weight"],
-                                "source": entry["source"],
-                                "timestamp": entry["timestamp"],
-                                "device": entry["device"]
-                            }
-                            for entry in self.dream_memory
-                        ],
-                        "seen_prompts": [(p, t) for p, t in self.seen_prompts],
-                        "token_map": {str(k): v for k, v in self.token_map.items()},
-                        "last_prompt_embedding": (
-                            self.last_prompt_embedding.cpu().numpy().tolist()
-                            if self.last_prompt_embedding is not None else None
-                        ),
-                        "data_exposure": self.data_exposure,
-                        "last_trained": self.last_trained,
-                        "global_step": self.global_step,
-                        "best_valid_loss": self.best_valid_loss,
-                        "patience": self.patience,
-                        "lora_capacity": self.lora_capacity,
-                        "temperament_score": self.temperament_score,
-                        "temperament_history": list(self.temperament_history),
-                        "confidence_history": list(self.confidence_history),
-                        "sleep_confidence_sum": self.sleep_confidence_sum,
-                        "sleep_confidence_count": self.sleep_confidence_count,
-                        "last_weight": self.last_weight,
-                        "is_sleeping": self.is_sleeping,
-                        "sleep_progress": self.sleep_progress,
-                        "sleep_total_loss": self.sleep_total_loss,
-                        "sleep_steps": self.sleep_steps,
-                        "hidden_size": self._config.hidden_size,
-                        "curiosity_state": self.curiosity.to_dict()
-                    }
-                    self._log_event(
-                        "state_serialized",
-                        state_keys=list(state_dict.keys()),
-                        state_hash=self.state_hash
-                    )
-                    return state_dict
-            except Exception as e:
-                self._log_error(f"State serialization failed on attempt {attempt + 1}")
-                if attempt == max_retries - 1:
-                    raise StateError(f"State serialization failed after {max_retries} attempts: {str(e)}")
-                time.sleep(0.1)
-
-    def from_dict(self, data: Dict[str, Any], device: torch.device, max_retries: int = 3):
-        """Load state from dictionary with retry logic."""
-        for attempt in range(max_retries):
-            try:
-                with self.lock:
-                    version = data.get("version", "1.0")
-                    if version != self.state_version:
-                        self._log_event("state_version_mismatch", {
-                            "expected": self.state_version,
-                            "got": version,
-                            "conversation_id": self.history.conversation_id
-                        })
-
-                    # Conversation history
-                    old_conversation_id = self.history.conversation_id
-                    self.history = ConversationHistory(
-                        self.config_manager,
-                        data.get("history", {}).get("conversation_id")
-                    )
-                    self.history.messages = deque(
-                        data.get("history", {}).get("messages", []),
-                        maxlen=self._config.max_seen_prompts
-                    )
-                    
-                    # Log conversation ID change if it occurred
-                    if old_conversation_id != self.history.conversation_id:
-                        self._log_event("conversation_id_changed", {
-                            "old_conversation_id": old_conversation_id,
-                            "new_conversation_id": self.history.conversation_id,
-                            "state_hash": self.state_hash
-                        })
-
-                    # Dream memory
-                    self.dream_memory = deque(maxlen=self._config.dream_memory_maxlen)
-                    for entry in data.get("dream_memory", []):
-                        try:
-                            tensor = torch.tensor(
-                                entry["tensor"],
-                                dtype=torch.float16 if self._config.quantization_mode == "fp16" else torch.float32,
-                                device=device
-                            )
-                            if tensor.shape[-1] == self._config.hidden_size:
-                                self.dream_memory.append({
-                                    "tensor": tensor,
-                                    "weight": float(entry["weight"]),
-                                    "source": entry.get("source", "unknown"),
-                                    "timestamp": entry.get("timestamp", time.time()),
-                                    "device": entry.get("device", str(device))
-                                })
-                        except Exception as e:
-                            self._log_event(
-                                "failed_dream_memory_entry",
-                                tensor_shape=len(entry["tensor"]) if isinstance(entry["tensor"], list) else None
-                            )
-
-                    # Seen prompts
-                    self.seen_prompts = deque(
-                        [(p, t) for p, t in data.get("seen_prompts", [])],
-                        maxlen=self._config.max_seen_prompts
-                    )
-                    self._prune_seen_prompts(time.time())
-
-                    # Token map
-                    self.token_map = defaultdict(
-                        lambda: [self._config.scaffold_unk_id],
-                        {int(k): v for k, v in data.get("token_map", {}).items()}
-                    )
-
-                    # Last prompt embedding
-                    embedding_data = data.get("last_prompt_embedding")
-                    self.last_prompt_embedding = None
-                    if embedding_data is not None:
-                        try:
-                            embedding = torch.tensor(
-                                embedding_data,
-                                dtype=torch.float16 if self._config.quantization_mode == "fp16" else torch.float32,
-                                device=device
-                            )
-                            if embedding.shape[-1] == self._config.hidden_size:
-                                self.last_prompt_embedding = embedding
-                        except Exception as e:
-                            self._log_event(
-                                "failed_prompt_embedding",
-                                embedding_shape=len(embedding_data) if isinstance(embedding_data, list) else None
-                            )
-
-                    # Training state
-                    self.data_exposure = int(data.get("data_exposure", 0))
-                    self.last_trained = float(data.get("last_trained", 0))
-                    self.global_step = int(data.get("global_step", 0))
-                    self.best_valid_loss = float(data.get("best_valid_loss", float('inf')))
-                    self.patience = int(data.get("patience", 0))
-                    self.lora_capacity = int(data.get("lora_capacity", self.lora_capacity))
-
-                    # Behavioral state
-                    self.temperament_score = float(data.get("temperament_score", 0.0))
-                    self.temperament_history = deque(
-                        [float(x) for x in data.get("temperament_history", [])],
-                        maxlen=self._config.temperament_history_maxlen
-                    )
-                    self.confidence_history = deque(
-                        [float(x) for x in data.get("confidence_history", [])],
-                        maxlen=self._config.confidence_history_maxlen
-                    )
-                    self.sleep_confidence_sum = float(data.get("sleep_confidence_sum", 0.0))
-                    self.sleep_confidence_count = int(data.get("sleep_confidence_count", 0))
-
-                    # Dynamic controls
-                    self.last_weight = float(data.get("last_weight", 0.0))
-                    self.is_sleeping = bool(data.get("is_sleeping", False))
-                    self.sleep_progress = min(int(data.get("sleep_progress", 0)), self._config.sleep_max_steps)
-                    self.sleep_total_loss = float(data.get("sleep_total_loss", 0.0))
-                    self.sleep_steps = min(int(data.get("sleep_steps", 0)), self._config.sleep_max_steps)
-
-                    # Curiosity state
-                    self.curiosity.from_dict(data.get("curiosity_state", {}))
-
-                    self._update_state_hash()
-                    self._log_event(
-                        "state_loaded",
-                        state_version=version,
-                        state_hash=self.state_hash,
-                        dream_memory_length=len(self.dream_memory),
-                        seen_prompts_count=len(self.seen_prompts),
-                        conversation_id=self.history.conversation_id
-                    )
-                    break
-            except Exception as e:
-                self._log_error(f"State loading failed on attempt {attempt + 1}", {
-                    "data_keys": list(data.keys()),
-                    "conversation_id": self.history.conversation_id
-                })
-                if attempt == max_retries - 1:
-                    raise StateError(f"State loading failed after {max_retries} attempts: {str(e)}")
-                time.sleep(0.1)
-
-    def _validate_curiosity_state(self) -> None:
-        """Validate the curiosity state attributes and data structures."""
-        if not hasattr(self, 'curiosity') or self.curiosity is None:
-            raise StateError("Curiosity state not initialized")
+            self.sleep_confidence_sum = 0.0
+            self.sleep_confidence_count = 0
             
-        required_attributes = [
-            'unanswered_questions',
-            'last_question_time',
-            'pressure',
-            'novelty_scores',
-            'question_count'
-        ]
+            # Initialize gestation state
+            self.gestation_state = "normal"
+            
+            # Initialize other state components
+            self.history = ConversationHistory(
+                maxlen=self.config_manager.get("controls_config.conversation_history_maxlen", 10)
+            )
+            self.curiosity = CuriosityState(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                device=self.device
+            )
+            
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert state to dictionary for serialization."""
+        with self.lock:
+            return {
+                "dream_memory": [(tensor.cpu().tolist(), weight) for tensor, weight in self.dream_memory],
+                "dream_memory_maxlen": self.dream_memory_maxlen,
+                "confidence_history": list(self.confidence_history),
+                "sleep_confidence_sum": self.sleep_confidence_sum,
+                "sleep_confidence_count": self.sleep_confidence_count,
+                "gestation_state": self.gestation_state,
+                "history": self.history.to_dict(),
+                "curiosity": self.curiosity.to_dict(),
+                "state_hash": self.state_hash
+            }
+            
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], device: torch.device) -> 'SOVLState':
+        """Create state instance from dictionary."""
+        state = cls(data["config_manager"], data["logger"], device)
+        with state.lock:
+            # Load dream memory
+            if "dream_memory" in data:
+                state.dream_memory = deque(
+                    [(torch.tensor(t, device=device, dtype=torch.float), w) for t, w in data["dream_memory"]],
+                    maxlen=data.get("dream_memory_maxlen", 100)
+                )
+            
+            # Load confidence tracking
+            state.confidence_history = deque(
+                data.get("confidence_history", []),
+                maxlen=data.get("confidence_history_maxlen", 1000)
+            )
+            state.sleep_confidence_sum = data.get("sleep_confidence_sum", 0.0)
+            state.sleep_confidence_count = data.get("sleep_confidence_count", 0)
+            
+            # Load gestation state
+            state.gestation_state = data.get("gestation_state", "normal")
+            
+            # Load other components
+            if "history" in data:
+                state.history = ConversationHistory.from_dict(data["history"])
+            if "curiosity" in data:
+                state.curiosity = CuriosityState.from_dict(data["curiosity"], device)
+                
+            # Validate state
+            state._validate_state()
+            
+        return state
         
-        missing_attributes = [attr for attr in required_attributes 
-                            if not hasattr(self.curiosity, attr)]
-        if missing_attributes:
-            raise StateError(f"Missing required curiosity state attributes: {missing_attributes}")
-            
-        # Validate data structures
-        if not isinstance(self.curiosity.unanswered_questions, deque):
-            raise StateError("Curiosity unanswered_questions must be a deque")
-            
-        if not isinstance(self.curiosity.novelty_scores, deque):
-            raise StateError("Curiosity novelty_scores must be a deque")
-            
-        # Validate values
-        if not isinstance(self.curiosity.pressure, (int, float)):
-            raise StateError("Curiosity pressure must be numeric")
-            
-        if not isinstance(self.curiosity.question_count, int):
-            raise StateError("Curiosity question_count must be an integer")
+    def _validate_state(self) -> None:
+        """Validate state components and initialize missing fields."""
+        with self.lock:
+            # Validate dream memory
+            if not hasattr(self, 'dream_memory'):
+                self.dream_memory = deque(maxlen=self.dream_memory_maxlen)
+                self._log_event("state_validation", {"field": "dream_memory", "action": "initialized"})
+                
+            # Validate confidence tracking
+            if not hasattr(self, 'confidence_history'):
+                self.confidence_history = deque(maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 1000))
+                self._log_event("state_validation", {"field": "confidence_history", "action": "initialized"})
+                
+            if not hasattr(self, 'sleep_confidence_sum'):
+                self.sleep_confidence_sum = 0.0
+                self._log_event("state_validation", {"field": "sleep_confidence_sum", "action": "initialized"})
+                
+            if not hasattr(self, 'sleep_confidence_count'):
+                self.sleep_confidence_count = 0
+                self._log_event("state_validation", {"field": "sleep_confidence_count", "action": "initialized"})
+                
+            # Validate gestation state
+            if not hasattr(self, 'gestation_state'):
+                self.gestation_state = "normal"
+                self._log_event("state_validation", {"field": "gestation_state", "action": "initialized"})
+                
+            # Validate other components
+            if not hasattr(self, 'history'):
+                self.history = ConversationHistory(
+                    maxlen=self.config_manager.get("controls_config.conversation_history_maxlen", 10)
+                )
+                self._log_event("state_validation", {"field": "history", "action": "initialized"})
+                
+            if not hasattr(self, 'curiosity'):
+                self.curiosity = CuriosityState(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    device=self.device
+                )
+                self._log_event("state_validation", {"field": "curiosity", "action": "initialized"})
 
 class StateManager:
     """Manages state initialization and persistence for the SOVL system."""

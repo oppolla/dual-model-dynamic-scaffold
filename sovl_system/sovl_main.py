@@ -194,36 +194,76 @@ class ConfigHandler:
 
     def _validate_all_configs(self):
         """Validate and synchronize all configurations."""
-        try:
-            # Validate curiosity-related configurations
-            self._validate_curiosity_configs()
-            
-            # Validate temperament-related configurations
-            self._validate_temperament_configs()
-            
-            # Log final configuration state
-            self.context.logger.record_event(
-                event_type="config_validation",
-                message="All configurations validated successfully",
-                level="info",
-                additional_info={
-                    "curiosity_config": self.curiosity_config,
-                    "controls_config": {k: v for k, v in self.controls_config.items() 
-                                     if k.startswith(("curiosity_", "temp_"))}
-                }
-            )
-            
-        except Exception as e:
-            self.context.logger.record_event(
-                event_type="config_validation_error",
-                message="Failed to validate configurations",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise
+        self._validate_controls_configs()
+        self._validate_curiosity_configs()
+        self._validate_temperament_configs()
+        
+        # Log final configuration state
+        self.context.logger.record_event(
+            event_type="config_validation",
+            message="All configurations validated successfully",
+            level="info",
+            additional_info={
+                "curiosity_config": self.curiosity_config,
+                "controls_config": {k: v for k, v in self.controls_config.items() 
+                                 if k.startswith(("curiosity_", "temp_"))}
+            }
+        )
+        
+    def _validate_controls_configs(self):
+        """Validate controls configuration with generation-specific keys."""
+        required_keys = {
+            "memory_threshold": (0.85, (0.5, 0.95)),
+            "max_generation_retries": (3, (1, 5)),
+            "scaffold_unk_id": (None, None),
+            "use_token_map_memory": (True, None),
+            "enable_dynamic_cross_attention": (False, None),
+            "conversation_history_maxlen": (10, (5, 50)),
+            "memory_decay_rate": (0.95, (0.8, 1.0)),
+            "enable_repetition_check": (True, None),
+            "enable_confidence_tracking": (True, None),
+            "enable_error_listening": (True, None),
+            "dream_memory_weight": (0.1, (0.0, 0.5)),
+            "gestation_confidence_threshold": (0.3, (0.1, 0.5)),
+            "gestation_history_threshold": (100, (50, 200)),
+            "base_temperature": (0.7, (0.1, 2.0)),
+            "dynamic_cross_attn_mode": (None, None)
+        }
+        
+        # Get current controls config
+        self.controls_config = self.context.config_manager.get_section("controls_config", {})
+        
+        # Validate each key
+        for key, (default, valid_range) in required_keys.items():
+            if key not in self.controls_config:
+                self.controls_config[key] = default
+                self.context.logger.record_event(
+                    event_type="config_validation",
+                    message=f"Missing {key} in controls_config, using default",
+                    level="warning",
+                    additional_info={"key": key, "default": default}
+                )
+            elif valid_range and key != "scaffold_unk_id":
+                value = self.controls_config[key]
+                if not (valid_range[0] <= value <= valid_range[1]):
+                    self.controls_config[key] = default
+                    self.context.logger.record_event(
+                        event_type="config_validation",
+                        message=f"Invalid {key} value, resetting to default",
+                        level="warning",
+                        additional_info={"key": key, "value": value, "default": default}
+                    )
+                    
+        # Log final controls config state
+        self.context.logger.record_event(
+            event_type="controls_config_validated",
+            message="Controls configuration validated",
+            level="info",
+            additional_info={
+                "config": self.controls_config,
+                "timestamp": time.time()
+            }
+        )
 
     def _validate_curiosity_configs(self):
         """Validate and synchronize curiosity-related configurations."""
@@ -709,12 +749,13 @@ class StateTracker:
             # Only load if state path exists, otherwise keep initialized state
             state_path = self.config_handler.config_manager.get("state_config.state_path")
             if state_path and os.path.exists(state_path):
-                self.state = self.state_manager.load_state(state_path)
-                self._log_event("state_loaded", {
-                    "state_path": state_path,
-                    "state_hash": self.state.state_hash,
-                    "conversation_id": self.state.history.conversation_id
-                })
+                with self.state.lock:
+                    self.state = self.state_manager.load_state(state_path)
+                    self._log_event("state_loaded", {
+                        "state_path": state_path,
+                        "state_hash": self.state.state_hash,
+                        "conversation_id": self.state.history.conversation_id
+                    })
             else:
                 self._log_event("state_initialized", {
                     "state_hash": self.state.state_hash,
@@ -729,11 +770,12 @@ class StateTracker:
         try:
             state_path = self.config_handler.config_manager.get("state_config.state_path")
             if state_path:
-                self.state_manager.save_state(state_path)
-                self._log_event("state_saved", {
-                    "state_path": state_path,
-                    "state_hash": self.state.state_hash
-                })
+                with self.state.lock:
+                    self.state_manager.save_state(state_path)
+                    self._log_event("state_saved", {
+                        "state_path": state_path,
+                        "state_hash": self.state.state_hash
+                    })
         except Exception as e:
             self._log_error("State saving failed", e)
             raise StateError(f"Failed to save state: {str(e)}")

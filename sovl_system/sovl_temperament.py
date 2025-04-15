@@ -164,3 +164,66 @@ class TemperamentSystem:
             return "Balanced"
         else:
             return "Curious"
+
+    def adjust_parameter(
+        self,
+        base_value: float,
+        parameter_type: str,
+        curiosity_pressure: Optional[float] = None
+    ) -> float:
+        """Adjust a parameter based on current temperament and curiosity pressure."""
+        try:
+            # Validate inputs
+            if not 0.0 <= base_value <= 1.0:
+                raise ValueError(f"Base value must be between 0.0 and 1.0, got {base_value}")
+            if curiosity_pressure is not None and not 0.0 <= curiosity_pressure <= 1.0:
+                raise ValueError(f"Curiosity pressure must be between 0.0 and 1.0, got {curiosity_pressure}")
+            
+            # Get current temperament score
+            current_score = self.current_score
+            
+            # Calculate adjustment based on parameter type
+            if parameter_type == "temperature":
+                # Base adjustment from temperament
+                adjustment = (current_score - 0.5) * 0.3  # Scale to ±0.15
+                
+                # Add curiosity influence if available
+                if curiosity_pressure is not None:
+                    adjustment += curiosity_pressure * 0.2  # Scale to +0.2
+                
+                # Apply adjustment with bounds
+                adjusted_value = base_value + adjustment
+                adjusted_value = max(0.1, min(1.0, adjusted_value))
+                
+                # Log the adjustment
+                self.logger.record_event(
+                    event_type="parameter_adjusted",
+                    message="Parameter adjusted",
+                    level="info",
+                    additional_info={
+                        "parameter_type": parameter_type,
+                        "base_value": base_value,
+                        "adjusted_value": adjusted_value,
+                        "temperament_score": current_score,
+                        "curiosity_pressure": curiosity_pressure,
+                        "adjustment": adjustment
+                    }
+                )
+                
+                return adjusted_value
+                
+            else:
+                raise ValueError(f"Unsupported parameter type: {parameter_type}")
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="parameter_adjustment_error",
+                message=f"Failed to adjust parameter: {str(e)}",
+                level="error",
+                additional_info={
+                    "parameter_type": parameter_type,
+                    "base_value": base_value,
+                    "curiosity_pressure": curiosity_pressure
+                }
+            )
+            return base_value  # Return base value on error

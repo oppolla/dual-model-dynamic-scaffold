@@ -9,6 +9,7 @@ from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
+from sovl_error_manager import ErrorManager
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
@@ -22,32 +23,36 @@ class GenerationManager:
         scaffold_tokenizer: AutoTokenizer,
         state: SOVLState,
         logger: Logger,
-        error_logger: Logger,
+        error_manager: ErrorManager,
         cross_attention_injector: Any,
         scaffold_manager: Any,
         temperament: Any,
+        device: torch.device,
         curiosity_manager: Any = None,
     ):
         """Initialize GenerationManager with configuration and model components."""
         # Core components
         self.config_manager = config_manager
-        self.base_model = base_model
-        self.scaffolds = scaffolds
+        self.base_model = base_model.to(device)
+        self.scaffolds = [scaffold.to(device) for scaffold in scaffolds]
         self.base_tokenizer = base_tokenizer
         self.scaffold_tokenizer = scaffold_tokenizer
         self.state = state
         self.logger = logger
-        self.error_logger = error_logger
+        self.error_manager = error_manager
         self.cross_attention_injector = cross_attention_injector
         self.scaffold_manager = scaffold_manager
         self.temperament = temperament
         self.curiosity_manager = curiosity_manager
+        self.device = device
 
         # Configuration sections
         self._load_config_sections()
+        
+        # Log initialization with config values
+        self._log_initialization()
 
-        # Device and memory settings
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Memory settings
         self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", scaffold_tokenizer.unk_token_id)
         self.use_token_map_memory = self.controls_config.get("use_token_map_memory", True)
         self.dynamic_cross_attn_mode = self.controls_config.get("dynamic_cross_attn_mode", None)
@@ -60,11 +65,31 @@ class GenerationManager:
             "post_generate": []
         }
 
+        # Validate and initialize curiosity state
+        self._validate_curiosity_state()
+
     def _load_config_sections(self) -> None:
         """Load configuration sections from config manager."""
         self.controls_config = self.config_manager.get_section("controls_config")
         self.curiosity_config = self.config_manager.get_section("curiosity_config")
         self.training_config = self.config_manager.get_section("training_config")
+        
+    def _log_initialization(self) -> None:
+        """Log GenerationManager initialization with config values."""
+        self._log_event(
+            "manager_init",
+            {
+                "controls_config": {k: self.controls_config.get(k) for k in [
+                    "memory_threshold", "max_generation_retries", "scaffold_unk_id", 
+                    "use_token_map_memory", "dynamic_cross_attn_mode", "conversation_history_maxlen",
+                    "memory_decay_rate", "enable_repetition_check", "enable_confidence_tracking",
+                    "enable_error_listening", "dream_memory_weight", "base_temperature"
+                ]},
+                "curiosity_config": {k: self.curiosity_config.get(k) for k in [
+                    "max_new_tokens", "top_k", "weight_ignorance", "weight_novelty"
+                ]}
+            }
+        )
 
     def register_callback(self, stage: str, callback: Callable) -> None:
         """Register a callback for generation stages."""
@@ -75,6 +100,50 @@ class GenerationManager:
                 error=f"Invalid callback stage: {stage}",
                 context="register_callback"
             )
+
+    def _log_event(self, event: str, data: Dict[str, Any]) -> None:
+        """Log an event with standardized metadata."""
+        self.logger.record_event(
+            event_type=f"generation_{event}",
+            message=f"Generation event: {event}",
+            level="info",
+            additional_info={
+                **data,
+                "conversation_id": self.state.history.conversation_id,
+                "state_hash": self.state.state_hash,
+                "device": str(self.device)
+            }
+        )
+
+    def _log_error(self, error: str, context: str, stack_trace: Optional[str] = None) -> None:
+        """Log an error through ErrorManager with standardized metadata."""
+        self.error_manager.context.logger.log_error(
+            error_msg=error,
+            error_type=f"generation_{context}_error",
+            stack_trace=stack_trace or traceback.format_exc(),
+            additional_info={
+                "context": context,
+                "conversation_id": self.state.history.conversation_id,
+                "state_hash": self.state.state_hash,
+                "device": str(self.device)
+            }
+        )
+
+    def _log_memory_health(self, memory_ratio: float, current_memory: int, total_memory: int) -> None:
+        """Log memory health status with standardized metadata."""
+        self.logger.log_memory_health(
+            model_size=current_memory,
+            health_status="healthy" if memory_ratio <= self.memory_threshold else "unhealthy",
+            device=self.device,
+            additional_info={
+                "memory_ratio": memory_ratio,
+                "current_memory": current_memory,
+                "total_memory": total_memory,
+                "threshold": self.memory_threshold,
+                "conversation_id": self.state.history.conversation_id,
+                "state_hash": self.state.state_hash
+            }
+        )
 
     def check_memory_health(self) -> bool:
         """Check GPU memory usage and clean up if necessary."""
@@ -87,28 +156,26 @@ class GenerationManager:
             total_memory = torch.cuda.get_device_properties(0).total_memory
             memory_ratio = current_memory / total_memory
 
-            self._log_event(
-                event="memory_health_check",
-                data={
-                    "memory_ratio": memory_ratio,
-                    "current_memory": current_memory,
-                    "total_memory": total_memory
-                }
-            )
+            # Log memory health using standardized method
+            self._log_memory_health(memory_ratio, current_memory, total_memory)
 
             if memory_ratio > self.memory_threshold:
                 torch.cuda.empty_cache()
                 self._log_event(
-                    event="memory_cleanup",
-                    data={"reason": "threshold_exceeded"}
+                    "memory_cleanup",
+                    {
+                        "reason": "threshold_exceeded",
+                        "memory_ratio": memory_ratio,
+                        "threshold": self.memory_threshold
+                    }
                 )
                 return False
             return True
         except Exception as e:
             self._log_error(
                 error=f"Memory health check failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="check_memory_health"
+                context="check_memory_health",
+                stack_trace=traceback.format_exc()
             )
             return False
 
@@ -127,8 +194,8 @@ class GenerationManager:
                 do_sample=True
             )
             self._log_event(
-                event="error_prompt_handled",
-                data={
+                "error_prompt_handled",
+                {
                     "prompt": f"System error detected: {error_msg} What happened?",
                     "response": response,
                     "is_error_prompt": True,
@@ -140,8 +207,8 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Error prompt handling failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="handle_error_prompt"
+                context="handle_error_prompt",
+                stack_trace=traceback.format_exc()
             )
             return "An error occurred while handling the error prompt"
 
@@ -163,8 +230,8 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Repetition check failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="has_repetition"
+                context="has_repetition",
+                stack_trace=traceback.format_exc()
             )
             return False
 
@@ -206,8 +273,8 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Tokenization failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="tokenize_and_map"
+                context="tokenize_and_map",
+                stack_trace=traceback.format_exc()
             )
             raise
 
@@ -231,8 +298,8 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Scaffold hidden states failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="get_scaffold_hidden_states"
+                context="get_scaffold_hidden_states",
+                stack_trace=traceback.format_exc()
             )
             raise
 
@@ -276,14 +343,14 @@ class GenerationManager:
                     torch.cuda.empty_cache()
 
                 self._log_event(
-                    event="scaffold_cache_cleared",
-                    data={}
+                    "scaffold_cache_cleared",
+                    {}
                 )
             except Exception as e:
                 self._log_error(
                     error=f"Failed to clear scaffold cache: {str(e)}",
-                    stack_trace=traceback.format_exc(),
-                    context="clear_scaffold_cache"
+                    context="clear_scaffold_cache",
+                    stack_trace=traceback.format_exc()
                 )
 
     def _update_token_map_memory(self, prompt: str, confidence: float) -> None:
@@ -300,8 +367,8 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Token map update failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="update_token_map_memory"
+                context="update_token_map_memory",
+                stack_trace=traceback.format_exc()
             )
 
     def prepare_for_training(self, batch: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -317,36 +384,15 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Training preparation failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="prepare_for_training"
+                context="prepare_for_training",
+                stack_trace=traceback.format_exc()
             )
             raise
-
-    def _log_event(self, event: str, data: Dict[str, Any]) -> None:
-        """Log an event with common metadata."""
-        self.logger.record({
-            "event": event,
-            **data,
-            "timestamp": time.time(),
-            "conversation_id": self.state.history.conversation_id,
-            "state_hash": self.state.state_hash(),
-        })
-
-    def _log_error(self, error: str, context: str, stack_trace: Optional[str] = None) -> None:
-        """Log an error with common metadata."""
-        self.error_logger.record({
-            "error": error,
-            "context": context,
-            "timestamp": time.time(),
-            "stack_trace": stack_trace or traceback.format_exc(),
-            "conversation_id": self.state.history.conversation_id,
-            "state_hash": self.state.state_hash(),
-        })
 
     def _prepare_generation_params(self, max_new_tokens: int, scaffold_weight: Optional[float], **kwargs) -> Dict[str, Any]:
         """Prepare and validate generation parameters."""
         return {
-            "max_new_tokens": max_new_tokens or self.curiosity_config.get("max_new_tokens", 50),
+            "max_new_tokens": max_new_tokens or self.curiosity_config.get("max_new_tokens", 8),  # Match ConfigHandler
             "scaffold_weight": scaffold_weight,
             "temperature": kwargs.get("temperature", self.controls_config.get("base_temperature", 0.7)),
             "top_k": kwargs.get("top_k", self.curiosity_config.get("top_k", 30)),
@@ -369,8 +415,8 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Failed to compute dynamic factor: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="compute_dynamic_factor"
+                context="compute_dynamic_factor",
+                stack_trace=traceback.format_exc()
             )
             return None
 
@@ -399,8 +445,8 @@ class GenerationManager:
                 dream_memory_info["error"] = str(e)
                 self._log_error(
                     error=f"Dream memory preparation failed: {str(e)}",
-                    stack_trace=traceback.format_exc(),
-                    context="prepare_dream_memory"
+                    context="prepare_dream_memory",
+                    stack_trace=traceback.format_exc()
                 )
 
         return memory_tensors, dream_memory_info
@@ -414,53 +460,63 @@ class GenerationManager:
                     seq_ids = seq_ids[:j + 3]
                     break
             self._log_event(
-                event="repetition_detected",
-                data={
+                "repetition_detected",
+                {
                     "original_text": original_text,
                     "truncated_at": j + 3
                 }
             )
         return seq_ids
 
-    def _update_curiosity(self, prompt: str, response: str, confidence_score: float) -> str:
-        """Update curiosity system and append questions if needed."""
-        if not self.curiosity_config.get("enable_curiosity", True) or not self.curiosity_manager:
-            return response
-
+    def _update_curiosity(self, generated_text: str, confidence: float) -> None:
+        """Update curiosity state based on generation results."""
         try:
-            self.state.curiosity.prune_old_questions(self.curiosity_config.get("question_timeout", 3600.0))
+            if self.curiosity_manager is None:
+                return
+
+            # Store state metadata for logging
+            self._store_state_metadata()
+
+            # Update curiosity pressure
             self.curiosity_manager.update_pressure(
-                self.temperament.score,
-                confidence_score,
-                0.0,
-                self.state.curiosity.context_vector,
+                generated_text=generated_text,
+                confidence=confidence
             )
-            if self.curiosity_manager.should_erupt():
-                question = self.curiosity_manager.generate_question(
-                    state=self.state,
-                    tokenizer=self.base_tokenizer,
-                    model=self.scaffolds[0],
-                    prompt=prompt,
-                )
-                if question and isinstance(question, str) and question.strip():
-                    response += f" {question}"
-                    self.state.curiosity.update_question_history(question, time.time())
-                    self._log_event(
-                        event="curiosity_question",
-                        data={
-                            "prompt": question,
-                            "response": "",
-                            "confidence_score": 0.0,
-                            "is_system_question": True
-                        }
+
+            # Log curiosity update
+            self._log_event(
+                "curiosity_update",
+                {
+                    "pressure": self.state.curiosity.pressure,
+                    "confidence": confidence,
+                    "unanswered_questions": len(self.state.curiosity.unanswered_questions),
+                    "novelty_scores": len(self.state.curiosity.novelty_scores)
+                }
+            )
+
+            # Check for significant pressure changes
+            if len(self.state.curiosity.pressure_history) > 1:
+                last_pressure = self.state.curiosity.pressure_history[-2]
+                pressure_change = abs(self.state.curiosity.pressure - last_pressure)
+                if pressure_change > 0.2:  # Significant change threshold
+                    self._log_warning(
+                        "curiosity_pressure_change",
+                        f"Significant curiosity pressure change detected: {pressure_change:.2f}"
                     )
+
         except Exception as e:
             self._log_error(
-                error=f"Curiosity eruption failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="update_curiosity"
+                error=f"Failed to update curiosity: {str(e)}",
+                context="curiosity_update",
+                stack_trace=traceback.format_exc()
             )
-        return response
+            # Don't raise the exception to prevent generation failure
+            # but ensure the error is logged and handled
+            self.error_manager.handle_curiosity_error(
+                error=str(e),
+                context="generation_curiosity_update",
+                stack_trace=traceback.format_exc()
+            )
 
     def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: List[int]) -> float:
         """Calculate confidence score for generated output."""
@@ -470,217 +526,209 @@ class GenerationManager:
         except Exception as e:
             self._log_error(
                 error=f"Confidence score calculation failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="calculate_confidence_score"
+                context="calculate_confidence_score",
+                stack_trace=traceback.format_exc()
             )
             return 0.5
 
     @torch.no_grad()
     def generate(
         self,
-        prompts: Union[str, List[str]],
-        max_new_tokens: int = 50,
-        scaffold_weight: Optional[float] = None,
+        prompt: str,
+        max_length: int = 100,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        num_return_sequences: int = 1,
+        conversation_id: Optional[str] = None,
+        state_hash: Optional[str] = None,
         **kwargs
-    ) -> Union[str, List[str]]:
-        """Generate response(s) for the given prompt(s)."""
-        single_prompt = isinstance(prompts, str)
-        prompts = [prompts] if single_prompt else prompts
-        responses = []
-
+    ) -> List[str]:
+        """Generate text using the base model and scaffolds with proper device handling."""
         try:
-            # Check gestation state
-            if self.state.gestation_state == "gestating":
-                self._log_event(
-                    event="gestation_skip",
-                    data={"reason": "System is in gestation state"}
-                )
-                return "System is currently in gestation state. Please try again later."
-
-            generation_params = self._prepare_generation_params(max_new_tokens, scaffold_weight, prompts=prompts, **kwargs)
-            for callback in self.generation_callbacks["pre_generate"]:
-                callback(generation_params)
-
-            self._log_event(event="generation_initiated", data={"params": generation_params})
-
-            if not self.check_memory_health():
-                self._log_event(
-                    event="memory_warning",
-                    data={"warning": "Memory health check failed, attempting cleanup"}
-                )
-
-            start_time = time.time()
-            base_inputs = self.base_tokenizer(
-                prompts, return_tensors='pt', padding=True, truncation=True
-            ).to(self.device)
-            input_ids = base_inputs['input_ids']
-            input_lengths = base_inputs['attention_mask'].sum(dim=1)
-
-            scaffold_inputs = self.tokenize_and_map(prompts)
-            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-
-            temperature = self.temperament.adjust_parameter(
-                base_value=kwargs.get('temperature', self.controls_config.get("base_temperature", 0.7)),
+            # Validate device state
+            self._validate_device_state()
+            
+            # Store state metadata for logging
+            self._store_state_metadata(conversation_id, state_hash)
+            
+            # Update temperament before generation
+            if hasattr(self, 'temperament_adjuster'):
+                self.temperament_adjuster.update_temperament(self.curiosity_manager)
+            
+            # Sync temperament score with state
+            if hasattr(self.state, 'temperament_score'):
+                self.temperament.score = self.state.temperament_score
+            
+            # Get curiosity pressure for temperature adjustment
+            curiosity_pressure = None
+            if self.curiosity_manager:
+                curiosity_pressure = self.curiosity_manager.get_pressure()
+            
+            # Adjust temperature based on current temperament and curiosity
+            adjusted_temperature = self.temperament.adjust_parameter(
+                base_value=temperature,
                 parameter_type="temperature",
+                curiosity_pressure=curiosity_pressure
             )
-            kwargs['temperature'] = temperature
+            
+            # Log generation start with temperament info
+            self._log_event(
+                "generation_start",
+                {
+                    "prompt": prompt,
+                    "max_length": max_length,
+                    "base_temperature": temperature,
+                    "adjusted_temperature": adjusted_temperature,
+                    "top_p": top_p,
+                    "num_return_sequences": num_return_sequences,
+                    "device": str(self.device),
+                    "temperament_score": self.temperament.score,
+                    "curiosity_pressure": curiosity_pressure,
+                    "mood_label": self.temperament.mood_label
+                }
+            )
+            
+            # Check memory health before generation
+            if not self.check_memory_health():
+                self._log_warning("Memory health check failed before generation")
+                return self.error_manager.handle_generation_error(
+                    Exception("Memory health check failed"),
+                    prompt
+                )
 
-            dynamic_factor = self._compute_dynamic_factor()
-            memory_tensors, dream_memory_info = self._prepare_dream_memory()
-
-            with self._scaffold_context(scaffold_hidden_states):
-                self.cross_attention_injector.set_influence(model=self.base_model, weight=scaffold_weight)
-                for attempt in range(self.max_retries):
-                    try:
-                        outputs = self.base_model.generate(
-                            input_ids,
-                            max_new_tokens=generation_params["max_new_tokens"],
-                            pad_token_id=self.base_tokenizer.pad_token_id,
-                            eos_token_id=self.base_tokenizer.eos_token_id,
-                            temperature=temperature * (1 + 0.1 * attempt),
-                            return_dict_in_generate=True,
-                            output_scores=True,
-                            scaffold_context=scaffold_hidden_states,
-                            memory_tensors=memory_tensors,
-                            memory_weight=self.controls_config.get("dream_memory_weight", 0.1),
-                            dynamic_factor=dynamic_factor,
-                            **kwargs,
-                        )
-                        generated_ids = outputs.sequences
-                        break
-                    except torch.cuda.OutOfMemoryError:
-                        if attempt < self.max_retries - 1:
-                            torch.cuda.empty_cache()
-                            continue
-                        raise
-                    except Exception as e:
-                        self._log_error(
-                            error=f"Generation attempt {attempt + 1} failed: {str(e)}",
-                            stack_trace=traceback.format_exc(),
-                            context="generate"
-                        )
-                        if attempt == self.max_retries - 1:
-                            raise
-
-                for i, (seq, input_length) in enumerate(zip(generated_ids, input_lengths)):
-                    prompt = prompts[i]
-                    seq_ids = seq[input_length:].tolist()
-                    confidence_score = 0.5
-
-                    if self.controls_config.get("enable_confidence_tracking", True):
-                        try:
-                            confidence_score = calculate_confidence(outputs.scores, seq_ids)
-                            with self.state.memory_lock:
-                                self.state.sleep_confidence_sum += confidence_score
-                                self.state.sleep_confidence_count += 1
-                                self.state.confidence_history.append(confidence_score)
-                                
-                                # Update gestation state based on confidence
-                                if len(self.state.confidence_history) >= self.controls_config.get("gestation_history_threshold", 100):
-                                    avg_confidence = sum(self.state.confidence_history[-100:]) / 100
-                                    if avg_confidence < self.controls_config.get("gestation_confidence_threshold", 0.3):
-                                        self.state.gestation_state = "gestating"
-                                        self._log_event(
-                                            event="gestation_triggered",
-                                            data={"avg_confidence": avg_confidence}
-                                        )
-                        except Exception as e:
-                            self._log_error(
-                                error=f"Confidence calculation failed: {str(e)}",
-                                stack_trace=traceback.format_exc(),
-                                context="generate_confidence"
-                            )
-
-                    seq_ids = self._handle_repetition(seq, seq_ids, outputs)
-                    response = self.base_tokenizer.decode(seq_ids, skip_special_tokens=True)
-                    
-                    # Update curiosity and generate questions if needed
-                    if self.curiosity_manager and self.controls_config.get("enable_curiosity", True):
-                        response = self._update_curiosity(prompt, response, confidence_score)
-                        if self.curiosity_manager.should_generate_question():
-                            question = self.curiosity_manager.generate_question(prompt, response)
-                            if question:
-                                self._log_event(
-                                    event="curiosity_question_generated",
-                                    data={"question": question}
-                                )
-                                response += f"\n\nQuestion: {question}"
-
-                    self._log_event(
-                        event="generation_completed",
-                        data={
-                            "prompt": prompt,
-                            "response": response,
-                            "confidence_score": confidence_score,
-                            "generation_params": generation_params,
-                            "dream_memory_info": dream_memory_info
-                        }
-                    )
-                    self.state.history.add_message(prompt, response)
-
-                    if self.use_token_map_memory:
-                        self._update_token_map_memory(prompt, confidence_score)
-
-                    responses.append(response)
-
-            for callback in self.generation_callbacks["post_generate"]:
-                callback(responses, generation_params)
-
-            print(f"Generation completed in {time.time() - start_time:.2f}s")
-            return responses[0] if single_prompt else responses
-
+            # Tokenize input
+            inputs = self.base_tokenizer(prompt, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # Generate with base model using adjusted temperature
+            with torch.no_grad():
+                outputs = self.base_model.generate(
+                    **inputs,
+                    max_length=max_length,
+                    temperature=adjusted_temperature,
+                    top_p=top_p,
+                    num_return_sequences=num_return_sequences,
+                    pad_token_id=self.base_tokenizer.pad_token_id,
+                    **kwargs
+                )
+            
+            # Decode and return generated sequences
+            generated_sequences = self.base_tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            
+            # Log successful generation with final parameters
+            self._log_event(
+                "generation_complete",
+                {
+                    "generated_sequences": generated_sequences,
+                    "device": str(self.device),
+                    "final_temperature": adjusted_temperature,
+                    "final_temperament_score": self.temperament.score,
+                    "final_curiosity_pressure": curiosity_pressure
+                }
+            )
+            
+            return generated_sequences
+            
         except torch.cuda.OutOfMemoryError as oom:
-            self._log_error(
-                error="CUDA out of memory",
-                context="generate_oom",
+            self.error_manager.context.logger.log_error(
+                error_msg="CUDA out of memory",
+                error_type="generation_oom",
                 stack_trace=traceback.format_exc(),
-                additional_data={
-                    "type": "OOM",
-                    "prompt": prompts[0][:200] if prompts else "",
+                additional_info={
+                    "prompt": prompt[:200],
                     "memory_stats": {
                         "allocated": torch.cuda.memory_allocated(),
                         "reserved": torch.cuda.memory_reserved(),
                         "max_allocated": torch.cuda.max_memory_allocated(),
-                    } if torch.cuda.is_available() else None
+                    } if torch.cuda.is_available() else None,
+                    "conversation_id": self.state.history.conversation_id,
+                    "state_hash": self.state.state_hash
                 }
             )
-            torch.cuda.empty_cache()
-
-            if self.controls_config.get("enable_error_listening", True):
-                return self._handle_error_prompt("GPU memory error occurred")
-            return "System is low on memory - please try a shorter prompt"
-
+            return self.error_manager.handle_generation_error(oom, prompt)
+            
         except Exception as e:
             self._log_error(
-                error=f"Generation error: {str(e)}",
-                context="generate",
-                stack_trace=traceback.format_exc(),
-                additional_data={
-                    "type": type(e).__name__,
-                    "prompt": prompts[0][:200] if prompts else ""
+                "generation_error",
+                str(e),
+                {
+                    "prompt": prompt,
+                    "max_length": max_length,
+                    "temperature": temperature,
+                    "adjusted_temperature": adjusted_temperature if 'adjusted_temperature' in locals() else None,
+                    "top_p": top_p,
+                    "device": str(self.device),
+                    "temperament_score": self.temperament.score if hasattr(self, 'temperament') else None,
+                    "curiosity_pressure": curiosity_pressure if 'curiosity_pressure' in locals() else None
                 }
             )
+            return self.error_manager.handle_generation_error(e, prompt)
 
-            if self.controls_config.get("enable_error_listening", True):
-                try:
-                    return self._handle_error_prompt(f"Generation error: {str(e)}")
-                except Exception as inner_e:
-                    self._log_error(
-                        error=f"Failed to handle generation error: {str(inner_e)}",
-                        context="generate_error_handling",
-                        stack_trace=traceback.format_exc(),
-                        additional_data={"original_error": str(e)}
-                    )
-            return "An error occurred during generation"
+    def _validate_device_state(self) -> None:
+        """Validate that all models are on the correct device."""
+        try:
+            # Check base model
+            if self.base_model.device != self.device:
+                self._log_warning(f"Base model device mismatch: {self.base_model.device} != {self.device}")
+                self.base_model = self.base_model.to(self.device)
+            
+            # Check scaffolds
+            for i, scaffold in enumerate(self.scaffolds):
+                if scaffold.device != self.device:
+                    self._log_warning(f"Scaffold {i} device mismatch: {scaffold.device} != {self.device}")
+                    self.scaffolds[i] = scaffold.to(self.device)
+                    
+        except Exception as e:
+            self._log_error("device_validation_error", str(e))
+            raise
 
-        finally:
-            if 'generated_ids' in locals():
-                del generated_ids
-            if 'outputs' in locals():
-                del outputs
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self._log_event(event="generate_cleanup", data={})
+    def _store_state_metadata(self, conversation_id: Optional[str], state_hash: Optional[str]) -> None:
+        """Store state metadata for logging."""
+        self.conversation_id = conversation_id
+        self.state_hash = state_hash
+
+    def _validate_curiosity_state(self) -> None:
+        """Validate and initialize curiosity state if needed."""
+        try:
+            if not hasattr(self.state, 'curiosity'):
+                self.state.curiosity = CuriosityState(
+                    pressure=0.0,
+                    unanswered_questions=deque(maxlen=self.curiosity_config.get("queue_maxlen", 10)),
+                    novelty_scores=deque(maxlen=self.curiosity_config.get("metrics_maxlen", 1000))
+                )
+                self._log_event(
+                    "curiosity_state_init",
+                    {
+                        "reason": "missing_curiosity_state",
+                        "queue_maxlen": self.curiosity_config.get("queue_maxlen", 10),
+                        "metrics_maxlen": self.curiosity_config.get("metrics_maxlen", 1000)
+                    }
+                )
+            
+            # Validate curiosity manager
+            if self.curiosity_manager is None:
+                self._log_warning(
+                    "curiosity_manager_missing",
+                    "Curiosity manager not provided, curiosity features will be disabled"
+                )
+            else:
+                # Ensure curiosity manager is using the same state
+                self.curiosity_manager.set_state(self.state)
+                self._log_event(
+                    "curiosity_manager_sync",
+                    {
+                        "state_hash": self.state.state_hash,
+                        "conversation_id": self.state.history.conversation_id
+                    }
+                )
+                
+        except Exception as e:
+            self._log_error(
+                error=f"Failed to validate curiosity state: {str(e)}",
+                context="curiosity_validation",
+                stack_trace=traceback.format_exc()
+            )
+            raise
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for generated tokens."""
