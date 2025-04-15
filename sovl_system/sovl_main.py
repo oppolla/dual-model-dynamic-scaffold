@@ -354,20 +354,26 @@ class SOVLSystem:
         """Perform post-initialization setup."""
         self.last_question_time = time.time()
 
-    def _validate_config(self, model_config: Optional[Any] = None) -> bool:
-        """Validate system configuration."""
+    def _validate_config(self) -> bool:
+        """
+        Validate the configuration using ConfigManager.
+        
+        Returns:
+            bool: True if validation succeeds, False otherwise
+        """
         try:
-            if not self.config_manager.validate_config(model_config):
-                self.logger.record({
-                    "error": "Configuration validation failed",
-                    "timestamp": time.time(),
-                    "conversation_id": "validate"
-                })
-                return False
+            self.config_manager.validate_or_raise(self.model.config)
             return True
+        except ValueError as e:
+            self.logger.record({
+                "error": str(e),
+                "timestamp": time.time(),
+                "conversation_id": "validate"
+            })
+            return False
         except Exception as e:
             self.logger.record({
-                "error": f"Configuration validation failed: {str(e)}",
+                "error": f"Unexpected error during config validation: {str(e)}",
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc(),
                 "conversation_id": "validate"

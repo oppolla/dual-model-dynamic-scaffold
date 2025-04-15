@@ -921,15 +921,15 @@ class ConfigManager:
             })
             return False
 
-    def validate_config(self, model_config: Optional[Any] = None) -> bool:
+    def validate_or_raise(self, model_config: Optional[Any] = None) -> None:
         """
-        Validate the entire configuration, including layer settings and model-specific validation.
-
+        Validate the entire configuration and raise a ValueError with detailed error messages if validation fails.
+        
         Args:
             model_config: Optional model configuration for layer validation
-
-        Returns:
-            bool: True if validation succeeds, False otherwise
+            
+        Raises:
+            ValueError: If configuration validation fails, with detailed error messages
         """
         try:
             # Validate required keys
@@ -944,12 +944,7 @@ class ConfigManager:
             # Validate cross-attention layers
             cross_attn_layers = self.get("core_config.cross_attn_layers", [5, 7])
             if not isinstance(cross_attn_layers, list):
-                self.logger.record({
-                    "error": "core_config.cross_attn_layers must be a list",
-                    "timestamp": time.time(),
-                    "conversation_id": "validate"
-                })
-                return False
+                raise ValueError("core_config.cross_attn_layers must be a list")
 
             # Validate layer indices if not using dynamic layers
             if not self.get("core_config.use_dynamic_layers", False) and model_config is not None:
@@ -958,31 +953,15 @@ class ConfigManager:
                     base_config = model_config or AutoConfig.from_pretrained(base_model_name)
                     invalid_layers = [l for l in cross_attn_layers if not (0 <= l < base_config.num_hidden_layers)]
                     if invalid_layers:
-                        self.logger.record({
-                            "error": f"Invalid cross_attn_layers: {invalid_layers} for {base_config.num_hidden_layers} layers",
-                            "timestamp": time.time(),
-                            "conversation_id": "validate"
-                        })
-                        return False
+                        raise ValueError(f"Invalid cross_attn_layers: {invalid_layers} for {base_config.num_hidden_layers} layers")
                 except Exception as e:
-                    self.logger.record({
-                        "error": f"Failed to validate cross-attention layers: {str(e)}",
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc(),
-                        "conversation_id": "validate"
-                    })
-                    return False
+                    raise ValueError(f"Failed to validate cross-attention layers: {str(e)}")
 
             # Validate custom layers if using custom layer selection
             if self.get("core_config.layer_selection_mode", "balanced") == "custom":
                 custom_layers = self.get("core_config.custom_layers", [])
                 if not isinstance(custom_layers, list):
-                    self.logger.record({
-                        "error": "core_config.custom_layers must be a list",
-                        "timestamp": time.time(),
-                        "conversation_id": "validate"
-                    })
-                    return False
+                    raise ValueError("core_config.custom_layers must be a list")
 
                 if model_config is not None:
                     try:
@@ -990,20 +969,9 @@ class ConfigManager:
                         base_config = model_config or AutoConfig.from_pretrained(base_model_name)
                         invalid_custom = [l for l in custom_layers if not (0 <= l < base_config.num_hidden_layers)]
                         if invalid_custom:
-                            self.logger.record({
-                                "error": f"Invalid custom_layers: {invalid_custom} for {base_model_name}",
-                                "timestamp": time.time(),
-                                "conversation_id": "validate"
-                            })
-                            return False
+                            raise ValueError(f"Invalid custom_layers: {invalid_custom} for {base_model_name}")
                     except Exception as e:
-                        self.logger.record({
-                            "error": f"Failed to validate custom layers: {str(e)}",
-                            "timestamp": time.time(),
-                            "stack_trace": traceback.format_exc(),
-                            "conversation_id": "validate"
-                        })
-                        return False
+                        raise ValueError(f"Failed to validate custom layers: {str(e)}")
 
             # Log successful validation
             self.logger.record({
@@ -1013,7 +981,6 @@ class ConfigManager:
                 "conversation_id": "validate",
                 "config_snapshot": self.get_state()["config"]
             })
-            return True
 
         except Exception as e:
             self.logger.record({
@@ -1022,7 +989,7 @@ class ConfigManager:
                 "stack_trace": traceback.format_exc(),
                 "conversation_id": "validate"
             })
-            return False
+            raise ValueError(f"Configuration validation failed: {str(e)}")
 
 if __name__ == "__main__":
     from sovl_logger import LoggerConfig
