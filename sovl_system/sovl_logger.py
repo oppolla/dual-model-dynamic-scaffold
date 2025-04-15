@@ -9,6 +9,8 @@ from threading import Lock
 from typing import List, Dict, Union, Optional, Callable, Any, Tuple
 from dataclasses import dataclass
 import torch
+from logging.handlers import RotatingFileHandler
+import traceback
 
 @dataclass
 class LoggerConfig:
@@ -565,86 +567,282 @@ class Logger:
 
 class LoggingManager:
     """Manages logging setup and configuration for the SOVL system."""
-    
-    def __init__(self, config_manager: ConfigManager):
+
+    _DEFAULT_CONFIG = {
+        "logging.max_size_mb": 10,
+        "logging.compress_old": True,
+        "logging.rotation_count": 5,
+        "logging.format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        "logging.date_format": "%Y-%m-%d %H:%M:%S",
+        "logging.level": "INFO"
+    }
+
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        log_dir: str = "logs",
+        system_log_file: str = "sovl_system.log",
+        error_log_file: str = "sovl_errors.log",
+        debug_log_file: str = "sovl_debug.log"
+    ):
+        """
+        Initialize the logging manager with configuration and file paths.
+
+        Args:
+            config_manager: ConfigManager instance for accessing logging settings.
+            log_dir: Directory to store log files.
+            system_log_file: Name of the system log file.
+            error_log_file: Name of the error log file.
+            debug_log_file: Name of the debug log file.
+        """
         self.config_manager = config_manager
-        self.system_logger = None
-        self.error_logger = None
-        
-    def setup_logging(self) -> Tuple[Logger, Logger]:
-        """Initialize and configure system and error loggers."""
+        self.log_dir = log_dir
+        self.system_log_file = os.path.join(log_dir, system_log_file)
+        self.error_log_file = os.path.join(log_dir, error_log_file)
+        self.debug_log_file = os.path.join(log_dir, debug_log_file)
+        self.loggers = {}
+        self._validate_config()
+        self._setup_logging()
+
+    def _validate_config(self) -> None:
+        """Validate logging configuration."""
         try:
-            # Configure system logger
-            system_log_config = LoggerConfig(
-                log_file=self.config_manager.get("logging_config.log_file", "sovl_system_logs.jsonl"),
-                max_size_mb=self.config_manager.get("logging_config.max_size_mb", 20),
-                compress_old=self.config_manager.get("logging_config.compress_old", True),
-                max_in_memory_logs=self.config_manager.get("logging_config.max_in_memory_logs", 1000)
+            max_size = self.config_manager.get(
+                "logging.max_size_mb",
+                self._DEFAULT_CONFIG["logging.max_size_mb"]
             )
-            
-            # Configure error logger
-            error_log_config = LoggerConfig(
-                log_file="sovl_errors.jsonl",
-                max_size_mb=10,
-                compress_old=True,
-                max_in_memory_logs=1000
-            )
-            
-            # Initialize loggers
-            self.system_logger = Logger(system_log_config)
-            self.error_logger = Logger(error_log_config)
-            
-            # Set up log rotation
-            self.system_logger.file_handler.manage_rotation(max_files=7)
-            
-            # Log successful setup
-            self.system_logger.record({
-                "event": "logging_setup_complete",
-                "timestamp": time.time(),
-                "system_log_file": system_log_config.log_file,
-                "error_log_file": error_log_config.log_file
-            })
-            
-            return self.system_logger, self.error_logger
-            
+            if max_size <= 0:
+                raise ValueError("Log file size must be positive")
         except Exception as e:
-            # Use fallback logging if setup fails
-            fallback_logger = logging.getLogger(__name__)
-            fallback_logger.error(f"Failed to setup logging: {str(e)}")
-            raise LoggingError(f"Logging setup failed: {str(e)}")
-            
-    def get_system_logger(self) -> Logger:
-        """Get the system logger instance."""
-        if self.system_logger is None:
-            raise LoggingError("System logger not initialized")
-        return self.system_logger
-        
-    def get_error_logger(self) -> Logger:
-        """Get the error logger instance."""
-        if self.error_logger is None:
-            raise LoggingError("Error logger not initialized")
-        return self.error_logger
-        
-    def update_config(self, **kwargs) -> None:
-        """Update logging configuration."""
-        try:
-            if self.system_logger:
-                self.system_logger.tune(**kwargs)
-            if self.error_logger:
-                self.error_logger.tune(**kwargs)
-                
-            self.system_logger.record({
-                "event": "logging_config_updated",
-                "timestamp": time.time(),
-                "config_changes": kwargs
-            })
-        except Exception as e:
-            self.system_logger.log_error(
-                f"Failed to update logging config: {str(e)}",
-                error_type="config_update",
-                config_changes=kwargs
+            print(f"Logging configuration validation failed: {str(e)}")
+            raise
+
+    def _setup_logging(self) -> None:
+        """Set up logging configuration and handlers."""
+        # Create log directory if it doesn't exist
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        # Configure system logger
+        self.loggers["system"] = self._create_logger(
+            name="system",
+            log_file=self.system_log_file,
+            level=self._get_log_level()
+        )
+
+        # Configure error logger
+        self.loggers["error"] = self._create_logger(
+            name="error",
+            log_file=self.error_log_file,
+            level=logging.ERROR
+        )
+
+        # Configure debug logger
+        self.loggers["debug"] = self._create_logger(
+            name="debug",
+            log_file=self.debug_log_file,
+            level=logging.DEBUG
+        )
+
+        # Log successful setup
+        self.loggers["system"].info("Logging system initialized successfully")
+
+    def _create_logger(
+        self,
+        name: str,
+        log_file: str,
+        level: int
+    ) -> logging.Logger:
+        """Create and configure a logger instance."""
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+
+        # Create formatter
+        formatter = logging.Formatter(
+            self.config_manager.get(
+                "logging.format",
+                self._DEFAULT_CONFIG["logging.format"]
+            ),
+            datefmt=self.config_manager.get(
+                "logging.date_format",
+                self._DEFAULT_CONFIG["logging.date_format"]
             )
-            raise LoggingError(f"Logging config update failed: {str(e)}")
+        )
+
+        # Create file handler with rotation
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=self._get_max_bytes(),
+            backupCount=self._get_rotation_count(),
+            encoding='utf-8'
+        )
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+        # Add console handler for system logger
+        if name == "system":
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
+
+        return logger
+
+    def _get_log_level(self) -> int:
+        """Get the configured log level."""
+        level_str = self.config_manager.get(
+            "logging.level",
+            self._DEFAULT_CONFIG["logging.level"]
+        ).upper()
+        return getattr(logging, level_str, logging.INFO)
+
+    def _get_max_bytes(self) -> int:
+        """Get the maximum log file size in bytes."""
+        return self.config_manager.get(
+            "logging.max_size_mb",
+            self._DEFAULT_CONFIG["logging.max_size_mb"]
+        ) * 1024 * 1024
+
+    def _get_rotation_count(self) -> int:
+        """Get the number of backup log files to keep."""
+        return self.config_manager.get(
+            "logging.rotation_count",
+            self._DEFAULT_CONFIG["logging.rotation_count"]
+        )
+
+    def get_logger(self, name: str) -> logging.Logger:
+        """
+        Get a logger instance by name.
+
+        Args:
+            name: The name of the logger to retrieve.
+
+        Returns:
+            The requested logger instance.
+
+        Raises:
+            KeyError: If the logger name is not found.
+        """
+        if name not in self.loggers:
+            raise KeyError(f"Logger '{name}' not found")
+        return self.loggers[name]
+
+    def update_config(self, new_config: Dict[str, Any]) -> None:
+        """
+        Update logging configuration and reconfigure loggers.
+
+        Args:
+            new_config: Dictionary containing new configuration values.
+        """
+        # Update configuration
+        for key, value in new_config.items():
+            if key.startswith("logging."):
+                self.config_manager.set(key, value)
+
+        # Revalidate and reconfigure
+        self._validate_config()
+        self._setup_logging()
+
+    def record_event(
+        self,
+        event_type: str,
+        message: str,
+        level: str = "info",
+        additional_info: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Record an event with standardized formatting.
+
+        Args:
+            event_type: Type of event (e.g., "training", "generation").
+            message: Description of the event.
+            level: Logging level ("debug", "info", "warning", "error", "critical").
+            additional_info: Additional context-specific information.
+        """
+        log_entry = {
+            "event_type": event_type,
+            "message": message,
+            "timestamp": time.time(),
+            "additional_info": additional_info or {}
+        }
+
+        # Get the appropriate logger
+        logger = self.get_logger("system")
+        if level.upper() == "ERROR":
+            logger = self.get_logger("error")
+        elif level.upper() == "DEBUG":
+            logger = self.get_logger("debug")
+
+        # Log the event
+        getattr(logger, level.lower())(json.dumps(log_entry))
+
+    def record_error(
+        self,
+        error: Exception,
+        context: str,
+        phase: str,
+        additional_info: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Record an error with detailed context.
+
+        Args:
+            error: The exception that was raised.
+            context: The context in which the error occurred.
+            phase: The specific phase or operation where the error occurred.
+            additional_info: Additional context-specific information.
+        """
+        error_entry = {
+            "error": str(error),
+            "context": context,
+            "phase": phase,
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc(),
+            "additional_info": additional_info or {}
+        }
+
+        # Log to error logger
+        self.get_logger("error").error(json.dumps(error_entry))
+
+        # Also log to system logger with reduced detail
+        self.get_logger("system").error(
+            f"Error in {context}/{phase}: {str(error)}"
+        )
+
+    def record_metric(
+        self,
+        metric_name: str,
+        value: float,
+        context: str,
+        phase: str,
+        additional_info: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Record a metric with standardized formatting.
+
+        Args:
+            metric_name: Name of the metric.
+            value: Value of the metric.
+            context: Context in which the metric was measured.
+            phase: Phase or operation where the metric was measured.
+            additional_info: Additional context-specific information.
+        """
+        metric_entry = {
+            "metric_name": metric_name,
+            "value": value,
+            "context": context,
+            "phase": phase,
+            "timestamp": time.time(),
+            "additional_info": additional_info or {}
+        }
+
+        # Log to system logger
+        self.get_logger("system").info(json.dumps(metric_entry))
+
+    def cleanup(self) -> None:
+        """Clean up logging resources."""
+        for logger in self.loggers.values():
+            for handler in logger.handlers:
+                handler.close()
+                logger.removeHandler(handler)
 
 class LoggingError(Exception):
     """Raised for logging-related errors."""
