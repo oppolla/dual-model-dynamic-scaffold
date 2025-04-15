@@ -10,8 +10,6 @@ from threading import Lock
 import contextlib
 import logging
 import math
-
-# Assuming these are external dependencies that exist
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
