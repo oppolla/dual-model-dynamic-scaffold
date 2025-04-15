@@ -6,6 +6,10 @@ from sovl_utils import NumericalGuard
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import SOVLTrainer
 from sovl_scaffold import CrossAttentionInjector
+from sovl_validation import ValidationSchema
+import traceback
+from collections import defaultdict, deque
+from sovl_error import ErrorManager
 
 class ICuriosityManager(Protocol):
     """Interface for curiosity management."""
@@ -28,12 +32,14 @@ class SOVLTuner:
         self,
         config_manager: ConfigManager,
         logger: Logger,
+        error_manager: Optional[ErrorManager] = None,
         curiosity_manager: Optional[ICuriosityManager] = None,
         trainer: Optional[ITrainer] = None,
         cross_attention_injector: Optional[ICrossAttentionInjector] = None
     ):
         self.config_manager = config_manager
         self.logger = logger
+        self.error_manager = error_manager
         self.curiosity_manager = curiosity_manager
         self.trainer = trainer
         self.cross_attention_injector = cross_attention_injector
@@ -47,102 +53,204 @@ class SOVLTuner:
         self.cross_attn_config = config_manager.get_section("cross_attn_config")
         self.lora_config = config_manager.get_section("lora_config")
         
-        # Define parameter ranges for validation
-        self.tuning_ranges = {
-            "curiosity_config.enable_curiosity": (bool, [True, False]),
-            "curiosity_config.novelty_threshold_spontaneous": (0.5, 1.0),
-            "curiosity_config.novelty_threshold_response": (0.5, 1.0),
-            "curiosity_config.pressure_threshold": (0.5, 0.9),
-            "curiosity_config.pressure_drop": (0.1, 0.5),
-            "curiosity_config.silence_threshold": (5.0, 60.0),
-            "curiosity_config.question_cooldown": (30.0, 120.0),
-            "curiosity_config.queue_maxlen": (5, 20),
-            "curiosity_config.weight_ignorance": (0.0, 1.0),
-            "curiosity_config.weight_novelty": (0.0, 1.0),
-            "curiosity_config.max_new_tokens": (5, 12),
-            "curiosity_config.base_temperature": (0.5, 1.5),
-            "curiosity_config.temperament_influence": (0.1, 0.6),
-            "curiosity_config.top_k": (10, 50),
-            "curiosity_config.attention_weight": (0.0, 1.0),
-            "curiosity_config.question_timeout": (60.0, 86400.0),
-            "controls_config.temp_eager_threshold": (0.7, 0.9),
-            "controls_config.temp_sluggish_threshold": (0.4, 0.6),
-            "controls_config.temp_mood_influence": (0.0, 1.0),
-            "controls_config.temp_curiosity_boost": (0.0, 0.5),
-            "controls_config.temp_restless_drop": (0.0, 0.5),
-            "controls_config.temp_melancholy_noise": (0.0, 0.05),
-            "controls_config.conf_feedback_strength": (0.0, 1.0),
-            "controls_config.temp_smoothing_factor": (0.0, 1.0),
-            "controls_config.temperament_decay_rate": (0.0, 1.0),
-            "controls_config.scaffold_weight_cap": (0.5, 1.0),
-            "controls_config.base_temperature": (0.5, 1.5),
-            "controls_config.sleep_conf_threshold": (0.5, 0.9),
-            "controls_config.sleep_time_factor": (0.5, 5.0),
-            "controls_config.sleep_log_min": (5, 20),
-            "training_config.sleep_max_steps": (10, 1000),
-            "controls_config.dream_swing_var": (0.05, 0.2),
-            "controls_config.dream_lifecycle_delta": (0.05, 0.2),
-            "controls_config.dream_temperament_on": (bool, [True, False]),
-            "controls_config.dream_noise_scale": (0.01, 0.1),
-            "controls_config.dream_memory_weight": (0.0, 0.5),
-            "controls_config.dream_memory_maxlen": (5, 20),
-            "controls_config.dream_prompt_weight": (0.0, 1.0),
-            "controls_config.dream_novelty_boost": (0.0, 0.05),
-            "controls_config.dream_memory_decay": (0.0, 1.0),
-            "controls_config.dream_prune_threshold": (0.0, 1.0),
-            "training_config.lifecycle_capacity_factor": (0.001, 0.1),
-            "training_config.lifecycle_curve": (str, ["sigmoid_linear", "exponential"]),
-            "training_config.lora_capacity": (0, 1000),
-            "core_config.use_dynamic_layers": (bool, [True, False]),
-            "core_config.quantization": (str, ["fp16", "int8", "int4"]),
-            "controls_config.dynamic_cross_attn_mode": (str, ["confidence", "temperament", "off", None])
-        }
+        # Error handling state
+        self._last_error_time = 0.0
+        self._error_cooldown = 1.0  # seconds
+        self._error_counts = defaultdict(int)
         
+        # Confidence monitoring
+        self._confidence_history = deque(maxlen=100)
+        self._last_confidence_check = 0.0
+        self._confidence_check_interval = 60.0  # seconds
+        
+    def _handle_error(self, error: Exception, error_type: str, context: Dict[str, Any]) -> None:
+        """Handle errors with coordination between ErrorManager and local handling."""
+        try:
+            current_time = time.time()
+            error_key = f"{error_type}:{type(error).__name__}"
+            
+            # Check for duplicate errors within cooldown period
+            if current_time - self._last_error_time < self._error_cooldown:
+                self.logger.record_event(
+                    event_type="duplicate_error",
+                    message=f"Duplicate error detected within cooldown period: {error_key}",
+                    level="warning",
+                    additional_info={
+                        "error_type": error_type,
+                        "error_key": error_key,
+                        "context": context
+                    }
+                )
+                return
+                
+            self._last_error_time = current_time
+            self._error_counts[error_key] += 1
+            
+            # Log error locally
+            self.logger.record_event(
+                event_type="tuner_error",
+                message=f"Error in {error_type}: {str(error)}",
+                level="error",
+                additional_info={
+                    "error_type": error_type,
+                    "error_key": error_key,
+                    "error_count": self._error_counts[error_key],
+                    "context": context
+                }
+            )
+            
+            # Delegate to ErrorManager if available
+            if self.error_manager:
+                if error_type == "training":
+                    self.error_manager.handle_training_error(error, context.get("batch_size", 1))
+                elif error_type == "curiosity":
+                    self.error_manager.handle_curiosity_error(error, context.get("event_type", "unknown"))
+                elif error_type == "memory":
+                    self.error_manager.handle_memory_error(error, context.get("model_size", 0))
+                else:
+                    self.error_manager.handle_generation_error(error, context.get("prompt", ""))
+                    
+        except Exception as e:
+            # Fallback logging if error handling fails
+            self.logger.record_event(
+                event_type="error_handling_failed",
+                message=f"Failed to handle error: {str(e)}",
+                level="critical",
+                additional_info={
+                    "original_error": str(error),
+                    "error_type": error_type,
+                    "context": context
+                }
+            )
+            
     def validate_param(self, param_name: str, value: Any) -> bool:
         """Validate a parameter against its allowed range or type."""
-        if param_name not in self.tuning_ranges:
-            self.logger.record({
-                "error": f"Unknown parameter: {param_name}",
-                "timestamp": time.time()
-            })
+        try:
+            # Extract section and key from param_name
+            section, key = param_name.split(".", 1)
+            
+            # Use shared validation schema
+            is_valid, error_msg = ValidationSchema.validate_value(
+                section, key, value, self.logger
+            )
+            
+            if not is_valid:
+                self.logger.record_event(
+                    event_type="param_validation_error",
+                    message=f"Invalid parameter value: {error_msg}",
+                    level="error",
+                    additional_info={
+                        "param_name": param_name,
+                        "value": value
+                    }
+                )
+            
+            return is_valid
+            
+        except ValueError as e:
+            self.logger.record_event(
+                event_type="param_validation_error",
+                message=f"Failed to validate parameter: {str(e)}",
+                level="error",
+                additional_info={
+                    "param_name": param_name,
+                    "value": value
+                }
+            )
             return False
-        
-        rule = self.tuning_ranges[param_name]
-        type_rule, allowed = rule if isinstance(rule, tuple) and len(rule) == 2 else (None, rule)
-        
-        if type_rule is bool:
-            if not isinstance(value, bool):
-                self.logger.record({
-                    "error": f"Invalid {param_name}: {value} must be boolean",
-                    "timestamp": time.time()
-                })
-                return False
-            return value in allowed
-        
-        if type_rule is str:
-            if not isinstance(value, str) or value not in allowed:
-                self.logger.record({
-                    "error": f"Invalid {param_name}: {value} not in {allowed}",
-                    "timestamp": time.time()
-                })
-                return False
-            return True
-        
-        if isinstance(rule, tuple) and len(rule) == 2 and all(isinstance(x, (int, float)) for x in rule):
-            min_val, max_val = rule
-            if not isinstance(value, (int, float)) or not (min_val <= value <= max_val):
-                self.logger.record({
-                    "error": f"Invalid {param_name}: {value} not in [{min_val}, {max_val}]",
-                    "timestamp": time.time()
-                })
-                return False
-        return True
     
+    def _monitor_confidence(self, confidence: float) -> None:
+        """Monitor confidence scores and adjust parameters if needed."""
+        try:
+            current_time = time.time()
+            if current_time - self._last_confidence_check < self._confidence_check_interval:
+                return
+                
+            self._last_confidence_check = current_time
+            self._confidence_history.append(confidence)
+            
+            if len(self._confidence_history) < 10:
+                return
+                
+            # Calculate confidence statistics
+            confidences = list(self._confidence_history)
+            mean_conf = sum(confidences) / len(confidences)
+            variance = sum((c - mean_conf) ** 2 for c in confidences) / len(confidences)
+            
+            # Check for confidence issues
+            if variance > 0.1:  # High variance in confidence
+                self.logger.record_event(
+                    event_type="confidence_variance_high",
+                    message="High variance detected in confidence scores",
+                    level="warning",
+                    additional_info={
+                        "variance": variance,
+                        "mean_confidence": mean_conf,
+                        "history_length": len(confidences)
+                    }
+                )
+                
+                # Adjust temperament influence to stabilize confidence
+                current_influence = self.curiosity_config.get("temperament_influence", 0.3)
+                new_influence = min(current_influence + 0.1, 0.6)
+                
+                if new_influence != current_influence:
+                    self.tune_curiosity(temperament_influence=new_influence)
+                    self.logger.record_event(
+                        event_type="temperament_influence_adjusted",
+                        message="Adjusted temperament influence to stabilize confidence",
+                        level="info",
+                        additional_info={
+                            "old_influence": current_influence,
+                            "new_influence": new_influence,
+                            "variance": variance
+                        }
+                    )
+                    
+            elif mean_conf < 0.3:  # Consistently low confidence
+                self.logger.record_event(
+                    event_type="confidence_low",
+                    message="Consistently low confidence detected",
+                    level="warning",
+                    additional_info={
+                        "mean_confidence": mean_conf,
+                        "history_length": len(confidences)
+                    }
+                )
+                
+                # Reduce curiosity pressure to allow for more stable generation
+                if self.curiosity_manager:
+                    current_pressure = self.curiosity_manager.get_pressure()
+                    if current_pressure > 0.3:
+                        self.curiosity_manager.reduce_pressure(0.1)
+                        self.logger.record_event(
+                            event_type="curiosity_pressure_reduced",
+                            message="Reduced curiosity pressure to improve confidence",
+                            level="info",
+                            additional_info={
+                                "old_pressure": current_pressure,
+                                "new_pressure": self.curiosity_manager.get_pressure(),
+                                "mean_confidence": mean_conf
+                            }
+                        )
+                        
+        except Exception as e:
+            self.logger.record_event(
+                event_type="confidence_monitoring_error",
+                message=f"Error in confidence monitoring: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            
     def tune_parameters(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Tune system parameters based on performance metrics."""
         try:
             # Get current parameters
             current_params = self.trainer.get_current_parameters() if self.trainer else {}
+            
+            # Monitor confidence if available
+            if "confidence" in metrics:
+                self._monitor_confidence(metrics["confidence"])
             
             # Adjust parameters based on metrics
             tuned_params = self._adjust_parameters(current_params, metrics)
@@ -163,32 +271,69 @@ class SOVLTuner:
             return tuned_params
             
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Parameter tuning failed: {str(e)}",
-                error_type=type(e).__name__,
-                stack_trace=traceback.format_exc()
+            self._handle_error(
+                error=e,
+                error_type="training",
+                context={
+                    "metrics": metrics,
+                    "batch_size": metrics.get("batch_size", 1)
+                }
             )
             raise
             
     def _adjust_parameters(self, current_params: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Adjust parameters based on metrics."""
-        tuned_params = current_params.copy()
-        
-        # Adjust learning rate based on loss
-        if "loss" in metrics:
-            loss = metrics["loss"]
-            if loss > self.config_manager.get("loss_threshold", 2.0):
-                tuned_params["learning_rate"] *= 0.5
-            elif loss < self.config_manager.get("loss_target", 0.5):
-                tuned_params["learning_rate"] *= 1.1
-                
-        # Adjust curiosity pressure based on performance
-        if self.curiosity_manager and "performance" in metrics:
-            performance = metrics["performance"]
-            if performance < self.config_manager.get("performance_threshold", 0.7):
-                self.curiosity_manager.reduce_pressure(0.1)
-                
-        return tuned_params
+        """Adjust parameters based on metrics with error handling."""
+        try:
+            tuned_params = current_params.copy()
+            
+            # Adjust learning rate based on loss
+            if "loss" in metrics:
+                loss = metrics["loss"]
+                if loss > self.config_manager.get("loss_threshold", 2.0):
+                    tuned_params["learning_rate"] *= 0.5
+                elif loss < self.config_manager.get("loss_target", 0.5):
+                    tuned_params["learning_rate"] *= 1.1
+                    
+            # Adjust curiosity pressure based on performance
+            if self.curiosity_manager and "performance" in metrics:
+                performance = metrics["performance"]
+                if performance < self.config_manager.get("performance_threshold", 0.7):
+                    # Get current pressure stats
+                    pressure_stats = self.curiosity_manager.get_pressure_stats()
+                    
+                    # Calculate reduction amount based on performance gap
+                    performance_gap = self.config_manager.get("performance_threshold", 0.7) - performance
+                    reduction_amount = min(0.1, performance_gap * 0.2)  # Cap reduction at 0.1
+                    
+                    # Only reduce pressure if it's above minimum
+                    if pressure_stats["current_pressure"] > pressure_stats["min_pressure"]:
+                        self.curiosity_manager.reduce_pressure(reduction_amount)
+                        
+                        # Log pressure adjustment
+                        self.logger.record_event(
+                            event_type="pressure_adjusted",
+                            message="Adjusted curiosity pressure based on performance",
+                            level="info",
+                            additional_info={
+                                "performance": performance,
+                                "performance_threshold": self.config_manager.get("performance_threshold", 0.7),
+                                "reduction_amount": reduction_amount,
+                                "pressure_stats": pressure_stats
+                            }
+                        )
+                    
+            return tuned_params
+            
+        except Exception as e:
+            self._handle_error(
+                error=e,
+                error_type="parameter_adjustment",
+                context={
+                    "current_params": current_params,
+                    "metrics": metrics
+                }
+            )
+            raise
     
     def tune_curiosity(
         self,
@@ -209,7 +354,7 @@ class SOVLTuner:
         attention_weight: Optional[float] = None,
         question_timeout: Optional[float] = None
     ) -> bool:
-        """Tune curiosity-related parameters."""
+        """Tune curiosity-related parameters with transactional safety."""
         updates = {}
         prefix = "curiosity_config."
         params = {
@@ -231,70 +376,75 @@ class SOVLTuner:
             "question_timeout": question_timeout
         }
         
+        # Validate all parameters before attempting updates
         for param, value in params.items():
             if value is not None:
                 full_key = f"{prefix}{param}"
-                if self.validate_param(full_key, value):
-                    updates[full_key] = value
-                else:
+                if not self.validate_param(full_key, value):
+                    self.logger.record_event(
+                        event_type="curiosity_tuning_validation_failed",
+                        message=f"Validation failed for parameter: {param}",
+                        level="error",
+                        additional_info={
+                            "param": param,
+                            "value": value
+                        }
+                    )
                     return False
+                updates[full_key] = value
         
-        if updates:
-            success = self.config_manager.update_batch(updates)
-            if success:
-                # Update cached config
-                for key, value in updates.items():
-                    param = key.split(".")[-1]
-                    self.curiosity_config[param] = value
-                
-                # Notify curiosity manager
-                if self.curiosity_manager:
-                    self.curiosity_manager.tune(**{k.split(".")[-1]: v for k, v in updates.items()})
-                
-                # Notify trainer if curiosity parameters are used
-                if self.trainer and any(k in updates for k in [
-                    "curiosity_config.weight_ignorance",
-                    "curiosity_config.weight_novelty",
-                    "curiosity_config.pressure_threshold",
-                    "curiosity_config.pressure_drop",
-                    "curiosity_config.novelty_threshold_spontaneous",
-                    "curiosity_config.novelty_threshold_response",
-                    "curiosity_config.silence_threshold",
-                    "curiosity_config.question_cooldown",
-                    "curiosity_config.queue_maxlen",
-                    "curiosity_config.max_new_tokens",
-                    "curiosity_config.base_temperature",
-                    "curiosity_config.temperament_influence",
-                    "curiosity_config.top_k"
-                ]):
-                    self.trainer.config.update({
+        if not updates:
+            return True
+            
+        # Attempt batch update with rollback
+        success = self.config_manager.update_batch(updates, rollback_on_failure=True)
+        
+        if success:
+            # Update cached config
+            for key, value in updates.items():
+                param = key.split(".")[-1]
+                self.curiosity_config[param] = value
+            
+            # Notify curiosity manager with error handling
+            if self.curiosity_manager:
+                try:
+                    # Convert config keys to manager parameter names
+                    manager_params = {
                         k.split(".")[-1]: v for k, v in updates.items()
-                        if k in [
-                            "curiosity_config.weight_ignorance",
-                            "curiosity_config.weight_novelty",
-                            "curiosity_config.pressure_threshold",
-                            "curiosity_config.pressure_drop",
-                            "curiosity_config.novelty_threshold_spontaneous",
-                            "curiosity_config.novelty_threshold_response",
-                            "curiosity_config.silence_threshold",
-                            "curiosity_config.question_cooldown",
-                            "curiosity_config.queue_maxlen",
-                            "curiosity_config.max_new_tokens",
-                            "curiosity_config.base_temperature",
-                            "curiosity_config.temperament_influence",
-                            "curiosity_config.top_k"
-                        ]
-                    })
-                
-                self.config_manager.save_config()
-                self.logger.record({
-                    "event": "tune_curiosity",
-                    "params": updates,
-                    "success": success,
-                    "timestamp": time.time()
-                })
-            return success
-        return True
+                    }
+                    self.curiosity_manager.tune(**manager_params)
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="curiosity_manager_tune_failed",
+                        message=f"Failed to update CuriosityManager: {str(e)}",
+                        level="error",
+                        additional_info={
+                            "error": str(e),
+                            "stack_trace": traceback.format_exc()
+                        }
+                    )
+                    # Don't return False here as config update was successful
+                    # Just log the error and continue
+            
+            self.logger.record_event(
+                event_type="curiosity_tuning_success",
+                message="Successfully tuned curiosity parameters",
+                level="info",
+                additional_info={
+                    "updated_params": list(updates.keys())
+                }
+            )
+        else:
+            self.logger.record_event(
+                event_type="curiosity_tuning_failed",
+                message="Failed to tune curiosity parameters",
+                level="error",
+                additional_info={
+                    "attempted_params": list(updates.keys())
+                }
+            )
+            
+        return success
     
     def adjust_temperament(
         self,
@@ -308,46 +458,109 @@ class SOVLTuner:
         temp_smoothing_factor: Optional[float] = None,
         decay_rate: Optional[float] = None
     ) -> bool:
-        """Tune temperament-related parameters."""
-        updates = {}
-        prefix = "controls_config."
-        params = {
-            "temp_eager_threshold": eager_threshold,
-            "temp_sluggish_threshold": sluggish_threshold,
-            "temp_mood_influence": mood_influence,
-            "temp_curiosity_boost": curiosity_boost,
-            "temp_restless_drop": restless_drop,
-            "temp_melancholy_noise": melancholy_noise,
-            "conf_feedback_strength": conf_feedback_strength,
-            "temp_smoothing_factor": temp_smoothing_factor,
-            "temperament_decay_rate": decay_rate
-        }
-        
-        for param, value in params.items():
-            if value is not None:
-                full_key = f"{prefix}{param}"
-                if self.validate_param(full_key, value):
-                    updates[full_key] = value
-                else:
-                    return False
-        
-        if updates:
-            success = self.config_manager.update_batch(updates)
+        """Tune temperament-related parameters with safe ranges and validation."""
+        try:
+            # Define safe parameter ranges
+            safe_ranges = {
+                "temp_smoothing_factor": (0.1, 1.0),
+                "temp_eager_threshold": (0.5, 0.9),
+                "temp_sluggish_threshold": (0.1, 0.5),
+                "temp_mood_influence": (0.1, 0.9),
+                "temp_curiosity_boost": (0.1, 0.5),
+                "temp_restless_drop": (0.1, 0.5),
+                "temp_melancholy_noise": (0.0, 0.2),
+                "conf_feedback_strength": (0.1, 0.9),
+                "temperament_decay_rate": (0.1, 0.9)
+            }
+            
+            # Prepare updates with validation
+            updates = {}
+            params = {
+                "temp_eager_threshold": eager_threshold,
+                "temp_sluggish_threshold": sluggish_threshold,
+                "temp_mood_influence": mood_influence,
+                "temp_curiosity_boost": curiosity_boost,
+                "temp_restless_drop": restless_drop,
+                "temp_melancholy_noise": melancholy_noise,
+                "conf_feedback_strength": conf_feedback_strength,
+                "temp_smoothing_factor": temp_smoothing_factor,
+                "temperament_decay_rate": decay_rate
+            }
+            
+            # Validate and prepare updates
+            for key, value in params.items():
+                if value is not None:
+                    min_val, max_val = safe_ranges[key]
+                    if not (min_val <= value <= max_val):
+                        self.logger.record_event(
+                            event_type="temperament_parameter_warning",
+                            message=f"Parameter {key} out of safe range, clamping to bounds",
+                            level="warning",
+                            additional_info={
+                                "parameter": key,
+                                "value": value,
+                                "min": min_val,
+                                "max": max_val
+                            }
+                        )
+                        value = max(min_val, min(value, max_val))
+                    updates[f"controls_config.{key}"] = value
+            
+            if not updates:
+                return True
+                
+            # Apply updates with rollback
+            success = self.config_manager.update_batch(updates, rollback_on_failure=True)
+            
             if success:
                 # Update cached config
                 for key, value in updates.items():
                     param = key.split(".")[-1]
                     self.controls_config[param] = value
                 
-                self.config_manager.save_config()
-                self.logger.record({
-                    "event": "adjust_temperament",
-                    "params": updates,
-                    "success": success,
-                    "timestamp": time.time()
-                })
+                # Reset temperament history if trainer is available
+                if self.trainer and hasattr(self.trainer, 'state'):
+                    with self.trainer.state.lock:
+                        self.trainer.state.temperament_history.clear()
+                        self.trainer.state.temperament_score = 0.5  # Reset to neutral
+                        self.logger.record_event(
+                            event_type="temperament_history_reset",
+                            message="Temperament history reset after parameter update",
+                            level="info",
+                            additional_info={
+                                "reason": "temperament parameter update",
+                                "updated_params": list(updates.keys())
+                            }
+                        )
+                
+                # Log successful update
+                self.logger.record_event(
+                    event_type="temperament_parameters_updated",
+                    message="Temperament parameters updated successfully",
+                    level="info",
+                    additional_info={
+                        "updates": updates,
+                        "history_reset": self.trainer is not None
+                    }
+                )
+            else:
+                self.logger.record_event(
+                    event_type="temperament_update_failed",
+                    message="Failed to update temperament parameters",
+                    level="error",
+                    additional_info=updates
+                )
+                
             return success
-        return True
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="temperament_adjustment_error",
+                message=f"Failed to adjust temperament: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            return False
     
     def tune_dream(
         self,
@@ -596,27 +809,63 @@ class SOVLTuner:
         
         # Validate layer_weights length if provided
         if layer_weights is not None:
-            layers = (
-                self.cross_attention_injector.get_cross_attention_layers(
+            try:
+                # Get current cross-attention layers
+                layers = self.cross_attention_injector.get_cross_attention_layers(
                     base_model,
                     mode=self.core_config.get("layer_selection_mode", "balanced")
-                ) if self.core_config.get("use_dynamic_layers", False)
-                else self.core_config.get("cross_attn_layers", [5, 7])
-            )
-            if len(layer_weights) != len(layers):
-                self.logger.record({
-                    "error": f"layer_weights length ({len(layer_weights)}) must match cross-attn layers ({len(layers)})",
-                    "timestamp": time.time()
-                })
-                return False
-            # Validate individual weights
-            for w in layer_weights:
-                if not (0.0 <= w <= 1.0):
-                    self.logger.record({
-                        "error": f"Invalid layer weight: {w} not in [0.0, 1.0]",
-                        "timestamp": time.time()
-                    })
+                )
+                
+                # Validate layer count matches weights
+                if len(layer_weights) != len(layers):
+                    self.logger.record_event(
+                        event_type="scaffold_influence_error",
+                        message="Layer weights length mismatch",
+                        level="error",
+                        additional_info={
+                            "expected_layers": len(layers),
+                            "provided_weights": len(layer_weights),
+                            "layers": layers,
+                            "weights": layer_weights
+                        }
+                    )
                     return False
+                    
+                # Validate weight values
+                for i, weight in enumerate(layer_weights):
+                    if not (0.0 <= weight <= 1.0):
+                        self.logger.record_event(
+                            event_type="scaffold_influence_error",
+                            message="Invalid layer weight value",
+                            level="error",
+                            additional_info={
+                                "layer_index": i,
+                                "weight": weight,
+                                "valid_range": (0.0, 1.0)
+                            }
+                        )
+                        return False
+                        
+                # Log successful validation
+                self.logger.record_event(
+                    event_type="scaffold_influence_validated",
+                    message="Layer weights validated successfully",
+                    level="info",
+                    additional_info={
+                        "layer_count": len(layers),
+                        "layer_weights": layer_weights,
+                        "layer_selection_mode": self.core_config.get("layer_selection_mode", "balanced")
+                    }
+                )
+                
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="scaffold_influence_error",
+                    message=f"Failed to validate layer weights: {str(e)}",
+                    level="error",
+                    additional_info={"error": str(e)}
+                )
+                return False
         
         try:
             self.cross_attention_injector.set_influence(
@@ -629,20 +878,28 @@ class SOVLTuner:
                 blend_strength=blend_strength,
                 layer_weights=layer_weights
             )
-            weight_display = f"[{', '.join(f'{w:.2f}' for w in layer_weights)}]" if layer_weights else f"{weight if weight is not None else 'unchanged'}"
-            self.logger.record({
-                "event": "set_scaffold_influence",
-                "weight": weight_display,
-                "blend_strength": blend_strength,
-                "success": True,
-                "timestamp": time.time()
-            })
+            
+            # Log successful influence update
+            self.logger.record_event(
+                event_type="scaffold_influence_updated",
+                message="Scaffold influence updated successfully",
+                level="info",
+                additional_info={
+                    "weight": weight,
+                    "blend_strength": blend_strength,
+                    "layer_weights": layer_weights,
+                    "layer_count": len(layers) if layer_weights else None
+                }
+            )
             return True
+            
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to set scaffold influence: {str(e)}",
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="scaffold_influence_error",
+                message=f"Failed to set scaffold influence: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
             return False
     
     def tune_cross_attention(

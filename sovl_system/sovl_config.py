@@ -370,6 +370,7 @@ class ConfigManager:
         self.lock = Lock()
         self._frozen = False
         self._last_config_hash = ""
+        self._subscribers = set()  # Set of callbacks to notify on config changes
         self.validator.register(self.DEFAULT_SCHEMA)
         self._initialize_config()
 
@@ -558,61 +559,113 @@ class ConfigManager:
             )
             return False
 
-    def update_batch(self, updates: Dict[str, Any], rollback_on_failure: bool = True) -> bool:
+    def subscribe(self, callback: Callable[[], None]) -> None:
         """
-        Update multiple configuration values atomically with rollback option.
+        Subscribe to configuration changes.
+        
+        Args:
+            callback: Function to call when configuration changes
+        """
+        with self.lock:
+            self._subscribers.add(callback)
 
+    def unsubscribe(self, callback: Callable[[], None]) -> None:
+        """
+        Unsubscribe from configuration changes.
+        
+        Args:
+            callback: Function to remove from subscribers
+        """
+        with self.lock:
+            self._subscribers.discard(callback)
+
+    def _notify_subscribers(self) -> None:
+        """Notify all subscribers of configuration changes."""
+        with self.lock:
+            for callback in self._subscribers:
+                try:
+                    callback()
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="config_notification_error",
+                        message="Failed to notify subscriber of config change",
+                        level="error",
+                        additional_info={
+                            "error": str(e),
+                            "stack_trace": traceback.format_exc()
+                        }
+                    )
+
+    def update_batch(self, updates: Dict[str, Any], rollback_on_failure: bool = True) -> bool:
+        """Update multiple configuration values in a transactional manner.
+        
         Args:
             updates: Dictionary of key-value pairs to update
-            rollback_on_failure: Revert changes if any update fails
-
+            rollback_on_failure: Whether to rollback changes if any update fails
+            
         Returns:
-            True if all updates succeeded, False otherwise
+            bool: True if all updates succeeded, False otherwise
         """
+        if not updates:
+            return True
+            
+        # Create backup of current config
+        backup = self.store.flat_config.copy()
+        successful_updates = {}
+        
         try:
-            with self.lock:
-                if self._frozen:
-                    self.logger.record_event(
-                        event_type="config_error",
-                        message="Cannot update batch: configuration is frozen",
-                        level="error",
-                        additional_info={}
-                    )
-                    return False
-
-                original_config = self.store.flat_config.copy()
-                for key, value in updates.items():
-                    if not self.update(key, value):
-                        if rollback_on_failure:
-                            self.store.flat_config = original_config
-                            self.store.rebuild_structured(self.DEFAULT_SCHEMA)
-                            self.store.update_cache(self.DEFAULT_SCHEMA)
-                            self._last_config_hash = self._compute_config_hash()
-                            self.logger.record_event(
-                                event_type="config_rollback",
-                                message=f"Failed to update {key}",
-                                level="warning",
-                                additional_info={
-                                    "key": key
-                                }
-                            )
-                        return False
-                return True
+            # First validate all updates
+            for key, value in updates.items():
+                if not self.validator.validate(key, value):
+                    raise ValueError(f"Invalid configuration key: {key}")
+                    
+                # Validate value against schema if exists
+                section, param = key.split(".", 1)
+                if section in self.validator.schemas and param in self.validator.schemas[section]:
+                    schema = self.validator.schemas[section][param]
+                    if not schema.validate(value):
+                        raise ValueError(f"Invalid value for {key}: {value}")
+            
+            # Apply updates
+            for key, value in updates.items():
+                self.store.set_value(key, value)
+                successful_updates[key] = value
+                
+            # Save changes
+            if not self.file_handler.save(self.store.flat_config):
+                raise RuntimeError("Failed to save configuration")
+                
+            # Notify subscribers
+            self._notify_subscribers()
+            
+            return True
+            
         except Exception as e:
-            self.logger.record_event(
-                event_type="config_error",
-                message="Failed to update batch config",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
+            # Rollback changes if enabled
             if rollback_on_failure:
-                self.store.flat_config = original_config
+                self.store.flat_config = backup
                 self.store.rebuild_structured(self.DEFAULT_SCHEMA)
                 self.store.update_cache(self.DEFAULT_SCHEMA)
                 self._last_config_hash = self._compute_config_hash()
+                self.logger.record_event(
+                    event_type="config_rollback",
+                    message=f"Configuration rollback triggered: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "failed_updates": list(updates.keys()),
+                        "successful_updates": list(successful_updates.keys())
+                    }
+                )
+            else:
+                self.logger.record_event(
+                    event_type="config_update_failed",
+                    message=f"Configuration update failed: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "failed_updates": list(updates.keys()),
+                        "successful_updates": list(successful_updates.keys())
+                    }
+                )
             return False
 
     def save_config(self, file_path: Optional[str] = None, compress: bool = False, max_retries: int = 3) -> bool:

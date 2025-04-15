@@ -189,6 +189,12 @@ class CuriosityManager:
         self.state_hash = None
         self.pressure_mgr = CuriosityPressure()
         self.lock = threading.Lock()
+        self._pressure_history = deque(maxlen=100)  # Track pressure changes
+        self._last_pressure_change = 0.0
+        self._pressure_change_cooldown = 1.0  # Minimum seconds between pressure changes
+        self._min_pressure = 0.1  # Minimum pressure to maintain
+        self._max_pressure = 0.9  # Maximum pressure to allow
+        self._pressure_decay_rate = 0.95  # Rate at which pressure naturally decays
         self._initialize_components()
         
         # Log device initialization
@@ -628,45 +634,66 @@ class CuriosityManager:
             })
             return False
 
-    def tune(
-        self,
-        state: Any,
-        metrics: Dict[str, float]
-    ) -> bool:
-        """Tune curiosity parameters based on metrics."""
+    def tune(self, **params) -> None:
+        """Update curiosity parameters with validation and logging.
+        
+        Args:
+            **params: Key-value pairs of parameters to update
+        """
         try:
-            if not self._initialized:
-                raise RuntimeError("CuriosityManager not initialized")
-                
-            # Update metrics
-            for metric_name, value in metrics.items():
-                self.update_metrics(metric_name, value)
-                
-            # Adjust weights based on metrics
-            weight_novelty = self.config_manager.get("weight_novelty")
-            weight_ignorance = self.config_manager.get("weight_ignorance")
-            
-            if "accuracy" in metrics:
-                weight_novelty *= (1.0 + 0.1 * metrics["accuracy"])
-                
-            if "loss" in metrics:
-                weight_ignorance *= (1.0 - 0.1 * metrics["loss"])
-                
-            # Update config
-            self.config_manager.update({
-                "weight_novelty": weight_novelty,
-                "weight_ignorance": weight_ignorance
-            })
-            
-            return True
-            
+            with self.lock:
+                for key, value in params.items():
+                    # Validate parameter exists and is valid
+                    if not hasattr(self, key):
+                        self._log_warning(
+                            "invalid_parameter",
+                            message=f"Invalid curiosity parameter: {key}",
+                            parameter=key,
+                            value=value
+                        )
+                        continue
+                        
+                    # Validate value type and range
+                    if key in ["pressure", "weight_ignorance", "weight_novelty"]:
+                        if not isinstance(value, (int, float)):
+                            self._log_warning(
+                                "invalid_value_type",
+                                message=f"Invalid type for {key}: {type(value)}",
+                                parameter=key,
+                                value=value
+                            )
+                            continue
+                        if not 0.0 <= value <= 1.0:
+                            self._log_warning(
+                                "invalid_value_range",
+                                message=f"Value out of range for {key}: {value}",
+                                parameter=key,
+                                value=value
+                            )
+                            continue
+                            
+                    # Update parameter
+                    setattr(self, key, value)
+                    self._log_event(
+                        "parameter_updated",
+                        message=f"Updated {key} to {value}",
+                        parameter=key,
+                        value=value
+                    )
+                    
+                    # Special handling for queue_maxlen
+                    if key == "queue_maxlen":
+                        self.curiosity_queue = deque(maxlen=value)
+                        
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "parameter_tuning",
-                "metrics": metrics
-            })
-            return False
-            
+            self._log_error(
+                "tune_failed",
+                message=f"Failed to tune parameters: {str(e)}",
+                parameters=params,
+                error=str(e)
+            )
+            raise
+
     def get_metrics_summary(self) -> Dict[str, float]:
         """Get summary statistics of tracked metrics."""
         try:
@@ -812,3 +839,108 @@ class CuriosityManager:
                 "memory_count": len(memory_embeddings) if 'memory_embeddings' in locals() else 0
             })
             return 0.5
+
+    def get_pressure(self) -> float:
+        """Get current pressure with validation and decay."""
+        try:
+            with self.lock:
+                # Apply natural decay
+                time_delta = time.time() - self.last_update
+                if time_delta > 0:
+                    self.pressure *= (self._pressure_decay_rate ** time_delta)
+                    self.last_update = time.time()
+                
+                # Ensure pressure stays within bounds
+                self.pressure = max(self._min_pressure, min(self._max_pressure, self.pressure))
+                
+                # Record pressure in history
+                self._pressure_history.append((time.time(), self.pressure))
+                
+                return self.pressure
+                
+        except Exception as e:
+            self._log_error(f"Failed to get pressure: {str(e)}")
+            return self._min_pressure  # Return minimum pressure on error
+
+    def reduce_pressure(self, amount: float) -> None:
+        """Reduce pressure with validation and cooldown."""
+        try:
+            with self.lock:
+                current_time = time.time()
+                
+                # Check cooldown
+                if current_time - self._last_pressure_change < self._pressure_change_cooldown:
+                    self._log_warning(
+                        "pressure_change_cooldown",
+                        message="Pressure change too frequent",
+                        last_change=self._last_pressure_change,
+                        current_time=current_time
+                    )
+                    return
+                
+                # Validate amount
+                if not isinstance(amount, (int, float)) or amount <= 0:
+                    self._log_warning(
+                        "invalid_pressure_reduction",
+                        message=f"Invalid pressure reduction amount: {amount}",
+                        amount=amount
+                    )
+                    return
+                
+                # Calculate new pressure
+                new_pressure = self.pressure - amount
+                
+                # Ensure pressure stays above minimum
+                if new_pressure < self._min_pressure:
+                    self._log_warning(
+                        "pressure_min_reached",
+                        message=f"Pressure reduction would go below minimum: {new_pressure}",
+                        current_pressure=self.pressure,
+                        reduction=amount
+                    )
+                    new_pressure = self._min_pressure
+                
+                # Update pressure
+                self.pressure = new_pressure
+                self._last_pressure_change = current_time
+                self.last_update = current_time
+                
+                # Log pressure change
+                self._log_event(
+                    "pressure_reduced",
+                    message=f"Pressure reduced by {amount}",
+                    old_pressure=self.pressure + amount,
+                    new_pressure=self.pressure,
+                    reduction=amount
+                )
+                
+        except Exception as e:
+            self._log_error(f"Failed to reduce pressure: {str(e)}")
+
+    def get_pressure_stats(self) -> Dict[str, Any]:
+        """Get statistics about pressure changes."""
+        try:
+            with self.lock:
+                if not self._pressure_history:
+                    return {
+                        "current_pressure": self.pressure,
+                        "min_pressure": self._min_pressure,
+                        "max_pressure": self._max_pressure,
+                        "history_size": 0
+                    }
+                
+                pressures = [p for _, p in self._pressure_history]
+                return {
+                    "current_pressure": self.pressure,
+                    "min_pressure": self._min_pressure,
+                    "max_pressure": self._max_pressure,
+                    "avg_pressure": sum(pressures) / len(pressures),
+                    "min_observed": min(pressures),
+                    "max_observed": max(pressures),
+                    "history_size": len(pressures),
+                    "last_change": self._last_pressure_change
+                }
+                
+        except Exception as e:
+            self._log_error(f"Failed to get pressure stats: {str(e)}")
+            return {}
