@@ -2,7 +2,7 @@ import time
 from collections import deque
 from enum import Enum
 from threading import Lock
-from typing import Union, List, Optional, Dict, Any, Tuple
+from typing import Union, List, Optional, Dict, Any, Tuple, Set
 import torch
 import traceback
 from dataclasses import dataclass
@@ -35,9 +35,15 @@ class ProcessorConfig:
     confidence_var_threshold: float = 1e-5
     confidence_smoothing_factor: float = 0.0
     max_confidence_history: int = 10
+    # Repetition detection configuration
+    min_rep_length: int = 3
+    max_rep_scan: int = 100
+    rep_confidence_penalty: float = 0.3
+    enable_rep_detection: bool = True
 
     _RANGES: Dict[str, Tuple[float, float]] = None
     _HISTORY_RANGES: Dict[str, Tuple[int, int]] = None
+    _REP_RANGES: Dict[str, Tuple[float, float]] = None
 
     def __post_init__(self):
         """Initialize and validate configuration parameters."""
@@ -45,9 +51,14 @@ class ProcessorConfig:
             "flat_distribution_confidence": (0.0, 0.5),
             "confidence_var_threshold": (1e-6, 1e-4),
             "confidence_smoothing_factor": (0.0, 1.0),
+            "rep_confidence_penalty": (0.0, 1.0),
         }
         self._HISTORY_RANGES = {
             "max_confidence_history": (5, 20),
+        }
+        self._REP_RANGES = {
+            "min_rep_length": (2, 10),
+            "max_rep_scan": (50, 200),
         }
         self._validate_config()
 
@@ -61,6 +72,10 @@ class ProcessorConfig:
             value = getattr(self, key)
             if not (min_val <= value <= max_val):
                 raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
+        for key, (min_val, max_val) in self._REP_RANGES.items():
+            value = getattr(self, key)
+            if not (min_val <= value <= max_val):
+                raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
 
     def update(self, **kwargs) -> None:
         """Update configuration parameters with validation."""
@@ -71,6 +86,10 @@ class ProcessorConfig:
                     raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
             elif key in self._HISTORY_RANGES:
                 min_val, max_val = self._HISTORY_RANGES[key]
+                if not (min_val <= value <= max_val):
+                    raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
+            elif key in self._REP_RANGES:
+                min_val, max_val = self._REP_RANGES[key]
                 if not (min_val <= value <= max_val):
                     raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
             else:
@@ -242,7 +261,11 @@ class SOVLProcessor:
             flat_distribution_confidence=processor_config.get("flat_distribution_confidence", 0.2),
             confidence_var_threshold=processor_config.get("confidence_var_threshold", 1e-5),
             confidence_smoothing_factor=processor_config.get("confidence_smoothing_factor", 0.0),
-            max_confidence_history=processor_config.get("max_confidence_history", 10)
+            max_confidence_history=processor_config.get("max_confidence_history", 10),
+            min_rep_length=processor_config.get("min_rep_length", 3),
+            max_rep_scan=processor_config.get("max_rep_scan", 100),
+            rep_confidence_penalty=processor_config.get("rep_confidence_penalty", 0.3),
+            enable_rep_detection=processor_config.get("enable_rep_detection", True)
         )
         
         # Initialize token mapping components
@@ -391,6 +414,13 @@ class SOVLProcessor:
         conf = self._adjust_for_distribution(conf, max_probs)
         conf = self._apply_temperament(conf, temperament_influence)
         conf = self._apply_curiosity(conf, curiosity_pressure)
+        
+        # Apply repetition penalty if enabled
+        if self.config.enable_rep_detection and generated_ids is not None:
+            rep_indices = self.detect_repetitions(generated_ids)
+            if rep_indices is not None:
+                conf = conf * (1.0 - self.config.rep_confidence_penalty)
+        
         conf = self._smooth_confidence(conf)
 
         self._log_confidence(conf, logits, temperament_influence, curiosity_pressure)
@@ -542,3 +572,129 @@ class SOVLProcessor:
                 "event": EventType.PROCESSOR_RESET.value,
                 "timestamp": time.time()
             })
+
+    def detect_repetitions(
+        self,
+        token_ids: Union[List[int], torch.Tensor],
+        special_ids: Optional[Set[int]] = None,
+        min_rep_length: Optional[int] = None,
+        max_scan: Optional[int] = None,
+        batch_size: Optional[int] = None
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Detect repeating token sequences with optimized batch processing.
+        
+        Args:
+            token_ids: List of token IDs or tensor of shape (batch_size, seq_len)
+            special_ids: Set of special token IDs to ignore
+            min_rep_length: Minimum sequence length to check
+            max_scan: Maximum number of tokens to scan
+            batch_size: Optional batch size for processing
+            
+        Returns:
+            (start_idx, end_idx) of first repetition found or None
+        """
+        try:
+            with self._lock:
+                # Use config values if not specified
+                if min_rep_length is None:
+                    min_rep_length = self.config.min_rep_length
+                if max_scan is None:
+                    max_scan = self.config.max_rep_scan
+                if special_ids is None:
+                    special_ids = {
+                        self.base_tokenizer.pad_token_id,
+                        self.base_tokenizer.eos_token_id,
+                        self.base_tokenizer.bos_token_id,
+                        self.base_tokenizer.unk_token_id
+                    }
+                
+                # Convert to tensor if needed
+                if isinstance(token_ids, list):
+                    token_ids = torch.tensor(token_ids, device=self.device)
+                
+                # Handle batch processing
+                if token_ids.dim() == 2:
+                    if batch_size is None:
+                        batch_size = token_ids.size(0)
+                    
+                    for i in range(0, token_ids.size(0), batch_size):
+                        batch = token_ids[i:i + batch_size]
+                        result = self._detect_repetitions_batch(
+                            batch, special_ids, min_rep_length, max_scan
+                        )
+                        if result is not None:
+                            return result
+                    return None
+                
+                # Single sequence processing
+                return self._detect_repetitions_single(
+                    token_ids, special_ids, min_rep_length, max_scan
+                )
+                
+        except Exception as e:
+            self.logger.record({
+                "event": EventType.ERROR.value,
+                "error": f"Repetition detection failed: {str(e)}",
+                "token_ids_shape": str(getattr(token_ids, 'shape', 'N/A')),
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return None
+
+    def _detect_repetitions_batch(
+        self,
+        token_ids: torch.Tensor,
+        special_ids: Set[int],
+        min_rep_length: int,
+        max_scan: int
+    ) -> Optional[Tuple[int, int]]:
+        """Detect repetitions in a batch of sequences."""
+        # Create mask for special tokens
+        special_mask = torch.zeros_like(token_ids, dtype=torch.bool)
+        for sid in special_ids:
+            special_mask |= (token_ids == sid)
+        
+        # Filter out special tokens
+        filtered = token_ids[~special_mask]
+        
+        # Process each sequence in the batch
+        for i in range(filtered.size(0)):
+            result = self._detect_repetitions_single(
+                filtered[i], special_ids, min_rep_length, max_scan
+            )
+            if result is not None:
+                return result
+        
+        return None
+
+    def _detect_repetitions_single(
+        self,
+        token_ids: torch.Tensor,
+        special_ids: Set[int],
+        min_rep_length: int,
+        max_scan: int
+    ) -> Optional[Tuple[int, int]]:
+        """Detect repetitions in a single sequence."""
+        # Convert to list for processing
+        ids = token_ids.tolist()
+        filtered = [i for i in ids if i not in special_ids]
+        scan_range = min(len(filtered), max_scan)
+        
+        # Use sliding window with early stopping
+        for i in range(scan_range - 2 * min_rep_length + 1):
+            window = filtered[i:i + min_rep_length]
+            next_window = filtered[i + min_rep_length:i + 2 * min_rep_length]
+            
+            if window == next_window:
+                self.logger.record({
+                    "event": EventType.WARNING.value,
+                    "message": "Repetition detected",
+                    "start_idx": i,
+                    "end_idx": i + min_rep_length,
+                    "length": min_rep_length,
+                    "timestamp": time.time()
+                })
+                return (i, i + min_rep_length)
+        
+        return None

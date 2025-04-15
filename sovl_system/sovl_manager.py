@@ -8,6 +8,7 @@ import traceback
 import os
 from threading import Lock
 import time
+from sovl_utils import validate_quantization_mode
 
 class ModelManager:
     """
@@ -42,7 +43,10 @@ class ModelManager:
         self.scaffold_config = None
 
         # Quantization and model settings
-        self.quantization_mode = self.core_config.get("quantization", "fp16")
+        self.quantization_mode = validate_quantization_mode(
+            self.core_config.get("quantization", "fp16"),
+            self.logger
+        )
         self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", None)
 
         # Initialize models and tokenizers
@@ -387,16 +391,17 @@ class ModelManager:
         Args:
             mode: Quantization mode ("fp16", "int8", "int4").
         """
-        if mode in ["fp16", "int8", "int4"] and mode != self.quantization_mode:
-            self.quantization_mode = mode
-            self.core_config["quantization"] = mode
-            self.config_manager.update("core_config.quantization", mode)
+        validated_mode = validate_quantization_mode(mode, self.logger)
+        if validated_mode != self.quantization_mode:
+            self.quantization_mode = validated_mode
+            self.core_config["quantization"] = validated_mode
+            self.config_manager.update("core_config.quantization", validated_mode)
             self.logger.record({
                 "event": "quantization_mode_set",
-                "mode": mode,
+                "mode": validated_mode,
                 "timestamp": time.time()
             })
-            print(f"Quantization mode set to '{mode}'. Restart or reload models to apply.")
+            print(f"Quantization mode set to '{validated_mode}'. Restart or reload models to apply.")
         else:
             print(f"Invalid mode '{mode}' or no change.")
 

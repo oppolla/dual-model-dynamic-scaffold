@@ -9,7 +9,7 @@ import traceback
 import hashlib
 from sovl_logger import Logger
 from sovl_config import ConfigManager
-from sovl_utils import NumericalGuard, safe_divide, safe_compare
+from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
 import json
 import os
 import threading
@@ -285,26 +285,27 @@ class CuriosityState(StateBase):
             question_timeout=_load_config(self.config_manager, "controls_config", "curiosity_question_timeout", 3600.0)
         )
 
+    @synchronized("lock")
     def update_question_history(self, question: str, timestamp: float) -> None:
         """Update question history and related state."""
         try:
-            with self.lock:
-                self.last_question_time = timestamp
-                self.question_count += 1
-                self._log_event(
-                    "question_history_updated",
-                    message="Question history updated",
-                    level="info",
-                    question=question,
-                    timestamp=timestamp,
-                    question_count=self.question_count,
-                    queue_length=len(self.unanswered_questions)
-                )
-                self._update_pressure()
+            self.last_question_time = timestamp
+            self.question_count += 1
+            self._log_event(
+                "question_history_updated",
+                message="Question history updated",
+                level="info",
+                question=question,
+                timestamp=timestamp,
+                question_count=self.question_count,
+                queue_length=len(self.unanswered_questions)
+            )
+            self._update_pressure()
         except Exception as e:
             self._log_error(f"Failed to update question history: {str(e)}")
             raise StateError(f"Question history update failed: {str(e)}")
 
+    @synchronized("lock")
     def add_question(self, question: str, score: float, context_vector: Optional[torch.Tensor] = None):
         """Add a new question with score and optional context vector."""
         try:
@@ -313,131 +314,130 @@ class CuriosityState(StateBase):
             score = self._validate_number(score, "Score", min_value=0.0)
             if context_vector is not None:
                 self._validate_tensor(context_vector, self._config.hidden_size, "Context vector")
-            with self.lock:
-                with NumericalGuard():
-                    self.unanswered_questions.append((question, score, context_vector))
-                    self.question_count += 1
-                    self.last_question_time = time.time()
-                    self._update_pressure()
-                    self._log_event(
-                        "question_added",
-                        message="New question added to curiosity state",
-                        level="info",
-                        question=question,
-                        score=score,
-                        has_context_vector=context_vector is not None,
-                        question_count=self.question_count,
-                        queue_length=len(self.unanswered_questions)
-                    )
+            with NumericalGuard():
+                self.unanswered_questions.append((question, score, context_vector))
+                self.question_count += 1
+                self.last_question_time = time.time()
+                self._update_pressure()
+                self._log_event(
+                    "question_added",
+                    message="New question added to curiosity state",
+                    level="info",
+                    question=question,
+                    score=score,
+                    has_context_vector=context_vector is not None,
+                    question_count=self.question_count,
+                    queue_length=len(self.unanswered_questions)
+                )
         except Exception as e:
             self._log_error(f"Failed to add question: {str(e)}", question=question, score=score)
             raise StateError(f"Add question failed: {str(e)}")
 
+    @synchronized("lock")
     def prioritize_questions(self):
         """Sort unanswered questions by score."""
         try:
-            with self.lock:
-                sorted_questions = sorted(self.unanswered_questions, key=lambda x: x[1], reverse=True)
-                self.unanswered_questions = deque(sorted_questions, maxlen=self._config.max_questions)
-                self._log_event(
-                    "questions_prioritized",
-                    message="Questions prioritized by score",
-                    level="info",
-                    question_count=len(self.unanswered_questions)
-                )
+            sorted_questions = sorted(self.unanswered_questions, key=lambda x: x[1], reverse=True)
+            self.unanswered_questions = deque(sorted_questions, maxlen=self._config.max_questions)
+            self._log_event(
+                "questions_prioritized",
+                message="Questions prioritized by score",
+                level="info",
+                question_count=len(self.unanswered_questions)
+            )
         except Exception as e:
             self._log_error("Question prioritization failed")
             raise StateError(f"Question prioritization failed: {str(e)}")
 
+    @synchronized("lock")
     def prune_old_questions(self, timeout: float) -> None:
         """Remove questions older than timeout."""
         try:
             current_time = time.time()
-            with self.lock:
-                while self.unanswered_questions and current_time - self.last_question_time > timeout:
-                    question, _, _ = self.unanswered_questions.popleft()
-                    self._log_event(
-                        "old_question_pruned",
-                        message="Old question pruned",
-                        level="info",
-                        question=question
-                    )
-                self._update_pressure()
+            while self.unanswered_questions and current_time - self.last_question_time > timeout:
+                question, _, _ = self.unanswered_questions.popleft()
+                self._log_event(
+                    "old_question_pruned",
+                    message="Old question pruned",
+                    level="info",
+                    question=question
+                )
+            self._update_pressure()
         except Exception as e:
             self._log_error("Question pruning failed")
             raise StateError(f"Question pruning failed: {str(e)}")
 
+    @synchronized("lock")
     def _update_pressure(self):
         """Update curiosity pressure based on questions and novelty."""
         try:
-            with self.lock:
-                with NumericalGuard():
-                    base_pressure = safe_divide(
-                        len(self.unanswered_questions),
-                        max(1, self._config.max_questions),
-                        logger=self.logger
-                    )
-                    novelty_avg = safe_divide(
-                        sum(self.novelty_scores),
-                        max(1, len(self.novelty_scores)),
-                        logger=self.logger
-                    ) if self.novelty_scores else 0.0
-                    self.pressure = base_pressure * (1.0 + novelty_avg) * self._config.decay_rate
-                    self.pressure = max(0.0, min(1.0, self.pressure))
-                    self._log_event(
-                        "pressure_updated",
-                        message="Curiosity pressure updated",
-                        level="info",
-                        pressure=self.pressure,
-                        unanswered_count=len(self.unanswered_questions),
-                        novelty_avg=novelty_avg
-                    )
+            with NumericalGuard():
+                base_pressure = safe_divide(
+                    len(self.unanswered_questions),
+                    max(1, self._config.max_questions),
+                    logger=self.logger
+                )
+                novelty_avg = safe_divide(
+                    sum(self.novelty_scores),
+                    max(1, len(self.novelty_scores)),
+                    logger=self.logger
+                ) if self.novelty_scores else 0.0
+                self.pressure = base_pressure * (1.0 + novelty_avg) * self._config.decay_rate
+                self.pressure = max(0.0, min(1.0, self.pressure))
+                self._log_event(
+                    "pressure_updated",
+                    message="Curiosity pressure updated",
+                    level="info",
+                    pressure=self.pressure,
+                    unanswered_count=len(self.unanswered_questions),
+                    novelty_avg=novelty_avg
+                )
         except Exception as e:
             self._log_error("Pressure update failed")
             raise StateError(f"Pressure update failed: {str(e)}")
 
+    @synchronized("lock")
     def add_novelty_score(self, score: float):
         """Add a novelty score and decay existing scores."""
         try:
             score = self._validate_number(score, "Novelty score", min_value=0.0)
-            with self.lock:
-                with NumericalGuard():
-                    self.novelty_scores.append(score * self._config.decay_rate)
-                    self._update_pressure()
-                    self._log_event(
-                        "novelty_score_added",
-                        message="Novelty score added",
-                        level="info",
-                        score=score,
-                        novelty_scores_count=len(self.novelty_scores)
-                    )
+            with NumericalGuard():
+                self.novelty_scores.append(score * self._config.decay_rate)
+                self._update_pressure()
+                self._log_event(
+                    "novelty_score_added",
+                    message="Novelty score added",
+                    level="info",
+                    score=score,
+                    novelty_scores_count=len(self.novelty_scores)
+                )
         except Exception as e:
             self._log_error(f"Failed to add novelty score: {str(e)}", score=score)
             raise StateError(f"Add novelty score failed: {str(e)}")
 
+    @synchronized("lock")
     def get_context_vector(self) -> Optional[torch.Tensor]:
         """Compute a weighted average of context vectors from questions."""
         try:
-            with self.lock:
-                if not self.unanswered_questions:
-                    return None
-                vectors = [v for _, _, v in self.unanswered_questions if v is not None]
-                scores = [s for _, s, v in self.unanswered_questions if v is not None]
-                if not vectors:
-                    return None
-                with NumericalGuard():
-                    weights = torch.tensor(scores, dtype=torch.float32)
-                    weights = weights / (weights.sum() + 1e-8)
-                    stacked = torch.stack(vectors)
-                    weighted_avg = (stacked * weights.view(-1, 1)).sum(dim=0)
-                    self._log_event(
-                        "context_vector_computed",
-                        message="Context vector computed from questions",
-                        level="info",
-                        vector_shape=list(weighted_avg.shape),
-                        question_count=len(vectors)
-                    )
-                    return weighted_avg
+            if not self.unanswered_questions:
+                return None
+            vectors = [v for _, _, v in self.unanswered_questions if v is not None]
+            scores = [s for _, s, v in self.unanswered_questions if v is not None]
+            if not vectors:
+                return None
+            with NumericalGuard():
+                weights = torch.tensor(scores, dtype=torch.float32)
+                weights = weights / (weights.sum() + 1e-8)
+                stacked = torch.stack(vectors)
+                weighted_avg = (stacked * weights.view(-1, 1)).sum(dim=0)
+                self._log_event(
+                    "context_vector_computed",
+                    message="Context vector computed from questions",
+                    level="info",
+                    vector_shape=list(weighted_avg.shape),
+                    question_count=len(vectors)
+                )
+                return weighted_avg
         except Exception as e:
             self._log_error("Context vector computation failed")
             return None
@@ -612,6 +612,7 @@ class SOVLState(StateBase):
         self.lock = threading.Lock()
         self._initialize_state()
         
+    @synchronized("lock")
     def _initialize_state(self) -> None:
         """Initialize state components."""
         self.seen_prompts = set()
@@ -626,45 +627,35 @@ class SOVLState(StateBase):
             conversation_id=str(uuid.uuid4())
         )
         
+    @synchronized("lock")
     def add_dream_memory(self, tensor: torch.Tensor, weight: float, metadata: Dict) -> None:
         """Add a dream memory with device validation."""
-        with self.lock:
-            try:
-                # Validate and move tensor to correct device
-                tensor = self._validate_tensor_device(tensor)
-                
-                # Calculate memory size
-                memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)  # Convert to MB
-                
-                # Check memory limits
-                if self.total_dream_memory_mb + memory_size > self.config_manager.get("max_dream_memory_mb"):
-                    self._log_warning("Memory limit exceeded, pruning old memories")
-                    self._prune_dream_memory()
-                    
-                # Add to memory
-                self.dream_memory.append({
-                    "tensor": tensor,
-                    "weight": weight,
-                    "metadata": metadata,
-                    "timestamp": time.time()
-                })
-                self.total_dream_memory_mb += memory_size
-                
-            except Exception as e:
-                self._log_error(f"Failed to add dream memory: {str(e)}")
-                raise
-                
-    def _validate_tensor_device(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Validate and move tensor to correct device."""
-        if not isinstance(tensor, torch.Tensor):
-            raise ValueError("Input must be a torch.Tensor")
+        try:
+            # Validate and move tensor to correct device
+            tensor = self._validate_tensor_device(tensor)
             
-        if tensor.device != self.device:
-            self._log_warning(f"Moving tensor from {tensor.device} to {self.device}")
-            tensor = tensor.to(self.device)
+            # Calculate memory size
+            memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)  # Convert to MB
             
-        return tensor
-        
+            # Check memory limits
+            if self.total_dream_memory_mb + memory_size > self.config_manager.get("max_dream_memory_mb"):
+                self._log_warning("Memory limit exceeded, pruning old memories")
+                self._prune_dream_memory()
+                
+            # Add to memory
+            self.dream_memory.append({
+                "tensor": tensor,
+                "weight": weight,
+                "metadata": metadata,
+                "timestamp": time.time()
+            })
+            self.total_dream_memory_mb += memory_size
+            
+        except Exception as e:
+            self._log_error(f"Failed to add dream memory: {str(e)}")
+            raise
+            
+    @synchronized("lock")
     def _prune_dream_memory(self) -> None:
         """Prune old memories to maintain memory limits."""
         while self.total_dream_memory_mb > self.config_manager.get("max_dream_memory_mb") and self.dream_memory:
@@ -672,45 +663,45 @@ class SOVLState(StateBase):
             memory_size = removed["tensor"].element_size() * removed["tensor"].nelement() / (1024 * 1024)
             self.total_dream_memory_mb -= memory_size
             
+    @synchronized("lock")
     def get_dream_memory_stats(self) -> Dict[str, Any]:
         """Get dream memory statistics with device validation."""
-        with self.lock:
-            try:
-                stats = {
-                    "count": len(self.dream_memory),
-                    "total_memory_mb": self.total_dream_memory_mb,
-                    "max_memory_mb": self.config_manager.get("max_dream_memory_mb"),
-                    "average_weight": 0.0,
-                    "oldest_timestamp": None,
-                    "newest_timestamp": None
-                }
+        try:
+            stats = {
+                "count": len(self.dream_memory),
+                "total_memory_mb": self.total_dream_memory_mb,
+                "max_memory_mb": self.config_manager.get("max_dream_memory_mb"),
+                "average_weight": 0.0,
+                "oldest_timestamp": None,
+                "newest_timestamp": None
+            }
+            
+            if self.dream_memory:
+                weights = [m["weight"] for m in self.dream_memory]
+                timestamps = [m["timestamp"] for m in self.dream_memory]
+                stats["average_weight"] = sum(weights) / len(weights)
+                stats["oldest_timestamp"] = min(timestamps)
+                stats["newest_timestamp"] = max(timestamps)
                 
-                if self.dream_memory:
-                    weights = [m["weight"] for m in self.dream_memory]
-                    timestamps = [m["timestamp"] for m in self.dream_memory]
-                    stats["average_weight"] = sum(weights) / len(weights)
-                    stats["oldest_timestamp"] = min(timestamps)
-                    stats["newest_timestamp"] = max(timestamps)
-                    
-                return stats
-                
-            except Exception as e:
-                self._log_error(f"Failed to get dream memory stats: {str(e)}")
-                return {}
-                
+            return stats
+            
+        except Exception as e:
+            self._log_error(f"Failed to get dream memory stats: {str(e)}")
+            return {}
+            
+    @synchronized("lock")
     def validate_dream_memory(self) -> bool:
         """Validate dream memory tensors are on correct device."""
-        with self.lock:
-            try:
-                for memory in self.dream_memory:
-                    if not isinstance(memory["tensor"], torch.Tensor):
-                        return False
-                    if memory["tensor"].device != self.device:
-                        memory["tensor"] = memory["tensor"].to(self.device)
-                return True
-            except Exception as e:
-                self._log_error(f"Failed to validate dream memory: {str(e)}")
-                return False
+        try:
+            for memory in self.dream_memory:
+                if not isinstance(memory["tensor"], torch.Tensor):
+                    return False
+                if memory["tensor"].device != self.device:
+                    memory["tensor"] = memory["tensor"].to(self.device)
+            return True
+        except Exception as e:
+            self._log_error(f"Failed to validate dream memory: {str(e)}")
+            return False
 
 class StateManager:
     """Manages state initialization and persistence for the SOVL system."""

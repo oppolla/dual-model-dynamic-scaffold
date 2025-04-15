@@ -24,6 +24,9 @@ from sovl_processor import LogitsProcessor, SOVLProcessor
 from sovl_utils import (
     calculate_confidence,
     detect_repetitions,
+    safe_compare,
+    float_gt,
+    synchronized
 )
 from sovl_temperament import TemperamentConfig, TemperamentSystem
 from sovl_memory import MemoryManager
@@ -37,12 +40,15 @@ import logging
 from sovl_training_cycle import TrainingCycleManager
 from sovl_plugin import PluginManager
 import sys
+import math
+from sovl_utils import NumericalGuard
 
 # Remove sovl_conductor import and use TYPE_CHECKING for type hints
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sovl_conductor import SOVLOrchestrator
 
+@synchronized("lock")
 def calculate_confidence_score(
     logits: torch.Tensor,
     generated_ids: torch.Tensor,
@@ -51,99 +57,96 @@ def calculate_confidence_score(
     context: SystemContext,
     curiosity_manager: Optional[CuriosityManager] = None
 ) -> float:
-    """Calculate confidence score with robust error recovery."""
+    """Calculate confidence score with robust error recovery.
+    
+    Args:
+        logits: Model output logits
+        generated_ids: Generated token IDs
+        state: Current SOVL state
+        error_manager: Error handling manager
+        context: System context
+        curiosity_manager: Optional curiosity manager
+        
+    Returns:
+        Confidence score between 0.0 and 1.0
+    """
     try:
-        # Validate inputs
+        # Input validation
         if not isinstance(logits, torch.Tensor) or not isinstance(generated_ids, torch.Tensor):
-            raise ValueError("Invalid input types for confidence calculation")
+            raise ValueError("logits and generated_ids must be tensors")
             
-        if logits.shape[0] != generated_ids.shape[0]:
-            raise ValueError("Mismatched batch sizes between logits and generated_ids")
+        if logits.dim() != 2 or generated_ids.dim() != 1:
+            raise ValueError("Invalid tensor dimensions")
             
-        # Calculate base confidence
-        probs = torch.softmax(logits, dim=-1)
-        token_probs = torch.gather(probs, -1, generated_ids.unsqueeze(-1)).squeeze(-1)
-        base_confidence = token_probs.mean().item()
-        
-        # Apply curiosity pressure if available
-        if curiosity_manager:
+        # Calculate base confidence using softmax probabilities
+        with NumericalGuard():
+            probs = torch.softmax(logits, dim=-1)
+            max_probs = probs.max(dim=-1).values
+            base_confidence = max_probs.mean().item()
+            
+        # Apply curiosity pressure adjustment if available
+        if curiosity_manager is not None:
             pressure = curiosity_manager.get_pressure()
-            base_confidence *= (1.0 - pressure * 0.2)  # Reduce confidence under high pressure
+            base_confidence *= (1.0 - pressure * 0.1)  # Reduce confidence under high pressure
             
-        # Get temperament influence
-        temperament_influence = context.config_manager.get(
-            "curiosity_config.temperament_influence",
-            0.3
-        )
-        
         # Apply temperament influence
-        with state.lock:
-            if state.temperament_history:
-                recent_temperament = list(state.temperament_history)[-1]
-                temperament_factor = 1.0 + (recent_temperament - 0.5) * temperament_influence
-                base_confidence *= temperament_factor
-                
-        # Ensure confidence is within valid range
+        temperament_influence = context.config_manager.get("temperament_config.influence", 0.3)
+        base_confidence *= (1.0 + state.temperament_score * temperament_influence)
+        
+        # Constrain final confidence
         final_confidence = max(0.0, min(1.0, base_confidence))
         
         # Update confidence history
-        with state.lock:
-            state.confidence_history.append(final_confidence)
-            
+        state.confidence_history.append(final_confidence)
+        
         return final_confidence
         
     except Exception as e:
-        # Log the error
-        error_manager.handle_generation_error(
-            e,
-            "Confidence calculation failed",
-            additional_info={
-                "error_type": type(e).__name__,
-                "logits_shape": logits.shape if isinstance(logits, torch.Tensor) else None,
-                "generated_ids_shape": generated_ids.shape if isinstance(generated_ids, torch.Tensor) else None
-            }
-        )
-        
-        # Attempt recovery from history
-        with state.lock:
-            if state.confidence_history:
-                # Require minimum history length for recovery
-                if len(state.confidence_history) < 3:
-                    error_manager.handle_generation_error(
-                        ValueError("Insufficient confidence history for recovery"),
-                        "Confidence recovery failed",
-                        additional_info={
-                            "history_length": len(state.confidence_history),
-                            "required_length": 3
-                        }
-                    )
-                    raise ValueError("Cannot recover confidence due to insufficient history")
-                    
+        # Attempt recovery using recent valid confidences
+        try:
+            if len(state.confidence_history) >= 3:
                 # Use weighted average of recent confidences
-                recent_confidences = list(state.confidence_history)[-5:]
-                weights = [0.5 ** i for i in range(len(recent_confidences))]
-                weights = [w / sum(weights) for w in weights]
+                recent_confidences = list(state.confidence_history)[-3:]
+                weights = [0.5, 0.3, 0.2]  # More weight to recent values
                 recovered_confidence = sum(c * w for c, w in zip(recent_confidences, weights))
                 
                 # Log recovery
-                error_manager.handle_generation_error(
-                    ValueError("Using recovered confidence from history"),
-                    "Confidence recovery successful",
+                error_manager.logger.record_event(
+                    event_type="confidence_recovery",
+                    message="Recovered confidence from history",
+                    level="warning",
                     additional_info={
+                        "error": str(e),
                         "recovered_confidence": recovered_confidence,
-                        "history_length": len(recent_confidences)
+                        "history_length": len(state.confidence_history)
                     }
                 )
                 
                 return recovered_confidence
                 
-        # If no recovery possible, raise error
-        error_manager.handle_generation_error(
-            ValueError("No confidence history available for recovery"),
-            "Confidence recovery failed",
-            additional_info={"history_length": 0}
-        )
-        raise ValueError("Cannot recover confidence: no history available")
+            # If recovery fails, use conservative default
+            error_manager.logger.record_event(
+                event_type="confidence_default",
+                message="Using default confidence due to insufficient history",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "history_length": len(state.confidence_history)
+                }
+            )
+            return 0.5  # Conservative default
+            
+        except Exception as recovery_error:
+            error_manager.logger.record_event(
+                event_type="confidence_error",
+                message="Failed to recover confidence",
+                level="critical",
+                additional_info={
+                    "original_error": str(e),
+                    "recovery_error": str(recovery_error)
+                }
+            )
+            return 0.5  # Fallback default
 
 class SystemContext:
     """Manages system-wide context and resources."""
@@ -539,9 +542,9 @@ class ErrorManager:
         self.recent_errors = deque(maxlen=100)  # Track recent errors to detect duplicates
         self.error_cooldown = 1.0  # seconds
         self.severity_thresholds = {
-            "warning": 3,
-            "error": 5,
-            "critical": 10
+            "warning": 3.0,  # Convert to float for safe comparison
+            "error": 5.0,
+            "critical": 10.0
         }
         self.recovery_actions = {
             "training": self._recover_training,
@@ -555,8 +558,8 @@ class ErrorManager:
         error_key = f"{error_type}:{type(error).__name__}"
         current_time = time.time()
         
-        # Remove old errors from tracking
-        while self.recent_errors and current_time - self.recent_errors[0]["timestamp"] > self.error_cooldown:
+        # Remove old errors from tracking using float_compare
+        while self.recent_errors and float_gt(current_time - self.recent_errors[0]["timestamp"], self.error_cooldown):
             self.recent_errors.popleft()
             
         # Check for duplicates
@@ -605,10 +608,10 @@ class ErrorManager:
                 }
             )
             
-            # Determine severity and take action
-            if self.error_counts[error_key] >= self.severity_thresholds["critical"]:
+            # Determine severity and take action using safe_compare
+            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
                 self._recover_training(error_key)
-            elif self.error_counts[error_key] >= self.severity_thresholds["error"]:
+            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
                 self._adjust_training_parameters(batch_size)
                 
         except Exception as e:
@@ -622,11 +625,12 @@ class ErrorManager:
                 }
             )
             
-    def handle_curiosity_error(self, error: Exception, event_type: str) -> None:
+    def handle_curiosity_error(self, error: Exception, pressure: float) -> None:
         """Handle curiosity errors with duplicate detection."""
         try:
             error_key = f"curiosity:{type(error).__name__}"
             
+            # Check for duplicate error
             if self._is_duplicate_error(error, "curiosity"):
                 self.logger.record_event(
                     event_type="duplicate_curiosity_error",
@@ -634,13 +638,15 @@ class ErrorManager:
                     level="warning",
                     additional_info={
                         "error": str(error),
-                        "event_type": event_type
+                        "pressure": pressure
                     }
                 )
                 return
                 
+            # Increment error count
             self.error_counts[error_key] += 1
             
+            # Log error
             self.logger.record_event(
                 event_type="curiosity_error",
                 message=f"Curiosity error: {str(error)}",
@@ -648,12 +654,15 @@ class ErrorManager:
                 additional_info={
                     "error_key": error_key,
                     "error_count": self.error_counts[error_key],
-                    "event_type": event_type
+                    "pressure": pressure
                 }
             )
             
-            if self.error_counts[error_key] >= self.severity_thresholds["critical"]:
+            # Determine severity and take action using safe_compare
+            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
                 self._recover_curiosity(error_key)
+            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
+                self._adjust_curiosity_parameters(pressure)
                 
         except Exception as e:
             self.logger.record_event(
@@ -662,15 +671,16 @@ class ErrorManager:
                 level="critical",
                 additional_info={
                     "original_error": str(error),
-                    "event_type": event_type
+                    "pressure": pressure
                 }
             )
             
-    def handle_memory_error(self, error: Exception, model_size: int) -> bool:
+    def handle_memory_error(self, error: Exception, memory_usage: float) -> None:
         """Handle memory errors with duplicate detection."""
         try:
             error_key = f"memory:{type(error).__name__}"
             
+            # Check for duplicate error
             if self._is_duplicate_error(error, "memory"):
                 self.logger.record_event(
                     event_type="duplicate_memory_error",
@@ -678,13 +688,15 @@ class ErrorManager:
                     level="warning",
                     additional_info={
                         "error": str(error),
-                        "model_size": model_size
+                        "memory_usage": memory_usage
                     }
                 )
-                return False
+                return
                 
+            # Increment error count
             self.error_counts[error_key] += 1
             
+            # Log error
             self.logger.record_event(
                 event_type="memory_error",
                 message=f"Memory error: {str(error)}",
@@ -692,17 +704,16 @@ class ErrorManager:
                 additional_info={
                     "error_key": error_key,
                     "error_count": self.error_counts[error_key],
-                    "model_size": model_size
+                    "memory_usage": memory_usage
                 }
             )
             
-            if self.error_counts[error_key] >= self.severity_thresholds["critical"]:
-                return self._recover_memory(error_key)
-            elif self.error_counts[error_key] >= self.severity_thresholds["error"]:
-                return self._adjust_memory_usage(model_size)
+            # Determine severity and take action using safe_compare
+            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
+                self._recover_memory(error_key)
+            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
+                self._adjust_memory_parameters(memory_usage)
                 
-            return False
-            
         except Exception as e:
             self.logger.record_event(
                 event_type="error_handling_failed",
@@ -710,16 +721,16 @@ class ErrorManager:
                 level="critical",
                 additional_info={
                     "original_error": str(error),
-                    "model_size": model_size
+                    "memory_usage": memory_usage
                 }
             )
-            return False
             
-    def handle_generation_error(self, error: Exception, prompt: str) -> str:
+    def handle_generation_error(self, error: Exception, temperature: float) -> None:
         """Handle generation errors with duplicate detection."""
         try:
             error_key = f"generation:{type(error).__name__}"
             
+            # Check for duplicate error
             if self._is_duplicate_error(error, "generation"):
                 self.logger.record_event(
                     event_type="duplicate_generation_error",
@@ -727,13 +738,15 @@ class ErrorManager:
                     level="warning",
                     additional_info={
                         "error": str(error),
-                        "prompt": prompt
+                        "temperature": temperature
                     }
                 )
-                return "Error occurred during generation. Please try again."
+                return
                 
+            # Increment error count
             self.error_counts[error_key] += 1
             
+            # Log error
             self.logger.record_event(
                 event_type="generation_error",
                 message=f"Generation error: {str(error)}",
@@ -741,17 +754,16 @@ class ErrorManager:
                 additional_info={
                     "error_key": error_key,
                     "error_count": self.error_counts[error_key],
-                    "prompt": prompt
+                    "temperature": temperature
                 }
             )
             
-            if self.error_counts[error_key] >= self.severity_thresholds["critical"]:
-                return self._recover_generation(error_key)
-            elif self.error_counts[error_key] >= self.severity_thresholds["error"]:
-                return self._adjust_generation_parameters(prompt)
+            # Determine severity and take action using safe_compare
+            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
+                self._recover_generation(error_key)
+            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
+                self._adjust_generation_parameters(temperature)
                 
-            return "An error occurred during generation. Please try again."
-            
         except Exception as e:
             self.logger.record_event(
                 event_type="error_handling_failed",
@@ -759,10 +771,9 @@ class ErrorManager:
                 level="critical",
                 additional_info={
                     "original_error": str(error),
-                    "prompt": prompt
+                    "temperature": temperature
                 }
             )
-            return "A critical error occurred. Please try again later."
             
     def _recover_training(self, error_key: str) -> None:
         """Recover from critical training errors."""
@@ -864,34 +875,31 @@ class ErrorManager:
             )
             return False
             
-    def _adjust_memory_usage(self, model_size: int) -> bool:
-        """Adjust memory usage for non-critical errors."""
+    def _adjust_curiosity_parameters(self, pressure: float) -> None:
+        """Adjust curiosity parameters for non-critical errors."""
         try:
-            # Reduce memory limits
-            current_limit = self.context.config_manager.get("memory_config.max_memory_mb", 1024)
-            new_limit = max(256, current_limit - 128)
-            self.context.config_manager.update("memory_config.max_memory_mb", new_limit)
+            # Adjust curiosity parameters
+            current_pressure = self.context.config_manager.get("curiosity_config.pressure_threshold", 0.5)
+            new_pressure = max(0.1, current_pressure - 0.05)
+            self.context.config_manager.update("curiosity_config.pressure_threshold", new_pressure)
             
             self.logger.record_event(
-                event_type="memory_adjustment",
-                message="Adjusted memory limits",
+                event_type="curiosity_adjustment",
+                message="Adjusted curiosity parameters",
                 level="info",
                 additional_info={
-                    "old_limit": current_limit,
-                    "new_limit": new_limit,
-                    "model_size": model_size
+                    "old_pressure": current_pressure,
+                    "new_pressure": new_pressure,
+                    "pressure": pressure
                 }
             )
-            
-            return True
             
         except Exception as e:
             self.logger.record_event(
                 event_type="adjustment_failed",
-                message=f"Failed to adjust memory limits: {str(e)}",
+                message=f"Failed to adjust curiosity parameters: {str(e)}",
                 level="error"
             )
-            return False
             
     def _recover_generation(self, error_key: str) -> str:
         """Recover from critical generation errors."""
@@ -920,12 +928,12 @@ class ErrorManager:
             )
             return "A critical error occurred. Please try again later."
             
-    def _adjust_generation_parameters(self, prompt: str) -> str:
+    def _adjust_generation_parameters(self, temperature: float) -> str:
         """Adjust generation parameters for non-critical errors."""
         try:
             # Adjust generation parameters
             current_temp = self.context.config_manager.get("generation_config.temperature", 1.0)
-            new_temp = max(0.5, current_temp - 0.1)
+            new_temp = max(0.5, current_temp - 0.05)
             self.context.config_manager.update("generation_config.temperature", new_temp)
             
             self.logger.record_event(
@@ -935,7 +943,7 @@ class ErrorManager:
                 additional_info={
                     "old_temperature": current_temp,
                     "new_temperature": new_temp,
-                    "prompt": prompt
+                    "temperature": temperature
                 }
             )
             
@@ -1174,32 +1182,33 @@ class TemperamentAdjuster:
                 
             state = self.state_tracker.get_state()
             lifecycle_stage = self._determine_lifecycle_stage(state)
-            curiosity_pressure = curiosity_manager.get_pressure() if curiosity_manager else 0.0
+            
+            # Get current curiosity pressure and update state
+            state.curiosity_pressure = curiosity_manager.get_pressure() if curiosity_manager else 0.0
             
             # Get confidence from history or use default
             confidence = state.confidence_history[-1] if state.confidence_history else 0.5
             
-            # Update temperament
-            self.temperament_system.update_temperament(
+            # Update temperament with current curiosity pressure
+            self.temperament_system.update(
                 confidence=confidence,
                 lifecycle_stage=lifecycle_stage,
-                curiosity_pressure=curiosity_pressure
+                curiosity_pressure=state.curiosity_pressure
             )
             
-            # Synchronize state
+            # Synchronize state after update
             self._synchronize_state(state)
             
             # Log the update
             self.context.logger.record_event(
                 event_type="temperament_updated",
-                message="Temperament updated and state synchronized",
+                message="Temperament updated with current state",
                 level="info",
                 additional_info={
-                    "confidence": confidence,
+                    "temperament_score": state.temperament_score,
+                    "curiosity_pressure": state.curiosity_pressure,
                     "lifecycle_stage": lifecycle_stage,
-                    "curiosity_pressure": curiosity_pressure,
-                    "current_score": self.temperament_system.current_score,
-                    "history_length": len(state.temperament_history)
+                    "confidence": confidence
                 }
             )
             
