@@ -9,7 +9,7 @@ import math
 import torch
 from torch import nn
 
-from sovl_errors import ErrorManager
+from sovl_error import ErrorHandler
 
 
 class Curiosity:
@@ -170,7 +170,7 @@ class CuriosityManager:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        error_manager: ErrorManager,
+        error_manager: ErrorHandler,
         device: torch.device,
         state_manager=None
     ):

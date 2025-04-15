@@ -13,7 +13,7 @@ import math
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
-from sovl_errors import ErrorManager
+from sovl_error import ErrorHandler
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
@@ -1188,7 +1188,7 @@ class ScaffoldManager:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        error_manager: ErrorManager,
+        error_manager: ErrorHandler,
         base_tokenizer=None,
         scaffold_tokenizer=None
     ):
