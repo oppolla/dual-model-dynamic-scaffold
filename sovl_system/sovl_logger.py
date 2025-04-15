@@ -6,7 +6,7 @@ import time
 import logging
 from datetime import datetime
 from threading import Lock
-from typing import List, Dict, Union, Optional, Callable, Any
+from typing import List, Dict, Union, Optional, Callable, Any, Tuple
 from dataclasses import dataclass
 import torch
 
@@ -562,3 +562,90 @@ class Logger:
             "state_hash": state_hash,
             **kwargs
         })
+
+class LoggingManager:
+    """Manages logging setup and configuration for the SOVL system."""
+    
+    def __init__(self, config_manager: ConfigManager):
+        self.config_manager = config_manager
+        self.system_logger = None
+        self.error_logger = None
+        
+    def setup_logging(self) -> Tuple[Logger, Logger]:
+        """Initialize and configure system and error loggers."""
+        try:
+            # Configure system logger
+            system_log_config = LoggerConfig(
+                log_file=self.config_manager.get("logging_config.log_file", "sovl_system_logs.jsonl"),
+                max_size_mb=self.config_manager.get("logging_config.max_size_mb", 20),
+                compress_old=self.config_manager.get("logging_config.compress_old", True),
+                max_in_memory_logs=self.config_manager.get("logging_config.max_in_memory_logs", 1000)
+            )
+            
+            # Configure error logger
+            error_log_config = LoggerConfig(
+                log_file="sovl_errors.jsonl",
+                max_size_mb=10,
+                compress_old=True,
+                max_in_memory_logs=1000
+            )
+            
+            # Initialize loggers
+            self.system_logger = Logger(system_log_config)
+            self.error_logger = Logger(error_log_config)
+            
+            # Set up log rotation
+            self.system_logger.file_handler.manage_rotation(max_files=7)
+            
+            # Log successful setup
+            self.system_logger.record({
+                "event": "logging_setup_complete",
+                "timestamp": time.time(),
+                "system_log_file": system_log_config.log_file,
+                "error_log_file": error_log_config.log_file
+            })
+            
+            return self.system_logger, self.error_logger
+            
+        except Exception as e:
+            # Use fallback logging if setup fails
+            fallback_logger = logging.getLogger(__name__)
+            fallback_logger.error(f"Failed to setup logging: {str(e)}")
+            raise LoggingError(f"Logging setup failed: {str(e)}")
+            
+    def get_system_logger(self) -> Logger:
+        """Get the system logger instance."""
+        if self.system_logger is None:
+            raise LoggingError("System logger not initialized")
+        return self.system_logger
+        
+    def get_error_logger(self) -> Logger:
+        """Get the error logger instance."""
+        if self.error_logger is None:
+            raise LoggingError("Error logger not initialized")
+        return self.error_logger
+        
+    def update_config(self, **kwargs) -> None:
+        """Update logging configuration."""
+        try:
+            if self.system_logger:
+                self.system_logger.tune(**kwargs)
+            if self.error_logger:
+                self.error_logger.tune(**kwargs)
+                
+            self.system_logger.record({
+                "event": "logging_config_updated",
+                "timestamp": time.time(),
+                "config_changes": kwargs
+            })
+        except Exception as e:
+            self.system_logger.log_error(
+                f"Failed to update logging config: {str(e)}",
+                error_type="config_update",
+                config_changes=kwargs
+            )
+            raise LoggingError(f"Logging config update failed: {str(e)}")
+
+class LoggingError(Exception):
+    """Raised for logging-related errors."""
+    pass

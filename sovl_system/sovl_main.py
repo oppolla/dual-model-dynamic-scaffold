@@ -32,6 +32,8 @@ from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
 from sovl_error import ErrorHandler
 from sovl_state_manager import StateManager
+from sovl_logging import LoggingManager
+import logging
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Calculate confidence score for generated tokens."""
@@ -68,17 +70,25 @@ class SOVLSystem:
 
     def _setup_logging(self) -> None:
         """Configure logging for system and error events."""
-        self.logger = Logger(
-            log_file=self.config_manager.get("logging_config.log_file", "sovl_system_logs.jsonl"),
-            max_size_mb=self.config_manager.get("logging_config.max_size_mb", 20),
-            compress_old=self.config_manager.get("logging_config.compress_old", True)
-        )
-        self.logger.manage_rotation(max_files=7)
-        self.error_logger = Logger(
-            log_file="sovl_errors.jsonl",
-            max_size_mb=10,
-            compress_old=True
-        )
+        try:
+            # Initialize logging manager
+            self.logging_manager = LoggingManager(self.config_manager)
+            
+            # Setup logging and get logger instances
+            self.logger, self.error_logger = self.logging_manager.setup_logging()
+            
+            # Log successful initialization
+            self.logger.record({
+                "event": "logging_initialized",
+                "timestamp": time.time(),
+                "conversation_id": "init"
+            })
+            
+        except Exception as e:
+            # Use fallback logging if setup fails
+            fallback_logger = logging.getLogger(__name__)
+            fallback_logger.error(f"Failed to setup logging: {str(e)}")
+            raise
 
     def _initialize_components(self) -> None:
         """Initialize core system components."""
