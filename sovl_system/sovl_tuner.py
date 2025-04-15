@@ -10,6 +10,14 @@ from sovl_validation import ValidationSchema
 import traceback
 from collections import defaultdict, deque
 from sovl_error import ErrorManager
+from dataclasses import dataclass
+
+@dataclass
+class ValidationRange:
+    """Defines a validation range for a configuration parameter."""
+    min_value: Any
+    max_value: Any
+    description: str = ""
 
 class ICuriosityManager(Protocol):
     """Interface for curiosity management."""
@@ -27,6 +35,68 @@ class ICrossAttentionInjector(Protocol):
 
 class SOVLTuner:
     """Centralized module for tuning SOVL system parameters dynamically."""
+    
+    # Core configuration ranges
+    CORE_RANGES: Dict[str, ValidationRange] = {
+        "hidden_size": ValidationRange(128, 2048, "Model hidden size"),
+        "quantization": ValidationRange("fp16", "int8", "Quantization mode"),
+        "use_dynamic_layers": ValidationRange(True, False, "Dynamic layer usage")
+    }
+    
+    # Controls configuration ranges
+    CONTROLS_RANGES: Dict[str, ValidationRange] = {
+        "temp_eager_threshold": ValidationRange(0.7, 0.9, "Eager threshold"),
+        "temp_sluggish_threshold": ValidationRange(0.4, 0.6, "Sluggish threshold"),
+        "temp_mood_influence": ValidationRange(0.0, 1.0, "Mood influence"),
+        "temp_curiosity_boost": ValidationRange(0.0, 0.5, "Curiosity boost"),
+        "temp_restless_drop": ValidationRange(0.0, 0.5, "Restless drop"),
+        "temp_melancholy_noise": ValidationRange(0.0, 0.05, "Melancholy noise"),
+        "conf_feedback_strength": ValidationRange(0.0, 1.0, "Confidence feedback strength"),
+        "temp_smoothing_factor": ValidationRange(0.0, 1.0, "Temperament smoothing factor"),
+        "temperament_decay_rate": ValidationRange(0.0, 1.0, "Temperament decay rate"),
+        "scaffold_weight_cap": ValidationRange(0.5, 1.0, "Scaffold weight cap"),
+        "base_temperature": ValidationRange(0.5, 1.5, "Base temperature"),
+        "sleep_conf_threshold": ValidationRange(0.5, 0.9, "Sleep confidence threshold"),
+        "sleep_time_factor": ValidationRange(0.5, 5.0, "Sleep time factor"),
+        "sleep_log_min": ValidationRange(5, 20, "Minimum sleep log entries"),
+        "dream_swing_var": ValidationRange(0.05, 0.2, "Dream swing variance"),
+        "dream_lifecycle_delta": ValidationRange(0.05, 0.2, "Dream lifecycle delta"),
+        "dream_temperament_on": ValidationRange(True, False, "Dream temperament enabled"),
+        "dream_noise_scale": ValidationRange(0.01, 0.1, "Dream noise scale"),
+        "dream_memory_weight": ValidationRange(0.0, 0.5, "Dream memory weight"),
+        "dream_memory_maxlen": ValidationRange(5, 20, "Dream memory max length"),
+        "dream_prompt_weight": ValidationRange(0.0, 1.0, "Dream prompt weight"),
+        "dream_novelty_boost": ValidationRange(0.0, 0.05, "Dream novelty boost"),
+        "dream_memory_decay": ValidationRange(0.0, 1.0, "Dream memory decay"),
+        "dream_prune_threshold": ValidationRange(0.0, 1.0, "Dream prune threshold")
+    }
+    
+    # Curiosity configuration ranges
+    CURIOSITY_RANGES: Dict[str, ValidationRange] = {
+        "enable_curiosity": ValidationRange(True, False, "Curiosity enabled"),
+        "novelty_threshold_spontaneous": ValidationRange(0.5, 1.0, "Spontaneous novelty threshold"),
+        "novelty_threshold_response": ValidationRange(0.5, 1.0, "Response novelty threshold"),
+        "pressure_threshold": ValidationRange(0.5, 0.9, "Pressure threshold"),
+        "pressure_drop": ValidationRange(0.1, 0.5, "Pressure drop"),
+        "silence_threshold": ValidationRange(5.0, 60.0, "Silence threshold"),
+        "question_cooldown": ValidationRange(30.0, 120.0, "Question cooldown"),
+        "queue_maxlen": ValidationRange(1, 50, "Question queue max length"),
+        "weight_ignorance": ValidationRange(0.0, 1.0, "Ignorance weight"),
+        "weight_novelty": ValidationRange(0.0, 1.0, "Novelty weight"),
+        "max_new_tokens": ValidationRange(5, 12, "Maximum new tokens"),
+        "base_temperature": ValidationRange(0.5, 1.5, "Base temperature"),
+        "temperament_influence": ValidationRange(0.1, 0.6, "Temperament influence"),
+        "top_k": ValidationRange(10, 50, "Top-k sampling"),
+        "attention_weight": ValidationRange(0.0, 1.0, "Attention weight"),
+        "question_timeout": ValidationRange(60.0, 86400.0, "Question timeout")
+    }
+    
+    # Training configuration ranges
+    TRAINING_RANGES: Dict[str, ValidationRange] = {
+        "lifecycle_capacity_factor": ValidationRange(0.001, 0.1, "Lifecycle capacity factor"),
+        "lifecycle_curve": ValidationRange("sigmoid_linear", "exponential", "Lifecycle curve type"),
+        "lora_capacity": ValidationRange(0, 1000, "LoRA capacity")
+    }
     
     def __init__(
         self,
@@ -123,29 +193,98 @@ class SOVLTuner:
                 }
             )
             
+    def _get_validation_range(self, section: str, key: str) -> ValidationRange:
+        """Get validation range for a configuration parameter."""
+        ranges_map = {
+            "core_config": self.CORE_RANGES,
+            "controls_config": self.CONTROLS_RANGES,
+            "curiosity_config": self.CURIOSITY_RANGES,
+            "training_config": self.TRAINING_RANGES
+        }
+        
+        if section not in ranges_map:
+            raise ValueError(f"Unknown configuration section: {section}")
+            
+        if key not in ranges_map[section]:
+            raise ValueError(f"Unknown configuration key: {key} in section {section}")
+            
+        return ranges_map[section][key]
+
     def validate_param(self, param_name: str, value: Any) -> bool:
         """Validate a parameter against its allowed range or type."""
         try:
             # Extract section and key from param_name
             section, key = param_name.split(".", 1)
             
-            # Use shared validation schema
-            is_valid, error_msg = ValidationSchema.validate_value(
-                section, key, value, self.logger
-            )
+            # Get validation range
+            validation_range = self._get_validation_range(section, key)
             
-            if not is_valid:
+            if isinstance(validation_range.min_value, bool):
+                if not isinstance(value, bool):
+                    self.logger.record_event(
+                        event_type="param_validation_error",
+                        message=f"{key} must be a boolean value",
+                        level="error",
+                        additional_info={
+                            "param_name": param_name,
+                            "value": value
+                        }
+                    )
+                    return False
+                return True
+                
+            if isinstance(validation_range.min_value, str):
+                if not isinstance(value, str):
+                    self.logger.record_event(
+                        event_type="param_validation_error",
+                        message=f"{key} must be a string value",
+                        level="error",
+                        additional_info={
+                            "param_name": param_name,
+                            "value": value
+                        }
+                    )
+                    return False
+                if value not in [validation_range.min_value, validation_range.max_value]:
+                    self.logger.record_event(
+                        event_type="param_validation_error",
+                        message=f"{key} must be one of: {validation_range.min_value}, {validation_range.max_value}",
+                        level="error",
+                        additional_info={
+                            "param_name": param_name,
+                            "value": value
+                        }
+                    )
+                    return False
+                return True
+                
+            if not isinstance(value, (int, float)):
                 self.logger.record_event(
                     event_type="param_validation_error",
-                    message=f"Invalid parameter value: {error_msg}",
+                    message=f"{key} must be a numeric value",
                     level="error",
                     additional_info={
                         "param_name": param_name,
                         "value": value
                     }
                 )
-            
-            return is_valid
+                return False
+                
+            if not (validation_range.min_value <= value <= validation_range.max_value):
+                self.logger.record_event(
+                    event_type="param_validation_error",
+                    message=f"{key} must be between {validation_range.min_value} and {validation_range.max_value}. Got: {value}",
+                    level="error",
+                    additional_info={
+                        "param_name": param_name,
+                        "value": value,
+                        "min": validation_range.min_value,
+                        "max": validation_range.max_value
+                    }
+                )
+                return False
+                
+            return True
             
         except ValueError as e:
             self.logger.record_event(
