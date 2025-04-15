@@ -473,6 +473,34 @@ class CycleTrainer:
 
     def train_step(self, batch: List[dict], dry_run: bool = False, 
                    dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
+        """
+        Perform a single training step on a batch of data.
+
+        Args:
+            batch: List of training examples
+            dry_run: Whether to perform a dry run
+            dry_run_params: Optional parameters for dry run
+
+        Returns:
+            Optional[float]: Loss value if not dry run, None otherwise
+
+        Raises:
+            ValueError: If batch format is invalid
+        """
+        # Validate batch format
+        for i, item in enumerate(batch):
+            if "prompt" not in item or "completion" not in item:
+                self.context.logger.log_error(
+                    error_msg=f"Invalid batch item at index {i}: missing prompt or completion",
+                    error_type="data_format_error",
+                    additional_info={
+                        "item": item,
+                        "batch_size": len(batch),
+                        "required_fields": ["prompt", "completion"]
+                    }
+                )
+                raise ValueError(f"Invalid batch item at index {i}: missing prompt or completion")
+
         try:
             scaffold_provider = self.model_loader.scaffold_manager.get_scaffold_context
             return self.trainer.train_step_with_scaffold(
@@ -608,9 +636,82 @@ class TrainingManager:
                    dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
         return self.cycle_trainer.train_step(batch, dry_run, dry_run_params)
 
-    def run_training_cycle(self, train_data: List, valid_data: List, 
+    def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
                           epochs: Optional[int] = None, batch_size: Optional[int] = None):
-        self.cycle_trainer.run_training_cycle(train_data, valid_data, epochs, batch_size)
+        """
+        Run a training cycle with the provided or default data.
+
+        Args:
+            train_data: Optional training data to use instead of default
+            valid_data: Optional validation data to use instead of default
+            epochs: Optional number of epochs to train for
+            batch_size: Optional batch size for training
+
+        Raises:
+            ValueError: If no training data is available
+        """
+        # Use provided data or fall back to initialized data
+        train_data = train_data or self.train_data
+        valid_data = valid_data or self.valid_data
+
+        # Validate data presence
+        if not train_data:
+            self.context.logger.log_error(
+                error_msg="No training data available for training cycle",
+                error_type="training_error",
+                conversation_id=self.state_tracker.state.conversation_id,
+                state_hash=self.state_tracker.state.get_state_hash(),
+                additional_info={
+                    "using_provided_data": train_data is not self.train_data,
+                    "valid_data_available": bool(valid_data)
+                }
+            )
+            raise ValueError("No training data available for training cycle")
+
+        # Log training cycle start
+        self.context.logger.record_event(
+            event_type="training_cycle_start",
+            message="Starting training cycle",
+            level="info",
+            additional_info={
+                "train_samples": len(train_data),
+                "valid_samples": len(valid_data),
+                "epochs": epochs,
+                "batch_size": batch_size
+            }
+        )
+
+        # Execute pre-training hooks
+        self.plugin_manager.execute_hook("on_training_step", {
+            "batch_size": len(train_data),
+            "dry_run": False
+        })
+        
+        try:
+            # Run the training cycle
+            self.cycle_trainer.run_training_cycle(
+                train_data=train_data,
+                valid_data=valid_data,
+                epochs=epochs,
+                batch_size=batch_size
+            )
+            
+            # Execute post-training hooks
+            self.plugin_manager.execute_hook("on_training_step_complete", {
+                "batch_size": len(train_data),
+                "result": "success"
+            })
+            
+        except Exception as e:
+            # Log training error
+            self.context.logger.log_error(
+                error_msg=f"Training cycle failed: {str(e)}",
+                error_type="training_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=self.state_tracker.state.conversation_id,
+                state_hash=self.state_tracker.state.get_state_hash()
+            )
+            raise
 
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
         self.state_tracker.update_data_exposure(data_exposure)
@@ -799,10 +900,55 @@ class ComponentManager:
 class SOVLSystem:
     """Main system class for SOVL."""
     def __init__(self, config_path: str):
+        """Initialize the SOVL system with configuration and core components."""
         self.config_path = config_path
         self.context = SystemContext(config_path)
         self.state_tracker = StateTracker(self.context)
         self.error_manager = ErrorManager(self.context, self.state_tracker)
+        
+        # Initialize training data with error handling
+        try:
+            self.train_data, self.valid_data = load_training_data(
+                self.context.config_manager,
+                self.context.logger
+            )
+            
+            # Log successful data initialization
+            self.context.logger.record_event(
+                event_type="data_initialization",
+                message=f"Loaded {len(self.train_data)} training and {len(self.valid_data)} validation samples",
+                level="info",
+                additional_info={
+                    "train_samples": len(self.train_data),
+                    "valid_samples": len(self.valid_data),
+                    "config_path": config_path
+                }
+            )
+            
+        except InsufficientDataError as e:
+            # Log error and raise with clear message
+            self.context.logger.log_error(
+                error_msg=str(e),
+                error_type="insufficient_data_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_path": config_path,
+                    "min_entries": self.context.config_manager.get("core_config.min_training_entries", 10)
+                }
+            )
+            raise RuntimeError("Cannot initialize system without sufficient training data") from e
+            
+        except Exception as e:
+            # Log error and raise with clear message
+            self.context.logger.log_error(
+                error_msg=f"Failed to load training data: {str(e)}",
+                error_type="data_initialization_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_path": config_path
+                }
+            )
+            raise RuntimeError("Failed to initialize system due to data loading error") from e
         
         # Initialize component manager
         self.component_manager = ComponentManager(
@@ -824,7 +970,9 @@ class SOVLSystem:
             level="info",
             additional_info={
                 "config_path": config_path,
-                "device": str(self.context.device)
+                "device": str(self.context.device),
+                "training_data_loaded": bool(self.train_data),
+                "validation_data_loaded": bool(self.valid_data)
             }
         )
 
@@ -924,9 +1072,80 @@ class SOVLSystem:
 
     def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
                           epochs: Optional[int] = None, batch_size: Optional[int] = None):
+        """
+        Run a training cycle with the provided or default data.
+
+        Args:
+            train_data: Optional training data to use instead of default
+            valid_data: Optional validation data to use instead of default
+            epochs: Optional number of epochs to train for
+            batch_size: Optional batch size for training
+
+        Raises:
+            ValueError: If no training data is available
+        """
+        # Use provided data or fall back to initialized data
         train_data = train_data or self.train_data
         valid_data = valid_data or self.valid_data
-        self.training_manager.run_training_cycle(train_data, valid_data, epochs, batch_size)
+
+        # Validate data presence
+        if not train_data:
+            self.context.logger.log_error(
+                error_msg="No training data available for training cycle",
+                error_type="training_error",
+                conversation_id=self.state_tracker.state.conversation_id,
+                state_hash=self.state_tracker.state.get_state_hash(),
+                additional_info={
+                    "using_provided_data": train_data is not self.train_data,
+                    "valid_data_available": bool(valid_data)
+                }
+            )
+            raise ValueError("No training data available for training cycle")
+
+        # Log training cycle start
+        self.context.logger.record_event(
+            event_type="training_cycle_start",
+            message="Starting training cycle",
+            level="info",
+            additional_info={
+                "train_samples": len(train_data),
+                "valid_samples": len(valid_data),
+                "epochs": epochs,
+                "batch_size": batch_size
+            }
+        )
+
+        # Execute pre-training hooks
+        self.plugin_manager.execute_hook("on_training_step", {
+            "batch_size": len(train_data),
+            "dry_run": False
+        })
+        
+        try:
+            # Run the training cycle
+            self.training_manager.run_training_cycle(
+                train_data=train_data,
+                valid_data=valid_data,
+                epochs=epochs,
+                batch_size=batch_size
+            )
+            
+            # Execute post-training hooks
+            self.plugin_manager.execute_hook("on_training_step_complete", {
+                "batch_size": len(train_data),
+                "result": "success"
+            })
+            
+        except Exception as e:
+            # Log training error
+            self.context.logger.log_error(
+                error_msg=f"Training cycle failed: {str(e)}",
+                error_type="training_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=self.state_tracker.state.conversation_id,
+                state_hash=self.state_tracker.state.get_state_hash()
+            )
+            raise
 
     def generate_curiosity_question(self, context: str = "", spontaneous: bool = False) -> Optional[str]:
         return self.curiosity_engine.generate_question(context, spontaneous)
