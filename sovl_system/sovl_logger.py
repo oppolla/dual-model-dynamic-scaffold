@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import torch
 from logging.handlers import RotatingFileHandler
 import traceback
+import psutil
 
 @dataclass
 class LoggerConfig:
@@ -20,10 +21,16 @@ class LoggerConfig:
     compress_old: bool = False
     max_in_memory_logs: int = 1000
     rotation_count: int = 5
+    max_log_age_days: int = 30  # Maximum age of logs to keep
+    prune_interval_hours: int = 24  # How often to prune old logs
+    memory_threshold_mb: int = 100  # Memory threshold to trigger aggressive pruning
 
     _RANGES = {
         "max_size_mb": (0, 100),
         "max_in_memory_logs": (100, 10000),
+        "max_log_age_days": (1, 365),
+        "prune_interval_hours": (1, 168),
+        "memory_threshold_mb": (10, 1000)
     }
 
     def __post_init__(self):
@@ -220,6 +227,7 @@ class Logger:
         self.validator = _LogValidator(self.fallback_logger)
         self.file_handler = _FileHandler(config, self.fallback_logger)
         self._load_existing()
+        self._last_prune_time = time.time()
 
     def _load_existing(self) -> None:
         """Load existing logs from file with memory constraints and format detection."""
@@ -294,30 +302,80 @@ class Logger:
             with self.lock:
                 self.logs = []
 
+    def _get_memory_usage(self) -> float:
+        """Get current memory usage in MB."""
+        process = psutil.Process()
+        return process.memory_info().rss / (1024 * 1024)  # Convert to MB
+
+    def _should_prune(self) -> bool:
+        """Check if we should prune logs based on time or memory usage."""
+        current_time = time.time()
+        time_since_last_prune = (current_time - self._last_prune_time) / 3600  # Convert to hours
+        
+        if time_since_last_prune >= self.config.prune_interval_hours:
+            return True
+            
+        memory_usage = self._get_memory_usage()
+        if memory_usage > self.config.memory_threshold_mb:
+            return True
+            
+        return False
+
+    def _prune_old_logs(self) -> None:
+        """Prune logs older than max_log_age_days."""
+        if not self._should_prune():
+            return
+            
+        current_time = time.time()
+        cutoff_time = current_time - (self.config.max_log_age_days * 24 * 3600)
+        
+        with self.lock:
+            # Remove logs older than cutoff_time
+            self.logs = [
+                log for log in self.logs 
+                if log.get("timestamp", 0) > cutoff_time
+            ]
+            
+            # If still over memory limit, remove oldest logs
+            while len(self.logs) > self.config.max_in_memory_logs:
+                self.logs.pop(0)
+                
+            self._last_prune_time = current_time
+            
+            # Log the pruning event
+            self.record_event(
+                event_type="system",
+                message="Log pruning completed",
+                additional_info={
+                    "remaining_logs": len(self.logs),
+                    "memory_usage_mb": self._get_memory_usage(),
+                    "prune_time": current_time
+                }
+            )
+
     def record(self, entry: Dict) -> None:
         """Write a validated log entry (alias for write)."""
         self.write(entry)
 
-    def record_event(self, event_type: str, message: str, additional_info: Dict = None) -> None:
-        """
-        Record an event with standardized structure.
+    def record_event(self, event_type: str, message: str, additional_info: Optional[Dict] = None) -> None:
+        """Record an event with automatic memory management."""
+        # Check if we need to prune before adding new log
+        self._prune_old_logs()
         
-        Args:
-            event_type: Type of event being logged
-            message: Description of the event
-            additional_info: Optional additional information to include
-        """
-        entry = {
-            "event": event_type,
-            "message": message,
+        log_entry = {
             "timestamp": time.time(),
-            "conversation_id": str(uuid.uuid4())
+            "event_type": event_type,
+            "message": message,
+            "additional_info": additional_info or {}
         }
         
-        if additional_info:
-            entry.update(additional_info)
+        with self.lock:
+            self.logs.append(log_entry)
+            self.logs = self.logs[-self.config.max_in_memory_logs:]
             
-        self.record(entry)
+            # If we're over the memory limit after adding, prune again
+            if len(self.logs) > self.config.max_in_memory_logs:
+                self._prune_old_logs()
 
     def write(self, entry: Dict) -> None:
         """
@@ -734,6 +792,20 @@ class Logger:
             "state_hash": state_hash,
             **kwargs
         })
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get memory usage statistics."""
+        return {
+            "total_logs": len(self.logs),
+            "memory_usage_mb": self._get_memory_usage(),
+            "last_prune_time": self._last_prune_time,
+            "time_since_last_prune_hours": (time.time() - self._last_prune_time) / 3600,
+            "config": {
+                "max_in_memory_logs": self.config.max_in_memory_logs,
+                "max_log_age_days": self.config.max_log_age_days,
+                "memory_threshold_mb": self.config.memory_threshold_mb
+            }
+        }
 
     def cleanup(self) -> None:
         """Clean up logging resources for all loggers."""

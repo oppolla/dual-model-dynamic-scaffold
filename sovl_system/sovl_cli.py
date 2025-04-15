@@ -7,6 +7,7 @@ from contextlib import contextlib
 import functools
 from sovl_system import SOVLSystem
 from sovl_config import ConfigManager
+from sovl_utils import safe_compare
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -85,54 +86,93 @@ class CommandHandler:
         return cmd, args
 
     def generate_response(self, prompt: str, max_tokens: int = 60, temp_adjust: float = 0.0) -> str:
+        """Generate a response with safe temperature bounds and error handling."""
         try:
+            # Get base temperature with fallback
             base_temp = getattr(self.system, 'base_temperature', 0.7)
-            self.system.logger.record({
-                "event": "cli_generate_start",
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": base_temp + temp_adjust,
-                "timestamp": time.time()
-            })
-
+            
+            # Calculate and clamp temperature
+            raw_temp = base_temp + temp_adjust
+            temperature = max(0.1, min(2.0, raw_temp))
+            
+            # Log temperature adjustment if it was clamped
+            if raw_temp != temperature:
+                self.system.logger.record_event(
+                    event_type="temperature_clamped",
+                    message="Temperature value was clamped to safe range",
+                    level="warning",
+                    additional_info={
+                        "base_temperature": base_temp,
+                        "temp_adjust": temp_adjust,
+                        "raw_temperature": raw_temp,
+                        "clamped_temperature": temperature,
+                        "timestamp": time.time()
+                    }
+                )
+            
+            # Generate response with safe parameters
             response = self.system.generate(
                 prompt,
                 max_new_tokens=max_tokens,
-                temperature=base_temp + temp_adjust,
+                temperature=temperature,
                 top_k=50,
                 do_sample=True
             )
-
-            self.system.logger.record({
-                "event": "cli_generate_complete",
-                "response": response,
-                "timestamp": time.time()
-            })
+            
+            # Log successful generation
+            self.system.logger.record_event(
+                event_type="response_generated",
+                message="Response generated successfully",
+                level="info",
+                additional_info={
+                    "prompt_length": len(prompt),
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "response_length": len(response),
+                    "timestamp": time.time()
+                }
+            )
+            
             return response
+        
         except Exception as e:
-            self.system.logger.record({
-                "error": f"CLI generation failed: {str(e)}",
-                "prompt": prompt,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            # Handle generation errors
+            self.system.error_manager.handle_generation_error(e, temperature)
+            self.system.logger.record_event(
+                event_type="generation_error",
+                message="Error during response generation",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "prompt": prompt[:200],  # Truncate for logging
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "stack_trace": traceback.format_exc(),
+                    "timestamp": time.time()
+                }
+            )
             raise
 
     def log_action(self, prompt: str, response: str, confidence: float, is_system: bool = False, extra_attrs: Optional[Dict] = None):
+        """Log an action with standardized format."""
         if not hasattr(self.system, 'history') or not hasattr(self.system, 'logger'):
             print("Warning: Missing 'history' or 'logger'. Cannot log action.")
             return
-        log_entry = {
-            "prompt": prompt,
-            "response": response,
-            "timestamp": time.time(),
-            "conversation_id": getattr(self.system.history, 'conversation_id', 'N/A'),
-            "confidence_score": confidence,
-            "is_system_question": is_system
-        }
-        if extra_attrs:
-            log_entry.update(extra_attrs)
-        self.system.logger.record(log_entry)
+        
+        self.system.logger.record_event(
+            event_type="cli_action",
+            message="Command action executed",
+            level="info",
+            additional_info={
+                "prompt": prompt,
+                "response": response,
+                "timestamp": time.time(),
+                "conversation_id": getattr(self.system.history, 'conversation_id', 'N/A'),
+                "confidence_score": confidence,
+                "is_system_question": is_system,
+                **(extra_attrs or {})
+            }
+        )
 
     # Command implementations
     def cmd_quit(self, args: List[str]) -> bool:
@@ -147,12 +187,16 @@ class CommandHandler:
             if non_flag_args:
                 epochs = int(non_flag_args[0])
 
-            self.system.logger.record({
-                "event": "cli_train_start",
-                "epochs": epochs,
-                "dry_run": dry_run,
-                "timestamp": time.time()
-            })
+            self.system.logger.record_event(
+                event_type="cli_train_start",
+                message="Starting training cycle",
+                level="info",
+                additional_info={
+                    "epochs": epochs,
+                    "dry_run": dry_run,
+                    "timestamp": time.time()
+                }
+            )
 
             if dry_run and hasattr(self.system, 'enable_dry_run'):
                 self.system.enable_dry_run()
@@ -164,19 +208,32 @@ class CommandHandler:
                 batch_size=BATCH_SIZE
             )
 
-            self.system.logger.record({
-                "event": "cli_train_complete",
-                "epochs": epochs,
-                "timestamp": time.time()
-            })
+            self.system.logger.record_event(
+                event_type="cli_train_complete",
+                message="Training cycle completed successfully",
+                level="info",
+                additional_info={
+                    "epochs": epochs,
+                    "timestamp": time.time()
+                }
+            )
+            return False
         except Exception as e:
-            self.system.logger.record({
-                "error": f"Train command failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            print(f"Error during training: {str(e)}")
-        return False
+            # Use ErrorManager for robust error handling
+            self.system.error_manager.handle_training_error(e, BATCH_SIZE)
+            self.system.logger.record_event(
+                event_type="cli_train_error",
+                message="Training error occurred",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "batch_size": BATCH_SIZE,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            print(f"Training error occurred. Recovery actions have been taken.")
+            return False
 
     def cmd_generate(self, args: List[str]) -> bool:
         if not args:
@@ -189,17 +246,51 @@ class CommandHandler:
             prompt = ' '.join(args)
 
         print(f"Generating response for: {prompt}...")
-        response = self.generate_response(prompt, max_tokens)
-        print(f"Response: {response}")
-        return False
+        try:
+            response = self.generate_response(prompt, max_tokens)
+            print(f"Response: {response}")
+            return False
+        except Exception as e:
+            # Use ErrorManager for generation error handling
+            self.system.error_manager.handle_generation_error(e, prompt)
+            self.system.logger.record_event(
+                event_type="cli_generate_error",
+                message="Generation error occurred",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "prompt": prompt,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            print(f"Generation error occurred. Recovery actions have been taken.")
+            return False
 
     def cmd_save(self, args: List[str]) -> bool:
         path = args[0] if args else None
         print(f"Saving state{' to ' + path if path else ' to default location'}...")
         if hasattr(self.system, 'save_state'):
             self.system.save_state(path)
+            self.system.logger.record_event(
+                event_type="cli_save_state",
+                message="State saved successfully",
+                level="info",
+                additional_info={
+                    "path": path,
+                    "timestamp": time.time()
+                }
+            )
             print("State saved.")
         else:
+            self.system.logger.record_event(
+                event_type="cli_save_error",
+                message="Save state method not found",
+                level="error",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
             print("Error: 'save_state' method not found.")
         return False
 
@@ -208,78 +299,244 @@ class CommandHandler:
         print(f"Loading state{' from ' + path if path else ' from default location'}...")
         if hasattr(self.system, 'load_state'):
             self.system.load_state(path)
+            self.system.logger.record_event(
+                event_type="cli_load_state",
+                message="State loaded successfully",
+                level="info",
+                additional_info={
+                    "path": path,
+                    "timestamp": time.time()
+                }
+            )
             print("State loaded.")
         else:
+            self.system.logger.record_event(
+                event_type="cli_load_error",
+                message="Load state method not found",
+                level="error",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
             print("Error: 'load_state' method not found.")
         return False
 
     def cmd_dream(self, args: List[str]) -> bool:
-        print("Triggering dream cycle...")
-        dream_method = getattr(self.system, 'dream', getattr(self.system, '_dream', None))
-        if dream_method:
-            dream_method()
-            print("Dream cycle finished.")
-        else:
-            print("Error: 'dream' or '_dream' method not found.")
-        return False
+        """Run a dream cycle to process and consolidate memories."""
+        try:
+            if not hasattr(self.system, 'dream'):
+                print("Error: Dream cycle not supported.")
+                self.system.logger.record_event(
+                    event_type="dream_command_error",
+                    message="Dream cycle not supported",
+                    level="error"
+                )
+                return False
+            
+            print("Initiating dream cycle...")
+            if self.system.dream():
+                print("Dream cycle completed successfully.")
+                return True
+            else:
+                print("Error: Dream cycle failed.")
+                return False
+            
+        except Exception as e:
+            self.system.error_manager.handle_curiosity_error(e, "dream_command")
+            self.system.logger.record_event(
+                event_type="dream_command_error",
+                message="Error during dream command execution",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            print(f"Error: {str(e)}")
+            return False
 
     def cmd_tune(self, args: List[str]) -> bool:
         if not args:
             raise ValueError("Error: Usage: tune <parameter> [value]")
         parameter, value_str = args[0].lower(), args[1] if len(args) > 1 else None
 
-        if parameter == "cross_attention":
-            try:
+        try:
+            if parameter == "cross_attention":
+                # Validate weight range before proceeding
                 weight = float(value_str) if value_str else None
+                if weight is not None and not (0.0 <= weight <= 1.0):
+                    raise ValueError("Cross-attention weight must be between 0.0 and 1.0")
+                
                 print(f"Setting cross-attention weight to {weight if weight else 'default'}...")
                 if hasattr(self.system, 'tune_cross_attention'):
                     self.system.tune_cross_attention(weight=weight)
+                    self.system.logger.record_event(
+                        event_type="cli_tune_cross_attention",
+                        message="Cross-attention weight set successfully",
+                        level="info",
+                        additional_info={
+                            "weight": weight,
+                            "timestamp": time.time()
+                        }
+                    )
                     print("Cross-attention weight set.")
                 else:
+                    self.system.logger.record_event(
+                        event_type="cli_tune_error",
+                        message="Tune cross-attention method not found",
+                        level="error",
+                        additional_info={
+                            "parameter": parameter,
+                            "timestamp": time.time()
+                        }
+                    )
                     print("Error: 'tune_cross_attention' method not found.")
-            except ValueError:
-                raise ValueError("Error: Invalid weight value for cross_attention.")
-        else:
-            print(f"Error: Unknown parameter '{parameter}'. Available: cross_attention")
-        return False
+            else:
+                self.system.logger.record_event(
+                    event_type="cli_tune_error",
+                    message="Unknown tuning parameter",
+                    level="error",
+                    additional_info={
+                        "parameter": parameter,
+                        "timestamp": time.time()
+                    }
+                )
+                print(f"Error: Unknown parameter '{parameter}'. Available: cross_attention")
+            return False
+        except ValueError as e:
+            # Handle validation errors separately
+            print(f"Error: {str(e)}")
+            self.system.logger.record_event(
+                event_type="cli_tune_validation_error",
+                message=str(e),
+                level="error",
+                additional_info={
+                    "parameter": parameter,
+                    "value": value_str,
+                    "timestamp": time.time()
+                }
+            )
+            return False
+        except Exception as e:
+            # Use ErrorManager for other errors
+            self.system.error_manager.handle_training_error(e, 1)
+            self.system.logger.record_event(
+                event_type="cli_tune_error",
+                message="Tuning error occurred",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "parameter": parameter,
+                    "value": value_str,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            print(f"Tuning error occurred. Recovery actions have been taken.")
+            return False
 
     def cmd_memory(self, args: List[str]) -> bool:
-        if not args or args[0] not in ['on', 'off']:
-            raise ValueError("Error: Usage: memory <on|off>")
-        enable_memory = args[0] == 'on'
-        print(f"Setting memory components to {args[0]}...")
-        if hasattr(self.system, 'toggle_memory'):
-            self.system.toggle_memory(enable_memory)
-            print(f"Memory components {'enabled' if enable_memory else 'disabled'}.")
-        else:
-            print("Warning: 'toggle_memory' method not found.")
-        return False
+        """Manage memory settings and view statistics."""
+        try:
+            if not args:
+                # Show memory statistics
+                stats = self.system.get_memory_stats()
+                if "error" in stats:
+                    print(f"Error: {stats['error']}")
+                    return False
+                
+                print("\nMemory Statistics:")
+                for key, value in stats.items():
+                    print(f"{key}: {value}")
+                return True
+            
+            # Handle memory toggle command
+            if args[0].lower() in ["on", "off"]:
+                enable = args[0].lower() == "on"
+                if self.system.toggle_memory(enable):
+                    print(f"Memory management {'enabled' if enable else 'disabled'}.")
+                    return True
+                else:
+                    print("Error: Failed to toggle memory management.")
+                    return False
+                
+            print("Error: Invalid memory command. Use 'memory' for stats or 'memory on/off' to toggle.")
+            return False
+        
+        except Exception as e:
+            self.system.error_manager.handle_memory_error(e, 0)
+            self.system.logger.record_event(
+                event_type="memory_command_error",
+                message="Error during memory command execution",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "args": args,
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            print(f"Error: {str(e)}")
+            return False
 
     def cmd_status(self, args: List[str]) -> bool:
+        """Display system status with thread-safe state access."""
         print("\n--- System Status ---")
         try:
-            if hasattr(self.system, 'scaffold_manager'):
-                stats = self.system.scaffold_manager.get_scaffold_stats()
-                print("\nScaffold Status:")
-                for key, value in stats.items():
-                    print(f"  {key.replace('_', ' ').title()}: {value}")
+            # Get state with proper locking
+            state = self.system.state_tracker.get_state()
+            with state.lock:
+                if hasattr(self.system, 'scaffold_manager'):
+                    stats = self.system.scaffold_manager.get_scaffold_stats()
+                    print("\nScaffold Status:")
+                    for key, value in stats.items():
+                        print(f"  {key.replace('_', ' ').title()}: {value}")
 
-            print("\nSystem Status:")
-            print(f"  Conversation ID: {getattr(getattr(self.system, 'history', None), 'conversation_id', 'N/A')}")
-            print(f"  Temperament: {getattr(self.system, 'temperament_score', 'N/A'):.2f}")
-            print(f"  Last Confidence: {self.system.confidence_history[-1]:.2f if hasattr(self.system, 'confidence_history') and self.system.confidence_history else 'N/A'}")
-            print(f"  Data Exposure: {getattr(self.system, 'data_exposure', 'N/A')}")
-            print(f"  Last Trained: {getattr(self.system, 'last_trained', 'Never')}")
-            print(f"  Gestating: {'Yes' if getattr(self.system, 'is_sleeping', False) else 'No'}")
+                print("\nSystem Status:")
+                print(f"  Conversation ID: {state.history.conversation_id}")
+                print(f"  Temperament: {state.temperament_score:.2f}")
+                print(f"  Last Confidence: {state.confidence_history[-1]:.2f if state.confidence_history else 'N/A'}")
+                print(f"  Data Exposure: {state.training_state.data_exposure}")
+                print(f"  Last Trained: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state.training_state.last_trained)) if state.training_state.last_trained else 'Never'}")
+                print(f"  Gestating: {'Yes' if state.is_sleeping else 'No'}")
+                
+                # Get dream memory stats with proper locking
+                dream_stats = state.get_dream_memory_stats()
+                if dream_stats:
+                    print("\nDream Memory Status:")
+                    print(f"  Count: {dream_stats['count']}")
+                    print(f"  Total Memory: {dream_stats['total_memory_mb']:.2f} MB")
+                    print(f"  Average Weight: {dream_stats['average_weight']:.2f}")
+                
+                self.system.logger.record_event(
+                    event_type="cli_status",
+                    message="System status retrieved successfully",
+                    level="info",
+                    additional_info={
+                        "conversation_id": state.history.conversation_id,
+                        "temperament": state.temperament_score,
+                        "last_confidence": state.confidence_history[-1] if state.confidence_history else None,
+                        "data_exposure": state.training_state.data_exposure,
+                        "last_trained": state.training_state.last_trained,
+                        "is_sleeping": state.is_sleeping,
+                        "dream_stats": dream_stats,
+                        "timestamp": time.time()
+                    }
+                )
+            return False
         except Exception as e:
-            self.system.logger.record({
-                "error": f"Status command failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.system.error_manager.record_error(e, "status", "check", severity="warning")
+            self.system.logger.record_event(
+                event_type="cli_status_error",
+                message="Error getting system status",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             print(f"Error getting status: {str(e)}")
-        print("---------------------")
-        return False
+            return False
 
     def cmd_log(self, args: List[str]) -> bool:
         num_entries = 5
@@ -290,6 +547,14 @@ class CommandHandler:
 
         print(f"\n--- Last {num_entries} Log Entries ---")
         if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
+            self.system.logger.record_event(
+                event_type="cli_log_error",
+                message="Logger not available",
+                level="error",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
             print("Error: Logger not available.")
             return False
 
@@ -313,34 +578,88 @@ class CommandHandler:
         print("--------------------------")
         return False
 
-    def cmd_config(self, args: List[str]) -> bool:
+    def cmd_config(self, args: List[str]) -> None:
+        """Handle configuration commands."""
         if not args:
-            raise ValueError("Usage: config <key> [value_to_set]")
-        key, value_str = args[0], ' '.join(args[1:]) if len(args) > 1 else None
-        try:
-            if key.startswith(("core_config.", "controls_config.")) and hasattr(self.system, 'scaffold_manager'):
-                if not self.system.scaffold_manager.validate_scaffold_config():
-                    print("Warning: Current scaffold configuration is invalid")
+            # Show all configuration
+            config = self.system.config_manager.get_config()
+            self._print_config(config)
+            return
 
-            if not value_str:
-                value = self.system.config_manager.get(key, "Key not found")
-                print(f"Config '{key}': {value}")
+        if len(args) == 1:
+            # Get value for specific key
+            key = args[0]
+            value = self.system.config_manager.get(key)
+            if value is not None:
+                print(f"{key}: {value}")
             else:
-                value = self._parse_config_value(value_str)
-                self.system.config_manager.update(key, value)
-                print(f"Config '{key}' set to: {self.system.config_manager.get(key)}")
+                print(f"Configuration key '{key}' not found")
+            return
 
-                if key.startswith(("core_config.", "controls_config.")) and hasattr(self.system, 'scaffold_manager'):
-                    if not self.system.scaffold_manager.validate_scaffold_config():
-                        print("Warning: New configuration created invalid scaffold state")
-        except Exception as e:
-            self.system.logger.record({
-                "error": f"Config command failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            print(f"Error updating config: {str(e)}")
-        return False
+        if len(args) == 2:
+            # Set value for specific key
+            key, new_value = args
+            try:
+                # Convert value to appropriate type based on schema
+                schema = next((s for s in self.system.config_manager.DEFAULT_SCHEMA if s.field == key), None)
+                if schema:
+                    if schema.type == bool:
+                        new_value = new_value.lower() in ('true', '1', 'yes')
+                    elif schema.type == int:
+                        new_value = int(new_value)
+                    elif schema.type == float:
+                        new_value = float(new_value)
+                    elif schema.type == str:
+                        new_value = str(new_value)
+                    else:
+                        print(f"Unsupported type for {key}: {schema.type.__name__}")
+                        return
+
+                # Validate the value before updating
+                if not self.system.config_manager.validate_value(key, new_value):
+                    print(f"Invalid value for {key}: {new_value}")
+                    return
+
+                # Update the configuration
+                old_value = self.system.config_manager.get(key)
+                if self.system.config_manager.update(key, new_value):
+                    # Log the configuration change
+                    self.system.logger.record({
+                        "event": "config_updated",
+                        "key": key,
+                        "old_value": old_value,
+                        "new_value": new_value,
+                        "timestamp": time.time()
+                    })
+                    
+                    # Check for configuration change effects
+                    try:
+                        # Notify subscribers and check for errors
+                        self.system.config_manager._notify_subscribers()
+                        print(f"Updated {key} to {new_value}")
+                        
+                        # Log any warnings or errors from the change
+                        if hasattr(self.system, 'context') and hasattr(self.system.context, 'config_handler'):
+                            warnings = self.system.context.config_handler._validate_all_configs()
+                            if warnings:
+                                print("\nConfiguration change warnings:")
+                                for warning in warnings:
+                                    print(f"- {warning}")
+                    except Exception as e:
+                        print(f"Warning: Configuration change may have side effects: {str(e)}")
+                        self.system.logger.record({
+                            "event": "config_change_warning",
+                            "key": key,
+                            "error": str(e),
+                            "timestamp": time.time()
+                        })
+                else:
+                    print(f"Failed to update {key}")
+            except ValueError as e:
+                print(f"Error setting configuration: {str(e)}")
+            return
+
+        print("Invalid configuration command. Use 'config' to show all, 'config <key>' to get a value, or 'config <key> <value>' to set a value")
 
     def cmd_reset(self, args: List[str]) -> bool:
         print("Resetting system state...")
@@ -361,21 +680,38 @@ class CommandHandler:
         return False
 
     def cmd_spark(self, args: List[str]) -> bool:
-        print("Sparking curiosity...")
-        if not hasattr(self.system, 'generate_curiosity_question'):
-            print("Error: 'generate_curiosity_question' method not found.")
+        """Generate a curiosity-driven question."""
+        try:
+            if not hasattr(self.system, 'generate_curiosity_question'):
+                print("Error: Curiosity question generation not supported.")
+                self.system.logger.record_event(
+                    event_type="spark_command_error",
+                    message="Curiosity question generation not supported",
+                    level="error"
+                )
+                return False
+            
+            question = self.system.generate_curiosity_question()
+            if question:
+                print(f"\nCuriosity Question: {question}\n")
+                return True
+            else:
+                print("Error: Failed to generate curiosity question.")
+                return False
+            
+        except Exception as e:
+            self.system.error_manager.handle_curiosity_error(e, "spark_command")
+            self.system.logger.record_event(
+                event_type="spark_command_error",
+                message="Error during spark command execution",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            print(f"Error: {str(e)}")
             return False
-
-        question = self.system.generate_curiosity_question()
-        if not question:
-            print("No curious question generated.")
-            return False
-
-        print(f"Curiosity Prompt: {question}")
-        response = self.generate_response(question, max_tokens=80)
-        print(f"Generated Response: {response}")
-        self.log_action(question, response, 0.5, True, {"event": "spark"})
-        return False
 
     def cmd_reflect(self, args: List[str]) -> bool:
         print("Reflecting on recent interactions...")
@@ -401,34 +737,155 @@ class CommandHandler:
         return False
 
     def cmd_muse(self, args: List[str]) -> bool:
+        """Generate creative thoughts with proper state synchronization."""
         print("Musing on a topic...")
-        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
-            print("Error: Logger not available.")
+        try:
+            # Get state with proper locking
+            state = self.system.state_tracker.get_state()
+            with state.lock:
+                if not hasattr(state, 'logger') or not hasattr(state.logger, 'read'):
+                    print("Error: Logger not available.")
+                    return False
+
+                logs = state.logger.read()[-5:]
+                inspiration = "the passage of time"
+                prompts = [log.get('prompt', '') for log in logs if log.get('prompt') and not log.get('is_system_question')]
+                if prompts:
+                    inspiration = prompts[-1].split()[:3]
+                    inspiration = " ".join(inspiration) if inspiration else inspiration
+
+                print(f"Inspiration for musing: \"{inspiration}\"")
+                muse_prompt = f"Generate a creative thought inspired by '{inspiration}'."
+                thought = self.generate_response(muse_prompt, max_tokens=80, temp_adjust=0.15)
+                print(f"Generated Thought: {thought}")
+                self.log_action(f"Musing on {inspiration}", thought, 0.7, True, {"event": "muse", "inspiration": inspiration})
+            return False
+        except Exception as e:
+            self.system.error_manager.handle_generation_error(e, 0.0)
+            print(f"Musing error occurred. Recovery actions have been taken.")
             return False
 
-        logs = self.system.logger.read()[-5:]
-        inspiration = "the passage of time"
-        prompts = [log.get('prompt', '') for log in logs if log.get('prompt') and not log.get('is_system_question')]
-        if prompts:
-            inspiration = prompts[-1].split()[:3]
-            inspiration = " ".join(inspiration) if inspiration else inspiration
+    @contextlib.contextmanager
+    def temporary_system_state(self, **kwargs):
+        """Temporarily modify system state with validation."""
+        state = self.system.state_tracker.get_state()
+        with state.lock:
+            original_values = {}
+            for key, value in kwargs.items():
+                if key == 'temperament_score':
+                    if not (0.0 <= value <= 1.0):
+                        raise ValueError(f"Invalid temperament_score: {value}")
+                    # Use TemperamentAdjuster for temperament changes
+                    temperament_adjuster = self.system.temperament_adjuster
+                    original_temperament = state.temperament_score
+                    temperament_adjuster.update_temperament(curiosity_manager=None)
+                    state.temperament_score = value
+                else:
+                    original_values[key] = getattr(self.system, key)
+                    setattr(self.system, key, value)
+            yield
+            for key, value in original_values.items():
+                setattr(self.system, key, value)
+            if 'temperament_score' in kwargs:
+                state.temperament_score = original_temperament
+                temperament_adjuster.update_temperament(curiosity_manager=None)
 
-        print(f"Inspiration for musing: \"{inspiration}\"")
-        muse_prompt = f"Generate a creative thought inspired by '{inspiration}'."
-        thought = self.generate_response(muse_prompt, max_tokens=80, temp_adjust=0.15)
-        print(f"Generated Thought: {thought}")
-        self.log_action(f"Musing on {inspiration}", thought, 0.7, True, {"event": "muse", "inspiration": inspiration})
-        return False
+    def cmd_debate(self, args: List[str]) -> bool:
+        """Engage in a debate with proper state synchronization."""
+        if not args:
+            raise ValueError("Error: 'debate' requires a topic.")
+        topic = ' '.join(args)
+        print(f"Initiating debate on: '{topic}'")
+
+        try:
+            # Get state with proper locking
+            state = self.system.state_tracker.get_state()
+            temperament_adjuster = self.system.temperament_adjuster
+            
+            with state.lock:
+                original_temperament = state.temperament_score
+                stance = "for"
+                
+                for turn in range(2):
+                    action = "Argue for" if stance == "for" else "Argue against (rebuttal)"
+                    prompt = f"{action} the topic: '{topic}'. Provide a concise point."
+                    response = self.generate_response(prompt, max_tokens=90, temp_adjust=0.1)
+                    print(f"[{'Argument For' if stance == 'for' else 'Rebuttal Against'}] {response}")
+                    self.log_action(prompt, response, 0.7, True, {"event": "debate_turn", "topic": topic, "stance": stance})
+                    stance = "against" if stance == "for" else "for"
+                    
+                    # Update temperament using safe comparison
+                    new_temperament = state.temperament_score + 0.1
+                    if safe_compare(new_temperament, 1.0, mode='lte', logger=self.system.logger):
+                        state.temperament_score = new_temperament
+                    else:
+                        state.temperament_score = 1.0
+                    temperament_adjuster.update_temperament(curiosity_manager=None)
+                    print(f"[Temperament nudged to {state.temperament_score:.2f}]")
+                
+                # Reset temperament using safe comparison
+                if safe_compare(original_temperament, state.temperament_score, mode='eq', logger=self.system.logger):
+                    self.system.logger.record_event(
+                        event_type="temperament_reset_skipped",
+                        message="Temperament reset skipped - already at original value",
+                        level="info",
+                        additional_info={
+                            "original_temperament": original_temperament,
+                            "current_temperament": state.temperament_score
+                        }
+                    )
+                else:
+                    state.temperament_score = original_temperament
+                    temperament_adjuster.update_temperament(curiosity_manager=None)
+                    print(f"[Temperament reset to {state.temperament_score:.2f}]")
+                
+            print(f"Debate on '{topic}' concluded.")
+            return False
+        except Exception as e:
+            self.system.error_manager.handle_generation_error(e, 0.0)
+            print(f"Debate error occurred. Recovery actions have been taken.")
+            return False
 
     def cmd_flare(self, args: List[str]) -> bool:
+        """Trigger an emotional flare with proper temperament handling."""
         print("Triggering emotional flare...")
-        with self.temporary_system_state(temperament_score=1.0):
-            prompt = ' '.join(args) or "Express a sudden burst of strong feeling!"
-            print(f"Flare prompt: {prompt}")
-            outburst = self.generate_response(prompt, max_tokens=100, temp_adjust=1.0)
-            print(f"Generated Outburst: {outburst.upper()}")
-        self.log_action(f"Flare: {prompt}", outburst, 0.9, True, {"event": "flare"})
-        return False
+        try:
+            # Use TemperamentAdjuster for the flare
+            temperament_adjuster = self.system.temperament_adjuster
+            state = self.system.state_tracker.get_state()
+            
+            with state.lock:
+                original_temperament = state.temperament_score
+                if safe_compare(1.0, state.temperament_score, mode='gt', logger=self.system.logger):
+                    state.temperament_score = 1.0
+                    temperament_adjuster.update_temperament(curiosity_manager=None)
+                    
+                    prompt = ' '.join(args) or "Express a sudden burst of strong feeling!"
+                    print(f"Flare prompt: {prompt}")
+                    outburst = self.generate_response(prompt, max_tokens=100, temp_adjust=1.0)
+                    print(f"Generated Outburst: {outburst.upper()}")
+                    
+                    # Reset temperament using safe comparison
+                    if safe_compare(original_temperament, state.temperament_score, mode='eq', logger=self.system.logger):
+                        self.system.logger.record_event(
+                            event_type="temperament_reset_skipped",
+                            message="Temperament reset skipped - already at original value",
+                            level="info",
+                            additional_info={
+                                "original_temperament": original_temperament,
+                                "current_temperament": state.temperament_score
+                            }
+                        )
+                    else:
+                        state.temperament_score = original_temperament
+                        temperament_adjuster.update_temperament(curiosity_manager=None)
+                    
+                self.log_action(f"Flare: {prompt}", outburst, 0.9, True, {"event": "flare"})
+                return False
+        except Exception as e:
+            self.system.error_manager.handle_generation_error(e, 0.0)
+            print(f"Flare error occurred. Recovery actions have been taken.")
+            return False
 
     def cmd_echo(self, args: List[str]) -> bool:
         if not args:
@@ -439,127 +896,6 @@ class CommandHandler:
         response = self.generate_response(reflect_prompt, max_tokens=70)
         print(f"Reflection: {response}")
         self.log_action(f"Echo: {text}", response, 0.6, False, {"event": "echo"})
-        return False
-
-    def cmd_debate(self, args: List[str]) -> bool:
-        if not args:
-            raise ValueError("Error: 'debate' requires a topic.")
-        topic = ' '.join(args)
-        print(f"Initiating debate on: '{topic}'")
-
-        original_temperament = getattr(self.system, 'temperament_score', None)
-        stance = "for"
-        for turn in range(2):
-            action = "Argue for" if stance == "for" else "Argue against (rebuttal)"
-            prompt = f"{action} the topic: '{topic}'. Provide a concise point."
-            response = self.generate_response(prompt, max_tokens=90, temp_adjust=0.1)
-            print(f"[{'Argument For' if stance == 'for' else 'Rebuttal Against'}] {response}")
-            self.log_action(prompt, response, 0.7, True, {"event": "debate_turn", "topic": topic, "stance": stance})
-            stance = "against" if stance == "for" else "for"
-            if original_temperament is not None:
-                self.system.temperament_score = min(1.0, self.system.temperament_score + 0.1)
-                print(f"[Temperament nudged to {self.system.temperament_score:.2f}]")
-
-        if original_temperament is not None:
-            self.system.temperament_score = original_temperament
-            print(f"[Temperament reset to {self.system.temperament_score:.2f}]")
-        print(f"Debate on '{topic}' concluded.")
-        return False
-
-    def cmd_glitch(self, args: List[str]) -> bool:
-        prompt_text = ' '.join(args) or "Something seems wrong..."
-        print(f"Simulating processing glitch for: '{prompt_text}'")
-        glitchy_prompt = f"Error... processing... '{prompt_text}' ... system instability detected... respond?"
-        response = self.generate_response(glitchy_prompt, max_tokens=70, temp_adjust=0.2)
-        print(f"Glitched Response: {response}")
-        self.log_action(f"Glitch: {prompt_text}", response, 0.4, False, {"event": "glitch"})
-        return False
-
-    def cmd_rewind(self, args: List[str]) -> bool:
-        steps = int(args[0]) if args and args[0].isdigit() else 1
-        if steps <= 0:
-            raise ValueError("Error: Steps must be positive.")
-
-        print(f"Rewinding conversation state by {steps} interaction(s)...")
-        if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
-            print("Error: Logger not available.")
-            return False
-
-        interaction_logs = [
-            log for log in self.system.logger.read()
-            if log.get('prompt') and log.get('response') and not log.get('is_system_question')
-        ][-steps:]
-        if len(interaction_logs) < steps:
-            print(f"Error: Only {len(interaction_logs)} interactions found.")
-            return False
-
-        past_interaction = interaction_logs[-1]
-        past_prompt = past_interaction.get('prompt', 'unknown')
-        past_response = past_interaction.get('response', 'lost')
-
-        print(f"\n--- Rewinding To ---")
-        print(f"{steps} interaction(s) ago:")
-        print(f"  Prompt: '{past_prompt[:100]}...'")
-        print(f"  Response: '{past_response[:100]}...'")
-        print("--------------------")
-
-        reinterpret_prompt = f"Revisit prompt: '{past_prompt}'. Respond differently based on current context."
-        new_response = self.generate_response(reinterpret_prompt, max_tokens=100)
-        print(f"\n--- Reinterpretation ---")
-        print(f"New response: {new_response}")
-        print("----------------------")
-        self.log_action(f"Rewind {steps} steps", new_response, 0.6, True, {"event": "rewind", "steps": steps})
-        return False
-
-    def cmd_mimic(self, args: List[str]) -> bool:
-        if len(args) < 2:
-            raise ValueError("Error: Usage: mimic <style> <prompt>")
-        style, prompt = args[0], ' '.join(args[1:])
-        print(f"Mimicking style '{style}' for: '{prompt}'")
-
-        original_weight = getattr(self.system, 'scaffold_weight', None)
-        if original_weight is not None:
-            self.system.scaffold_weight = 0.8
-            print(f"[Scaffold weight set to {self.system.scaffold_weight:.2f}]")
-
-        mimic_prompt = f"Respond in the style of {style}: '{prompt}'"
-        response = self.generate_response(mimic_prompt, max_tokens=100)
-        print(f"\nMimicked Response ({style}):")
-        print(response)
-        print("-" * 20)
-
-        if original_weight is not None:
-            self.system.scaffold_weight = original_weight
-            print(f"[Scaffold weight reset to {self.system.scaffold_weight:.2f}]")
-        self.log_action(f"Mimic {style}: {prompt}", response, 0.7, False, {"event": "mimic", "style": style})
-        return False
-
-    def cmd_panic(self, args: List[str]) -> bool:
-        print("\n!!! PANIC TRIGGERED !!!")
-        panic_save_path = f"panic_save_{int(time.time())}.json"
-        if hasattr(self.system, 'save_state'):
-            try:
-                self.system.save_state(panic_save_path)
-                print(f"Emergency state saved to '{panic_save_path}'.")
-            except Exception as e:
-                print(f"Error saving panic state: {e}")
-
-        print("Performing system cleanup...")
-        if hasattr(self.system, 'cleanup'):
-            self.system.cleanup()
-        if hasattr(self.system, '_reset_sleep_state'):
-            self.system._reset_sleep_state()
-            print("Sleep state reset.")
-
-        try:
-            config_manager = getattr(self.system, 'config_manager', ConfigManager("sovl_config.json"))
-            self.system.__init__(config_manager=config_manager)
-            if hasattr(self.system, 'wake_up'):
-                self.system.wake_up()
-            print("[System reloaded after panic]")
-        except Exception as e:
-            print(f"Critical error during panic re-initialization: {e}")
-        self.log_action("Panic triggered", "System reset.", 0.95, True, {"event": "panic", "save_path": panic_save_path})
         return False
 
     def cmd_recap(self, args: List[str]) -> bool:
@@ -691,19 +1027,6 @@ class CommandHandler:
                     print(f"  {cmd:<20} : {doc.split('.')[0]}")
         return False
 
-    @contextlib.contextmanager
-    def temporary_system_state(self, **kwargs):
-        original_values = {}
-        try:
-            for key, value in kwargs.items():
-                if hasattr(self.system, key):
-                    original_values[key] = getattr(self.system, key)
-                    setattr(self.system, key, value)
-            yield
-        finally:
-            for key, value in original_values.items():
-                setattr(self.system, key, value)
-
     @staticmethod
     def _parse_config_value(value_str: str):
         try:
@@ -723,17 +1046,159 @@ class CommandHandler:
         except Exception as e:
             raise ValueError(f"Failed to parse config value '{value_str}': {str(e)}")
 
+    def _print_config(self, config: dict):
+        for key, value in config.items():
+            print(f"{key}: {value}")
+
+    def cmd_mimic(self, args: List[str]) -> bool:
+        """Generate a response mimicking the style of the input text."""
+        if not args:
+            print("Error: Please provide text to mimic")
+            return False
+        
+        try:
+            # Store original scaffold weight
+            original_weight = None
+            if hasattr(self.system, 'scaffold_manager'):
+                original_weight = self.system.scaffold_manager.get_scaffold_weight()
+                # Update scaffold weight for mimic mode
+                self.system.scaffold_manager.update_scaffold_weight(0.8)
+                self.system.logger.record_event(
+                    event_type="scaffold_weight_updated",
+                    message="Scaffold weight updated for mimic mode",
+                    level="info",
+                    additional_info={
+                        "old_weight": original_weight,
+                        "new_weight": 0.8,
+                        "timestamp": time.time()
+                    }
+                )
+            
+            # Generate response with mimic prompt
+            mimic_prompt = f"Generate text in the style of: {args[0]}"
+            response = self.generate_response(mimic_prompt, max_tokens=100)
+            
+            # Restore original scaffold weight
+            if hasattr(self.system, 'scaffold_manager') and original_weight is not None:
+                self.system.scaffold_manager.update_scaffold_weight(original_weight)
+                self.system.logger.record_event(
+                    event_type="scaffold_weight_restored",
+                    message="Scaffold weight restored after mimic mode",
+                    level="info",
+                    additional_info={
+                        "old_weight": 0.8,
+                        "new_weight": original_weight,
+                        "timestamp": time.time()
+                    }
+                )
+            
+            print(f"\nMimicked Response:\n{response}\n")
+            return True
+        
+        except Exception as e:
+            # Ensure scaffold weight is restored even if generation fails
+            if hasattr(self.system, 'scaffold_manager') and original_weight is not None:
+                try:
+                    self.system.scaffold_manager.update_scaffold_weight(original_weight)
+                    self.system.logger.record_event(
+                        event_type="scaffold_weight_restored_error",
+                        message="Scaffold weight restored after error",
+                        level="warning",
+                        additional_info={
+                            "error": str(e),
+                            "original_weight": original_weight,
+                            "timestamp": time.time()
+                        }
+                    )
+                except Exception as restore_error:
+                    self.system.logger.record_event(
+                        event_type="scaffold_weight_restore_failed",
+                        message="Failed to restore scaffold weight",
+                        level="error",
+                        additional_info={
+                            "original_error": str(e),
+                            "restore_error": str(restore_error),
+                            "timestamp": time.time()
+                        }
+                    )
+            
+            # Handle the original error
+            self.system.error_manager.handle_generation_error(e, mimic_prompt)
+            self.system.logger.record_event(
+                event_type="mimic_generation_error",
+                message="Error during mimic generation",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "prompt": mimic_prompt,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            print(f"Error during mimic generation: {str(e)}")
+            return False
+
+class SystemInitializationError(Exception):
+    def __init__(self, message: str, config_path: str, stack_trace: str):
+        super().__init__(message)
+        self.config_path = config_path
+        self.stack_trace = stack_trace
+
 def run_cli(config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
     try:
-        config_manager = config_manager_instance or ConfigManager("sovl_config.json")
-        sovl_system = SOVLSystem(config_manager)
+        # Initialize config manager with proper error handling
+        try:
+            config_manager = config_manager_instance or ConfigManager("sovl_config.json")
+        except Exception as e:
+            print(f"Failed to initialize configuration manager: {str(e)}")
+            raise SystemInitializationError(
+                message="Configuration manager initialization failed",
+                config_path="sovl_config.json",
+                stack_trace=traceback.format_exc()
+            )
+
+        # Initialize SOVL system with proper error handling
+        try:
+            sovl_system = SOVLSystem(config_manager)
+            if not hasattr(sovl_system, 'state_tracker') or not hasattr(sovl_system, 'logger'):
+                raise SystemInitializationError(
+                    message="SOVL system initialization incomplete - missing required components",
+                    config_path=config_manager.config_path,
+                    stack_trace=""
+                )
+        except Exception as e:
+            print(f"Failed to initialize SOVL system: {str(e)}")
+            raise SystemInitializationError(
+                message="SOVL system initialization failed",
+                config_path=config_manager.config_path,
+                stack_trace=traceback.format_exc()
+            )
+
+        # Initialize command history and handler
         sovl_system.cmd_history = CommandHistory()
         handler = CommandHandler(sovl_system)
 
+        # Wake up system with proper validation
         if hasattr(sovl_system, 'wake_up'):
-            sovl_system.wake_up()
-        print("\nSystem Ready.")
+            try:
+                sovl_system.wake_up()
+                print("\nSystem Ready.")
+            except Exception as e:
+                print(f"Failed to wake up system: {str(e)}")
+                raise SystemInitializationError(
+                    message="System wake up failed",
+                    config_path=config_manager.config_path,
+                    stack_trace=traceback.format_exc()
+                )
+        else:
+            raise SystemInitializationError(
+                message="SOVL system missing wake_up method",
+                config_path=config_manager.config_path,
+                stack_trace=""
+            )
+
+        # Display help and start command loop
         handler.cmd_help([])
 
         while True:
@@ -771,6 +1236,11 @@ def run_cli(config_manager_instance: Optional[ConfigManager] = None):
                     "timestamp": time.time(),
                     "stack_trace": traceback.format_exc()
                 })
+    except SystemInitializationError as e:
+        print(f"System initialization failed: {e.message}")
+        if e.stack_trace:
+            print(f"Stack trace:\n{e.stack_trace}")
+        return
     except Exception as e:
         print(f"CLI initialization failed: {e}")
     finally:

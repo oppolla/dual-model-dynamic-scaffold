@@ -1157,6 +1157,89 @@ class ConfigManager:
             )
             raise ValueError(f"Configuration validation failed: {str(e)}")
 
+    def validate_value(self, key: str, value: Any) -> bool:
+        """
+        Validate a configuration value against its schema.
+        
+        Args:
+            key: Dot-separated configuration key
+            value: Value to validate
+            
+        Returns:
+            bool: True if value is valid, False otherwise
+        """
+        try:
+            with self.lock:
+                # Check if key exists in schema
+                schema = next((s for s in self.DEFAULT_SCHEMA if s.field == key), None)
+                if not schema:
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Unknown configuration key: {key}",
+                        level="error",
+                        additional_info={"key": key}
+                    )
+                    return False
+
+                # Validate value type
+                if not isinstance(value, schema.type):
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Invalid type for {key}: expected {schema.type.__name__}, got {type(value).__name__}",
+                        level="error",
+                        additional_info={
+                            "key": key,
+                            "expected_type": schema.type.__name__,
+                            "actual_type": type(value).__name__
+                        }
+                    )
+                    return False
+
+                # Validate value range if specified
+                if schema.range and isinstance(value, (int, float)):
+                    min_val, max_val = schema.range
+                    if not (min_val <= value <= max_val):
+                        self.logger.record_event(
+                            event_type="config_error",
+                            message=f"Value for {key} outside valid range [{min_val}, {max_val}]: {value}",
+                            level="error",
+                            additional_info={
+                                "key": key,
+                                "value": value,
+                                "min_val": min_val,
+                                "max_val": max_val
+                            }
+                        )
+                        return False
+
+                # Validate with custom validator if specified
+                if schema.validator and not schema.validator(value):
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Value for {key} failed custom validation: {value}",
+                        level="error",
+                        additional_info={
+                            "key": key,
+                            "value": value
+                        }
+                    )
+                    return False
+
+                return True
+
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_error",
+                message=f"Failed to validate value for {key}",
+                level="error",
+                additional_info={
+                    "key": key,
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            return False
+
 if __name__ == "__main__":
     from sovl_logger import LoggerConfig
     logger = Logger(LoggerConfig())

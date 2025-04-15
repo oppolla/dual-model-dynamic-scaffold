@@ -159,44 +159,94 @@ class SystemContext:
             config_path: Path to configuration file
             device: Device to use for tensor operations
         """
+        self.config_path = config_path
         self.device = device
-        self.config_manager = ConfigManager(config_path, Logger())
-        self.logger = self.config_manager.logger
-        self.processor = SOVLProcessor(self.config_manager, self.logger, self.device)
         self.config_handler = ConfigHandler(self)
+        self.logger = Logger()
+        self.config_manager = ConfigManager(config_path, self.logger)
         
         # Subscribe to configuration changes
         self.config_manager.subscribe(self._on_config_change)
         
-        self.logger.record_event(
-            event_type="system_init",
-            message="System context initialized",
-            level="info",
-            additional_info={
-                "device": device,
-                "config_path": config_path,
-                "logging_setup": True
-            }
-        )
+        # Initialize state
+        self._initialize_state()
 
     def _on_config_change(self) -> None:
-        """Handle configuration changes by refreshing ConfigHandler."""
+        """Handle configuration changes and propagate them to affected components."""
         try:
+            # Refresh all configurations
             self.config_handler._refresh_configs()
-            self.logger.record_event(
-                event_type="config_sync",
-                message="Configuration synchronized",
-                level="info"
-            )
+            
+            # Validate configurations
+            warnings = self.config_handler._validate_all_configs()
+            if warnings:
+                self.logger.record({
+                    "event": "config_validation_warnings",
+                    "warnings": warnings,
+                    "timestamp": time.time()
+                })
+            
+            # Notify components that need to react to config changes
+            if hasattr(self, 'temperament_adjuster'):
+                self.temperament_adjuster._on_config_change()
+            
+            if hasattr(self, 'curiosity_engine'):
+                self.curiosity_engine._validate_configuration()
+            
+            if hasattr(self, 'model_loader'):
+                self.model_loader._validate_cross_attention_weights()
+            
         except Exception as e:
-            self.logger.record_event(
-                event_type="config_sync_error",
-                message="Failed to synchronize configuration",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
+            error_msg = f"Configuration sync failed: {str(e)}"
+            self.logger.record({
+                "event": "config_sync_error",
+                "error": error_msg,
+                "stack_trace": traceback.format_exc(),
+                "timestamp": time.time()
+            })
+            raise RuntimeError(error_msg)  # Propagate to CLI
+
+    def _initialize_state(self) -> None:
+        """Initialize system state components."""
+        try:
+            # Initialize state tracker
+            self.state_tracker = StateTracker(self, self.config_handler)
+            
+            # Initialize error manager
+            self.error_manager = ErrorManager(self, self.state_tracker)
+            
+            # Initialize temperament adjuster
+            self.temperament_adjuster = TemperamentAdjuster(self, self.state_tracker)
+            
+            # Initialize model loader
+            self.model_loader = ModelLoader(self, self.config_handler)
+            
+            # Initialize curiosity engine
+            self.curiosity_engine = CuriosityEngine(
+                self,
+                self.model_loader,
+                self.state_tracker,
+                self.error_manager
+            )
+            
+            # Log successful initialization
+            self.logger.record({
+                "event": "system_initialized",
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            error_msg = f"System initialization failed: {str(e)}"
+            self.logger.record({
+                "event": "system_init_error",
+                "error": error_msg,
+                "stack_trace": traceback.format_exc(),
+                "timestamp": time.time()
+            })
+            raise SystemInitializationError(
+                message=error_msg,
+                config_path=self.config_path,
+                stack_trace=traceback.format_exc()
             )
 
 class SystemInitializationError(Exception):
@@ -347,45 +397,8 @@ class ModelLoader:
         self.token_map = None
         self._cross_attention_injector = None
         
-    def _validate_cross_attention_weights(self, layers: List[int], weights: List[float]) -> None:
+    def _validate_cross_attention_weights(self) -> None:
         """Validate cross-attention layer weights before injection."""
-        if not weights:
-            return
-            
-        if len(weights) != len(layers):
-            self.context.logger.record_event(
-                event_type="cross_attention_error",
-                message="Layer weights length mismatch",
-                level="error",
-                additional_info={
-                    "expected_layers": len(layers),
-                    "provided_weights": len(weights),
-                    "layers": layers,
-                    "weights": weights
-                }
-            )
-            raise ValueError(
-                f"Invalid layer weights length: expected {len(layers)} weights for {len(layers)} layers, "
-                f"got {len(weights)} weights"
-            )
-            
-        # Validate weight values
-        for i, weight in enumerate(weights):
-            if not (0.0 <= weight <= 1.0):
-                self.context.logger.record_event(
-                    event_type="cross_attention_error",
-                    message="Invalid layer weight value",
-                    level="error",
-                    additional_info={
-                        "layer_index": i,
-                        "weight": weight,
-                        "valid_range": (0.0, 1.0)
-                    }
-                )
-                raise ValueError(f"Layer weight {weight} at index {i} must be between 0.0 and 1.0")
-                
-    def inject_cross_attention(self) -> None:
-        """Inject cross-attention layers with validation."""
         try:
             # Get current cross-attention configuration
             cross_attn_config = self.context.config_manager.get_section("cross_attn_config")
@@ -1357,3 +1370,156 @@ class CuriosityEngine:
             level="info",
             additional_info=data
         )
+
+class SOVLSystem:
+    """Main SOVL system class that manages all components and state."""
+    
+    def __init__(self, config_path: str, device: str = "cuda"):
+        """
+        Initialize the SOVL system.
+        
+        Args:
+            config_path: Path to the configuration file
+            device: Device to use for tensor operations
+        """
+        self.context = SystemContext(config_path, device)
+        self.config_handler = ConfigHandler(self.context)
+        self.model_loader = ModelLoader(self.context, self.config_handler)
+        self.state_tracker = StateTracker(self.context, self.config_handler)
+        self.error_manager = ErrorManager(self.context, self.state_tracker)
+        self.temperament_adjuster = TemperamentAdjuster(self.context, self.state_tracker)
+        self.curiosity_engine = CuriosityEngine(
+            self.context,
+            self.model_loader,
+            self.state_tracker,
+            self.error_manager
+        )
+        self.memory_monitor = MemoryMonitor(self.context)
+        self.logger = self.context.logger
+
+    def generate_curiosity_question(self) -> Optional[str]:
+        """Generate a curiosity-driven question."""
+        try:
+            if not hasattr(self.curiosity_engine, 'curiosity_manager'):
+                self.logger.record_event(
+                    event_type="curiosity_error",
+                    message="Curiosity manager not initialized",
+                    level="error"
+                )
+                return None
+                
+            question = self.curiosity_engine.curiosity_manager.generate_question()
+            self.logger.record_event(
+                event_type="curiosity_question_generated",
+                message="Generated curiosity question",
+                level="info",
+                additional_info={"question": question}
+            )
+            return question
+            
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, "question_generation")
+            self.logger.record_event(
+                event_type="curiosity_question_error",
+                message="Failed to generate curiosity question",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            return None
+
+    def toggle_memory(self, enable: bool) -> bool:
+        """Enable or disable memory management."""
+        try:
+            if not hasattr(self.memory_monitor, 'memory_manager'):
+                self.logger.record_event(
+                    event_type="memory_error",
+                    message="Memory manager not initialized",
+                    level="error"
+                )
+                return False
+                
+            self.memory_monitor.memory_manager.set_enabled(enable)
+            self.logger.record_event(
+                event_type="memory_toggle",
+                message=f"Memory management {'enabled' if enable else 'disabled'}",
+                level="info",
+                additional_info={"enabled": enable}
+            )
+            return True
+            
+        except Exception as e:
+            self.error_manager.handle_memory_error(e, 0)  # 0 for memory size since this is a toggle operation
+            self.logger.record_event(
+                event_type="memory_toggle_error",
+                message="Failed to toggle memory management",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "enabled": enable,
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            return False
+
+    def dream(self) -> bool:
+        """Run a dream cycle to process and consolidate memories."""
+        try:
+            if not hasattr(self.curiosity_engine, 'run_dream_cycle'):
+                self.logger.record_event(
+                    event_type="dream_error",
+                    message="Dream cycle not supported",
+                    level="error"
+                )
+                return False
+                
+            self.curiosity_engine.run_dream_cycle()
+            self.logger.record_event(
+                event_type="dream_cycle_complete",
+                message="Dream cycle completed successfully",
+                level="info"
+            )
+            return True
+            
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, "dream_cycle")
+            self.logger.record_event(
+                event_type="dream_cycle_error",
+                message="Failed to run dream cycle",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            return False
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get current memory statistics."""
+        try:
+            if not hasattr(self.memory_monitor, 'memory_manager'):
+                return {"error": "Memory manager not initialized"}
+                
+            stats = self.memory_monitor.memory_manager.get_stats()
+            self.logger.record_event(
+                event_type="memory_stats_retrieved",
+                message="Retrieved memory statistics",
+                level="info",
+                additional_info=stats
+            )
+            return stats
+            
+        except Exception as e:
+            self.error_manager.handle_memory_error(e, 0)
+            self.logger.record_event(
+                event_type="memory_stats_error",
+                message="Failed to get memory statistics",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            return {"error": str(e)}
