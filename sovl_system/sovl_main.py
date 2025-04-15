@@ -19,7 +19,7 @@ from sovl_io import load_training_data, validate_quantization_mode, Insufficient
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer
 from sovl_config import ConfigManager
-from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer
+from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
 from sovl_processor import LogitsProcessor
 from sovl_utils import (
     calculate_confidence,
@@ -154,30 +154,81 @@ class ModelLoader:
         self.base_tokenizer = self.model_manager.get_base_tokenizer()
         self.scaffold_tokenizer = self.model_manager.get_scaffold_tokenizer()
         self.scaffold_unk_id = self.model_manager.get_scaffold_unk_id()
-        self.scaffold_manager = ScaffoldManager(context.config_manager, context.logger)
-        self.scaffold_token_mapper = None
+        
+        # Initialize ScaffoldManager with tokenizers
+        self.scaffold_manager = ScaffoldManager(
+            config_manager=context.config_manager,
+            logger=context.logger,
+            base_tokenizer=self.base_tokenizer,
+            scaffold_tokenizer=self.scaffold_tokenizer
+        )
+        
+        # Initialize ScaffoldTokenMapper with logger
+        self.scaffold_token_mapper = ScaffoldTokenMapper(
+            base_tokenizer=self.base_tokenizer,
+            scaffold_tokenizer=self.scaffold_tokenizer,
+            logger=context.logger
+        )
+        
+        # Log successful initialization
+        self.context.logger.record({
+            "event": "model_loader_initialized",
+            "base_vocab_size": len(self.base_tokenizer),
+            "scaffold_vocab_size": len(self.scaffold_tokenizer),
+            "token_map_size": len(self.scaffold_token_mapper.token_map),
+            "timestamp": time.time()
+        })
 
     def inject_cross_attention(self):
+        """Inject cross-attention layers into the base model."""
         try:
+            # Validate scaffold token mapper
+            if not self.scaffold_token_mapper:
+                raise ValueError("ScaffoldTokenMapper not initialized")
+                
+            # Get token map for injection
+            token_map = self.scaffold_token_mapper.get_token_map()
+            if not token_map:
+                self.context.logger.log_error(
+                    error_msg="Empty token map from ScaffoldTokenMapper",
+                    error_type="validation_error",
+                    additional_info={
+                        "base_vocab_size": len(self.base_tokenizer),
+                        "scaffold_vocab_size": len(self.scaffold_tokenizer)
+                    }
+                )
+                raise ValueError("Empty token map from ScaffoldTokenMapper")
+            
+            # Create and configure injector
             injector = CrossAttentionInjector(
                 config_manager=self.context.config_manager,
                 logger=self.context.logger
             )
+            
+            # Perform injection
             injector.inject_cross_attention(
                 model=self.base_model,
                 scaffold_model=self.scaffolds[0],
                 core_config=self.config_handler.core_config,
                 cross_attn_config=self.config_handler.cross_attn_config,
                 lora_config=self.config_handler.lora_config,
-                token_map=self.scaffold_token_mapper,
+                token_map=token_map,  # Pass the actual token map
                 device=self.context.device
             )
-        except Exception as e:
+            
+            # Log successful injection
             self.context.logger.record({
-                "error": f"Cross-attention injection failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": "init"
+                "event": "cross_attention_injected",
+                "token_map_size": len(token_map),
+                "timestamp": time.time()
             })
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Cross-attention injection failed: {str(e)}",
+                error_type="injection_error",
+                stack_trace=traceback.format_exc()
+            )
             raise
 
 class StateTracker:
@@ -724,583 +775,3 @@ class TrainingManager:
             "conversation_id": self.state_tracker.state.conversation_id,
             "state_hash": self.state_tracker.state.get_state_hash()
         })
-
-class ResponseGenerator:
-    """Generates responses using models and scaffolds."""
-    def __init__(self, context: SystemContext, model_loader: ModelLoader, 
-                 state_tracker: StateTracker, error_manager: ErrorManager):
-        self.context = context
-        self.model_loader = model_loader
-        self.state_tracker = state_tracker
-        self.error_manager = error_manager
-        self.generation_manager = GenerationManager(
-            config_manager=context.config_manager,
-            base_model=model_loader.base_model,
-            scaffolds=model_loader.scaffolds,
-            base_tokenizer=model_loader.base_tokenizer,
-            scaffold_tokenizer=model_loader.scaffold_tokenizer,
-            state=state_tracker.state,
-            logger=context.logger,
-            error_logger=context.logger,
-            cross_attention_injector=CrossAttentionInjector(context.config_manager, context.logger),
-            scaffold_manager=model_loader.scaffold_manager,
-            temperament=None,  # Set after TemperamentAdjuster
-            curiosity_manager=None  # Set after CuriosityEngine
-        )
-
-    @torch.no_grad()
-    def generate(self, prompt: str, max_new_tokens: int = 50, 
-                 scaffold_weight: Optional[float] = None, **kwargs) -> str:
-        try:
-            response = self.generation_manager.generate(
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-                scaffold_weight=scaffold_weight,
-                **kwargs
-            )
-            self.state_tracker.update_conversation(prompt, response)
-            self.context.logger.record({
-                "event": "generation_complete",
-                "prompt": prompt,
-                "response_length": len(response),
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id
-            })
-            return response
-        except Exception as e:
-            return self.error_manager.handle_generation_error(e, prompt)
-
-    def has_repetition(self, output_ids: List[int], n: int = 3) -> bool:
-        return self.generation_manager.has_repetition(output_ids, n)
-
-    def tokenize_and_map(self, prompts: List[str], max_length: Optional[int] = None) -> Dict:
-        try:
-            return self.generation_manager.tokenize_and_map(prompts, max_length)
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Tokenization failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id
-            })
-            raise
-
-    def update_token_map_memory(self, prompt: str, confidence: float):
-        try:
-            self.generation_manager._update_token_map_memory(prompt, confidence)
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Token map memory update failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id
-            })
-            raise
-
-    def clear_scaffold_cache(self):
-        try:
-            self.generation_manager._clear_scaffold_cache()
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Scaffold cache clear failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id
-            })
-            raise
-
-class ComponentManager:
-    """Manages initialization and lifecycle of SOVL system components."""
-    def __init__(self, context: SystemContext, state_tracker: StateTracker, error_manager: ErrorManager):
-        self.context = context
-        self.state_tracker = state_tracker
-        self.error_manager = error_manager
-        self._initialized = False
-        self._components = {}
-
-    def initialize(self) -> None:
-        """Initialize all system components in the correct order."""
-        if self._initialized:
-            return
-
-        try:
-            # Initialize core components first
-            self._initialize_core_components()
-            
-            # Initialize specialized components
-            self._initialize_specialized_components()
-            
-            # Initialize plugin manager last
-            self._initialize_plugin_manager()
-            
-            self._initialized = True
-            
-            self.context.logger.record_event(
-                event_type="components_initialized",
-                message="All system components initialized successfully",
-                level="info"
-            )
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Component initialization failed: {str(e)}",
-                error_type="initialization_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
-
-    def _initialize_core_components(self) -> None:
-        """Initialize core system components."""
-        # Initialize temperament system
-        self._components['temperament_system'] = TemperamentSystem.create_from_config(
-            self.context.config_manager,
-            self.context.logger,
-            self.context.device
-        )
-        
-        # Initialize generation manager
-        self._components['generation_manager'] = GenerationManager(
-            config_manager=self.context.config_manager,
-            logger=self.context.logger,
-            state=self.state_tracker.state
-        )
-
-    def _initialize_specialized_components(self) -> None:
-        """Initialize specialized system components."""
-        # Initialize training manager
-        self._components['training_manager'] = TrainingManager(
-            context=self.context,
-            config_handler=self.context.config_handler,
-            model_loader=self.context.model_loader,
-            state_tracker=self.state_tracker,
-            error_manager=self.error_manager
-        )
-        
-        # Initialize curiosity engine
-        self._components['curiosity_engine'] = CuriosityEngine(
-            context=self.context,
-            model_loader=self.context.model_loader,
-            state_tracker=self.state_tracker,
-            error_manager=self.error_manager
-        )
-
-    def _initialize_plugin_manager(self) -> None:
-        """Initialize plugin manager."""
-        self._components['plugin_manager'] = PluginManager(
-            config_manager=self.context.config_manager,
-            logger=self.context.logger,
-            state=self.state_tracker.state
-        )
-
-    def get_component(self, name: str) -> Any:
-        """Get a component by name."""
-        if not self._initialized:
-            raise RuntimeError("Components not initialized")
-        if name not in self._components:
-            raise KeyError(f"Component {name} not found")
-        return self._components[name]
-
-class SOVLSystem:
-    """Main system class for SOVL."""
-    def __init__(self, config_path: str):
-        """Initialize the SOVL system with configuration and core components."""
-        self.config_path = config_path
-        self.context = SystemContext(config_path)
-        self.state_tracker = StateTracker(self.context)
-        self.error_manager = ErrorManager(self.context, self.state_tracker)
-        
-        # Initialize training data with error handling
-        try:
-            self.train_data, self.valid_data = load_training_data(
-                self.context.config_manager,
-                self.context.logger
-            )
-            
-            # Log successful data initialization
-            self.context.logger.record_event(
-                event_type="data_initialization",
-                message=f"Loaded {len(self.train_data)} training and {len(self.valid_data)} validation samples",
-                level="info",
-                additional_info={
-                    "train_samples": len(self.train_data),
-                    "valid_samples": len(self.valid_data),
-                    "config_path": config_path
-                }
-            )
-            
-        except InsufficientDataError as e:
-            # Log error and raise with clear message
-            self.context.logger.log_error(
-                error_msg=str(e),
-                error_type="insufficient_data_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_path": config_path,
-                    "min_entries": self.context.config_manager.get("core_config.min_training_entries", 10)
-                }
-            )
-            raise RuntimeError("Cannot initialize system without sufficient training data") from e
-            
-        except Exception as e:
-            # Log error and raise with clear message
-            self.context.logger.log_error(
-                error_msg=f"Failed to load training data: {str(e)}",
-                error_type="data_initialization_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_path": config_path
-                }
-            )
-            raise RuntimeError("Failed to initialize system due to data loading error") from e
-        
-        # Initialize component manager
-        self.component_manager = ComponentManager(
-            context=self.context,
-            state_tracker=self.state_tracker,
-            error_manager=self.error_manager
-        )
-        
-        # Initialize all components
-        self.component_manager.initialize()
-        
-        # Set system reference in plugin manager
-        self.plugin_manager = self.component_manager.get_component('plugin_manager')
-        self.plugin_manager.set_system(self)
-        
-        self.context.logger.record_event(
-            event_type="system_initialization",
-            message="SOVL system initialized",
-            level="info",
-            additional_info={
-                "config_path": config_path,
-                "device": str(self.context.device),
-                "training_data_loaded": bool(self.train_data),
-                "validation_data_loaded": bool(self.valid_data)
-            }
-        )
-
-    @property
-    def generation_manager(self) -> GenerationManager:
-        """Get generation manager instance."""
-        return self.component_manager.get_component('generation_manager')
-
-    @property
-    def training_manager(self) -> TrainingManager:
-        """Get training manager instance."""
-        return self.component_manager.get_component('training_manager')
-
-    @property
-    def curiosity_engine(self) -> CuriosityEngine:
-        """Get curiosity engine instance."""
-        return self.component_manager.get_component('curiosity_engine')
-
-    @property
-    def temperament_system(self) -> TemperamentSystem:
-        """Get temperament system instance."""
-        return self.component_manager.get_component('temperament_system')
-
-    def _update_temperament(self) -> None:
-        try:
-            self.temperament_system.update_from_state(
-                self.state_tracker.state,
-                self.curiosity_engine.curiosity_manager if self.curiosity_engine else None
-            )
-            self.context.logger.record_event(
-                event_type="temperament_update",
-                message="Temperament updated successfully",
-                level="info",
-                additional_info={
-                    "temperament_score": self.state_tracker.state.temperament_score,
-                    "mood_label": self.state_tracker.state.mood_label
-                }
-            )
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to update temperament: {str(e)}",
-                error_type="temperament_error",
-                stack_trace=traceback.format_exc(),
-                conversation_id=self.state_tracker.state.conversation_id,
-                state_hash=self.state_tracker.state.get_state_hash()
-            )
-
-    def generate_response(self, prompt: str) -> str:
-        try:
-            # Execute pre-generate hooks
-            self.plugin_manager.execute_hook("pre_generate", {"prompt": prompt})
-            
-            response = self.generation_manager.generate(prompt)
-            
-            # Execute post-generate hooks
-            self.plugin_manager.execute_hook("post_generate", {
-                "prompt": prompt,
-                "response": response
-            })
-            
-            self.context.logger.record_event(
-                event_type="response_generation",
-                message="Response generated successfully",
-                level="info",
-                additional_info={
-                    "prompt_length": len(prompt),
-                    "response_length": len(response)
-                }
-            )
-            return response
-        except Exception as e:
-            # Execute error hooks
-            self.plugin_manager.execute_hook("on_error", {
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "stack_trace": traceback.format_exc()
-            })
-            return self.error_manager.handle_generation_error(e, prompt)
-
-    def train_step(self, batch: List[dict], dry_run: bool = False, 
-                   dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
-        # Execute pre-training hooks
-        self.plugin_manager.execute_hook("on_training_step", {
-            "batch_size": len(batch),
-            "dry_run": dry_run
-        })
-        
-        result = self.training_manager.train_step(batch, dry_run, dry_run_params)
-        
-        # Execute post-training hooks
-        self.plugin_manager.execute_hook("on_training_step_complete", {
-            "batch_size": len(batch),
-            "result": result
-        })
-        
-        return result
-
-    def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
-                          epochs: Optional[int] = None, batch_size: Optional[int] = None):
-        """
-        Run a training cycle with the provided or default data.
-
-        Args:
-            train_data: Optional training data to use instead of default
-            valid_data: Optional validation data to use instead of default
-            epochs: Optional number of epochs to train for
-            batch_size: Optional batch size for training
-
-        Raises:
-            ValueError: If no training data is available
-        """
-        # Use provided data or fall back to initialized data
-        train_data = train_data or self.train_data
-        valid_data = valid_data or self.valid_data
-
-        # Validate data presence
-        if not train_data:
-            self.context.logger.log_error(
-                error_msg="No training data available for training cycle",
-                error_type="training_error",
-                conversation_id=self.state_tracker.state.conversation_id,
-                state_hash=self.state_tracker.state.get_state_hash(),
-                additional_info={
-                    "using_provided_data": train_data is not self.train_data,
-                    "valid_data_available": bool(valid_data)
-                }
-            )
-            raise ValueError("No training data available for training cycle")
-
-        # Log training cycle start
-        self.context.logger.record_event(
-            event_type="training_cycle_start",
-            message="Starting training cycle",
-            level="info",
-            additional_info={
-                "train_samples": len(train_data),
-                "valid_samples": len(valid_data),
-                "epochs": epochs,
-                "batch_size": batch_size
-            }
-        )
-
-        # Execute pre-training hooks
-        self.plugin_manager.execute_hook("on_training_step", {
-            "batch_size": len(train_data),
-            "dry_run": False
-        })
-        
-        try:
-            # Run the training cycle
-            self.training_manager.run_training_cycle(
-                train_data=train_data,
-                valid_data=valid_data,
-                epochs=epochs,
-                batch_size=batch_size
-            )
-            
-            # Execute post-training hooks
-            self.plugin_manager.execute_hook("on_training_step_complete", {
-                "batch_size": len(train_data),
-                "result": "success"
-            })
-            
-        except Exception as e:
-            # Log training error
-            self.context.logger.log_error(
-                error_msg=f"Training cycle failed: {str(e)}",
-                error_type="training_error",
-                stack_trace=traceback.format_exc(),
-                conversation_id=self.state_tracker.state.conversation_id,
-                state_hash=self.state_tracker.state.get_state_hash()
-            )
-            raise
-
-    def generate_curiosity_question(self, context: str = "", spontaneous: bool = False) -> Optional[str]:
-        return self.curiosity_engine.generate_question(context, spontaneous)
-
-    def update_metrics(self, question: str, score: float, spontaneous: bool = False, 
-                       answered: bool = False):
-        self.state_tracker.update_curiosity_metrics(question, score, spontaneous, answered)
-
-    def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
-        self.training_manager.handle_training_complete(epoch, avg_loss, data_exposure)
-
-    def handle_gestation_complete(self, batch_size: int, avg_loss: float):
-        self.training_manager.gestation_trainer.handle_gestation_complete(batch_size, avg_loss)
-
-    def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int):
-        self.training_manager.sleep_trainer.handle_dream_complete(dream_prompt, is_novel, memory_count)
-
-    def handle_sleep_train_complete(self, batch_size: int, data_exposure: float):
-        self.training_manager.sleep_trainer.handle_sleep_train_complete(batch_size, data_exposure)
-
-    def update_temperament(self):
-        self._update_temperament()
-
-    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
-        return self.memory_monitor.check_memory_health(model_size, trainer)
-
-    def set_scaffold_influence(self, weight: float, curve: str = 'linear'):
-        """Set scaffold influence weight with dynamic adjustment.
-        
-        Args:
-            weight: Base weight value between 0 and 1
-            curve: Weight adjustment curve type ('linear' or 'sigmoid_linear')
-        """
-        try:
-            # Validate weight range
-            weight = max(0.0, min(1.0, weight))
-            
-            # Update scaffold influence in all components
-            if hasattr(self, 'generation_manager'):
-                self.generation_manager.set_scaffold_influence(weight, curve)
-                
-            if hasattr(self, 'training_manager'):
-                self.training_manager.set_scaffold_influence(weight, curve)
-                
-            if hasattr(self, 'scaffold_manager'):
-                self.scaffold_manager.set_scaffold_influence(weight, curve)
-                
-            # Log the update
-            self.context.logger.record({
-                "event": "scaffold_influence_updated",
-                "weight": weight,
-                "curve": curve,
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "state_hash": self.state_tracker.state.get_state_hash()
-            })
-            
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Failed to set scaffold influence: {str(e)}",
-                "weight": weight,
-                "curve": curve,
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-    def get_scaffold_hidden_states(self, scaffold_inputs: Dict) -> torch.Tensor:
-        """Get hidden states from scaffold model with optional toggle.
-        
-        Args:
-            scaffold_inputs: Dictionary containing input tensors for scaffold model
-            
-        Returns:
-            torch.Tensor: Hidden states from scaffold model or zeros if disabled
-        """
-        try:
-            # Check if scaffold is enabled in config
-            if not self.config_manager.get("controls_config.enable_scaffold", True):
-                return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.context.device)
-            
-            # Use mixed precision if available
-            with torch.autocast(
-                device_type=self.context.device.type,
-                dtype=torch.float16 if self.context.device.type == 'cuda' else torch.bfloat16
-            ):
-                # Get scaffold outputs with hidden states
-                scaffold_outputs = self.scaffolds[0](
-                    **{k: v for k, v in scaffold_inputs.items() if k in ['input_ids', 'attention_mask']},
-                    output_hidden_states=True,
-                )
-                
-                # Extract last layer hidden states
-                hidden_states = (
-                    scaffold_outputs.hidden_states[-1]
-                    if hasattr(scaffold_outputs, 'hidden_states')
-                    else scaffold_outputs.base_model_output.hidden_states[-1]
-                )
-                
-                # Detach to prevent gradient flow
-                return hidden_states.detach()
-                
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Failed to get scaffold hidden states: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "stack_trace": traceback.format_exc()
-            })
-            # Fallback to zeros on error
-            return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.context.device)
-
-    def cleanup(self):
-        """Cleanup system resources."""
-        try:
-            # Execute cleanup hooks
-            self.plugin_manager.execute_hook("on_cleanup", {})
-            
-            # Save state
-            self.state_tracker.state.save_state()
-            
-            # Cleanup other components
-            self.generation_manager.cleanup()
-            self.training_manager.cleanup()
-            
-            self.context.logger.record_event(
-                event_type="system_cleanup",
-                message="System cleanup completed",
-                level="info"
-            )
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Cleanup failed: {str(e)}",
-                error_type="cleanup_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    def set_orchestrator(self, orchestrator: 'SOVLOrchestrator') -> None:
-        """Set the orchestrator reference."""
-        with self._lock:
-            self._orchestrator = orchestrator
-
-    def get_orchestrator(self) -> Optional['SOVLOrchestrator']:
-        """Get the orchestrator reference."""
-        with self._lock:
-            return self._orchestrator
-
-if __name__ == "__main__":
-    from sovl_conductor import SOVLOrchestrator
-    orchestrator = SOVLOrchestrator()
-    try:
-        orchestrator.run()
-    except Exception as e:
-        print(f"Error running SOVL system: {str(e)}")
-        raise
-    finally:
-        orchestrator.shutdown()
