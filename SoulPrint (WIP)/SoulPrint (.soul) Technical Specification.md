@@ -1,6 +1,6 @@
 # Ghost in the Protocol: Preserving AI Identity Across Rebirths
 
-**Soulprint (.soul) File Format Specification | version: 0.2 | date: 2025-04-15**
+*Soulprint (.soul) File Format Specification | version: 0.2 | date: 2025-04-15*
 
 **Abstract**
 
