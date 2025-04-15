@@ -2,9 +2,9 @@
 
 ## Module interaction clean progress with sovl_main
 
-- sovl_logger
-- sovl_state
-- sovl_scaffold
-- sovl_config
-- sovl_io
+- sovl_logger - DONE
+- sovl_state - DONE
+- sovl_scaffold - DONE
+- sovl_config - DONE
+- sovl_io - DONE
 - 
