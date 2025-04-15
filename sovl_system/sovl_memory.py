@@ -158,8 +158,9 @@ class MemoryManager:
         except Exception as e:
             self._log_error(
                 f"Failed to initialize memory config: {str(e)}",
-                context="config_initialization",
-                stack_trace=traceback.format_exc()
+                error_type="config_error",
+                stack_trace=traceback.format_exc(),
+                context="config_initialization"
             )
             raise
 
@@ -280,10 +281,10 @@ class MemoryManager:
                 # Log initialization
                 self._log_event(
                     "token_map_initialized",
-                    {
-                        "base_vocab_size": len(base_tokenizer.get_vocab()),
-                        "state_hash": self._state.state_hash()
-                    }
+                    message="Token map initialized with base and scaffold tokenizers",
+                    level="info",
+                    base_vocab_size=len(base_tokenizer.get_vocab()),
+                    state_hash=self._state.state_hash()
                 )
                 
             except Exception as e:
@@ -298,6 +299,54 @@ class MemoryManager:
                 )
                 raise
 
+    def sync_token_map(self) -> None:
+        """Synchronize token map from state to local memory."""
+        if self._state is None:
+            raise ValueError("State not set. Call set_state first.")
+        
+        with self._memory_lock:
+            try:
+                # Get current token map from state
+                with self._state.lock:
+                    token_map = self._state.get_token_map()
+                
+                # Validate token map structure
+                if not isinstance(token_map, dict):
+                    raise ValueError("Token map must be a dictionary")
+                    
+                for token_id, mapping in token_map.items():
+                    if not isinstance(mapping, dict):
+                        raise ValueError(f"Invalid mapping for token {token_id}")
+                    if 'ids' not in mapping or 'weight' not in mapping:
+                        raise ValueError(f"Missing required fields in mapping for token {token_id}")
+                    if not isinstance(mapping['ids'], list):
+                        raise ValueError(f"Invalid ids type for token {token_id}")
+                    if not isinstance(mapping['weight'], (int, float)):
+                        raise ValueError(f"Invalid weight type for token {token_id}")
+                
+                # Update local token map
+                self._token_map = defaultdict(lambda: None, token_map)
+                
+                # Log synchronization
+                self._log_event(
+                    "token_map_synced",
+                    message="Token map synchronized from state",
+                    level="info",
+                    token_map_size=len(token_map),
+                    state_hash=self._state.state_hash()
+                )
+                
+            except Exception as e:
+                self._log_error(
+                    error_msg=f"Failed to sync token map: {str(e)}",
+                    error_type="token_map_error",
+                    stack_trace=traceback.format_exc(),
+                    context={
+                        "state_hash": self._state.state_hash() if self._state else None
+                    }
+                )
+                raise
+
     def set_state(self, state: SOVLState) -> None:
         """Set the state object for memory synchronization."""
         with self._memory_lock:
@@ -306,13 +355,20 @@ class MemoryManager:
             self._conversation_history = state.conversation_history
             self._log_event(
                 "memory_state_set",
+                message="State set for memory synchronization",
+                level="info",
                 dream_memory_len=len(self._dream_memory)
             )
 
     def set_hidden_size(self, hidden_size: int) -> None:
         """Set the hidden size for validating dream memory tensors."""
         self._hidden_size = hidden_size
-        self._log_event("hidden_size_set", hidden_size=hidden_size)
+        self._log_event(
+            "hidden_size_set",
+            message="Hidden size set for dream memory validation",
+            level="info",
+            hidden_size=hidden_size
+        )
 
     def update_token_map_memory(self, prompt: str, confidence: float, tokenizer) -> None:
         """Update token map weights based on prompt and confidence."""
@@ -337,15 +393,15 @@ class MemoryManager:
                 
                 self._log_event(
                     "token_map_updated",
-                    {
-                        "prompt_length": len(prompt),
-                        "confidence": confidence,
-                        "state_hash": self._state.state_hash()
-                    }
+                    message="Token map weights updated based on prompt",
+                    level="info",
+                    prompt_length=len(prompt),
+                    confidence=confidence,
+                    state_hash=self._state.state_hash()
                 )
         except Exception as e:
             self._log_error(
-                f"Token map update failed: {str(e)}",
+                f"Failed to update token map: {str(e)}",
                 error_type="token_map_error",
                 stack_trace=traceback.format_exc(),
                 context={
@@ -361,11 +417,15 @@ class MemoryManager:
             return None
         mem_stats = memory_usage(self._device)
         if not mem_stats:
-            self._log_event("memory_stats_failed")
+            self._log_event(
+                "memory_stats_failed",
+                message="Failed to retrieve memory stats",
+                level="warning"
+            )
             return None
         return mem_stats
 
-    def check_memory_health(self, model_size: int, trainer: Optional[Trainer] = None):
+    def check_memory_health(self, model_size: int, trainer: Optional[Any] = None):
         """Autonomically reduce GPU memory usage if approaching capacity."""
         try:
             if torch.cuda.is_available():
@@ -497,11 +557,18 @@ class MemoryManager:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-                self._log_event("scaffold_cache_cleared", {
-                    "device": str(self._device)
-                })
+                self._log_event(
+                    "scaffold_cache_cleared",
+                    message="Scaffold cache cleared",
+                    level="info",
+                    device=str(self._device)
+                )
             except Exception as e:
-                self._log_error(f"Failed to clear scaffold cache: {str(e)}", stack_trace=True)
+                self._log_error(
+                    error_msg=f"Failed to clear scaffold cache: {str(e)}",
+                    error_type="cache_error",
+                    stack_trace=traceback.format_exc()
+                )
 
     def set_scaffold_context(self, scaffold_hidden_states: torch.Tensor) -> None:
         """Set temporary scaffold context for generation."""
@@ -511,6 +578,8 @@ class MemoryManager:
             self._temp_scaffold_context = scaffold_hidden_states.detach() if isinstance(scaffold_hidden_states, torch.Tensor) else scaffold_hidden_states
             self._log_event(
                 "scaffold_context_set",
+                message="Scaffold context set for generation",
+                level="info",
                 context_shape=list(scaffold_hidden_states.shape) if isinstance(scaffold_hidden_states, torch.Tensor) else None,
                 device=str(scaffold_hidden_states.device)
             )
@@ -526,7 +595,11 @@ class MemoryManager:
     def append_dream_memory(self, tensor: torch.Tensor, weight: float, metadata: Optional[Dict] = None) -> None:
         """Append a tensor to dream memory with associated weight and metadata."""
         if not self._hidden_size:
-            self._log_error("Hidden size not set for dream memory")
+            self._log_error(
+                error_msg="Hidden size not set for dream memory",
+                error_type="config_error",
+                stack_trace=None
+            )
             return
 
         try:
@@ -545,14 +618,21 @@ class MemoryManager:
                 self._dream_memory.append(entry)
                 self._state.dream_memory = self._dream_memory
                 
-                self._log_event("dream_memory_appended", {
-                    "tensor_shape": list(tensor.shape),
-                    "weight": weight,
-                    "device": str(tensor.device),
-                    "dream_memory_len": len(self._dream_memory)
-                })
+                self._log_event(
+                    "dream_memory_appended",
+                    message="Tensor appended to dream memory",
+                    level="info",
+                    tensor_shape=list(tensor.shape),
+                    weight=weight,
+                    device=str(tensor.device),
+                    dream_memory_len=len(self._dream_memory)
+                )
         except Exception as e:
-            self._log_error(f"Failed to append dream memory: {str(e)}", stack_trace=True)
+            self._log_error(
+                error_msg=f"Failed to append dream memory: {str(e)}",
+                error_type="dream_memory_error",
+                stack_trace=traceback.format_exc()
+            )
 
     def prune_dream_memory(self) -> None:
         """Prune dream memory based on weight threshold and decay."""
@@ -573,11 +653,17 @@ class MemoryManager:
 
                 self._log_event(
                     "dream_memory_pruned",
+                    message="Dream memory pruned based on weight threshold",
+                    level="info",
                     original_length=original_len,
                     new_length=len(self._dream_memory)
                 )
             except Exception as e:
-                self._log_error(f"Failed to prune dream memory: {str(e)}", stack_trace=True)
+                self._log_error(
+                    error_msg=f"Failed to prune dream memory: {str(e)}",
+                    error_type="dream_memory_error",
+                    stack_trace=traceback.format_exc()
+                )
 
     def get_dream_memory_tensors(self) -> Optional[torch.Tensor]:
         """Aggregate dream memory tensors for generation, weighted by importance."""
@@ -602,15 +688,22 @@ class MemoryManager:
                     
                 aggregated = torch.sum(dream_tensors * dream_weights.unsqueeze(-1), dim=0) / weight_sum
                 
-                self._log_event("dream_memory_aggregated", {
-                    "tensor_count": len(dream_tensors),
-                    "device": str(aggregated.device),
-                    "shapes": [list(t.shape) for t in tensors]
-                })
+                self._log_event(
+                    "dream_memory_aggregated",
+                    message="Dream memory tensors aggregated",
+                    level="info",
+                    tensor_count=len(dream_tensors),
+                    device=str(aggregated.device),
+                    shapes=[list(t.shape) for t in tensors]
+                )
                 
                 return aggregated
         except Exception as e:
-            self._log_error(f"Dream memory aggregation failed: {str(e)}", stack_trace=True)
+            self._log_error(
+                error_msg=f"Failed to aggregate dream memory: {str(e)}",
+                error_type="dream_memory_error",
+                stack_trace=traceback.format_exc()
+            )
             return None
 
     def save_state(self, path_prefix: str) -> None:
@@ -633,12 +726,18 @@ class MemoryManager:
 
                 self._log_event(
                     "memory_state_saved",
+                    message="Memory state saved to disk",
+                    level="info",
                     path_prefix=path_prefix,
                     token_map_size=len(self._token_map),
                     dream_memory_len=len(self._dream_memory)
                 )
         except Exception as e:
-            self._log_error(f"Memory state save failed: {str(e)}", stack_trace=True)
+            self._log_error(
+                error_msg=f"Failed to save memory state: {str(e)}",
+                error_type="state_error",
+                stack_trace=traceback.format_exc()
+            )
             raise
 
     def load_state(self, path_prefix: str) -> None:
@@ -650,7 +749,12 @@ class MemoryManager:
                         loaded_map = json.load(f)
                     self._token_map = defaultdict(lambda: [{'ids': [self._scaffold_unk_id], 'weight': 1.0}],
                                                  {int(k): v for k, v in loaded_map.items()})
-                    self._log_event("token_map_loaded", size=len(self._token_map))
+                    self._log_event(
+                        "token_map_loaded",
+                        message="Token map loaded from disk",
+                        level="info",
+                        size=len(self._token_map)
+                    )
 
                 if os.path.exists(f"{path_prefix}_dream_memory.json"):
                     with open(f"{path_prefix}_dream_memory.json", "r") as f:
@@ -665,10 +769,19 @@ class MemoryManager:
                         }
                         self._dream_memory.append(entry)
                     self._state.dream_memory = self._dream_memory
-                    self._log_event("dream_memory_loaded", length=len(self._dream_memory))
+                    self._log_event(
+                        "dream_memory_loaded",
+                        message="Dream memory loaded from disk",
+                        level="info",
+                        length=len(self._dream_memory)
+                    )
 
         except Exception as e:
-            self._log_error(f"Memory state load failed: {str(e)}", stack_trace=True)
+            self._log_error(
+                error_msg=f"Failed to load memory state: {str(e)}",
+                error_type="state_error",
+                stack_trace=traceback.format_exc()
+            )
             raise
 
     def toggle_memory_modes(self, mode: str) -> None:
@@ -680,7 +793,11 @@ class MemoryManager:
             'no_mem': (False, False)
         }
         if mode not in modes:
-            self._log_error(f"Invalid memory mode: {mode}")
+            self._log_error(
+                error_msg=f"Invalid memory mode: {mode}",
+                error_type="config_error",
+                stack_trace=None
+            )
             raise ValueError(f"Invalid memory mode. Use: {', '.join(modes.keys())}")
 
         scaffold_mem, token_mem = modes[mode]
@@ -694,6 +811,8 @@ class MemoryManager:
         self._controls_config.update({"use_scaffold_memory": scaffold_mem, "use_token_map_memory": token_mem})
         self._log_event(
             "memory_modes_toggled",
+            message=f"Memory modes toggled to {mode}",
+            level="info",
             mode=mode,
             scaffold_memory=scaffold_mem,
             token_map_memory=token_mem
@@ -724,16 +843,16 @@ class MemoryManager:
                 # Log the conversation change
                 self._log_event(
                     "new_conversation",
-                    {
-                        "new_id": self._conversation_history.conversation_id,
-                        "old_id": old_id,
-                        "state_hash": self._state.state_hash()
-                    }
+                    message="New conversation started",
+                    level="info",
+                    new_id=self._conversation_history.conversation_id,
+                    old_id=old_id,
+                    state_hash=self._state.state_hash()
                 )
                 
         except Exception as e:
             self._log_error(
-                f"Failed to start new conversation: {str(e)}",
+                error_msg=f"Failed to start new conversation: {str(e)}",
                 error_type="conversation_error",
                 stack_trace=traceback.format_exc(),
                 context={
@@ -768,7 +887,11 @@ class MemoryManager:
                 total_memory = torch.cuda.get_device_properties(0).total_memory
                 stats["gpu_memory_percent"] = (stats["gpu_allocated"] * (1024 ** 3) / total_memory * 100) if total_memory > 0 else None
             except Exception as e:
-                self._log_event("memory_stats_calculation_failed", warning=str(e))
+                self._log_event(
+                    "memory_stats_calculation_failed",
+                    message=f"Memory stats calculation failed: {str(e)}",
+                    level="warning"
+                )
 
         try:
             import psutil
@@ -802,6 +925,8 @@ class MemoryManager:
                 self._last_cleanup = time.time()
                 self._log_event(
                     "memory_cleanup",
+                    message="Memory cleanup performed",
+                    level="info",
                     details={
                         "current_memory": current_mem,
                         "total_memory": total_mem,
@@ -849,9 +974,33 @@ class MemoryManager:
                 self._controls_config.update({k.split('.')[-1]: v for k, v in updates.items()})
                 self._log_event(
                     "memory_config_tuned",
+                    message="Memory configuration tuned",
+                    level="info",
                     old_config=old_config,
                     new_config=kwargs
                 )
             except Exception as e:
-                self._log_error(f"Memory config tuning failed: {str(e)}", stack_trace=True)
+                self._log_error(
+                    error_msg=f"Failed to tune memory config: {str(e)}",
+                    error_type="config_error",
+                    stack_trace=traceback.format_exc()
+                )
                 raise
+
+    def _validate_config(self, key: str, value: Any) -> float:
+        """Validate a configuration parameter."""
+        min_val, max_val = self._CONFIG_RANGES[key]
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Config {key} must be a number")
+        if not (min_val <= value <= max_val):
+            raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+        return float(value)
+
+    def _validate_maxlen(self, key: str, value: Any) -> int:
+        """Validate a maxlen configuration parameter."""
+        min_val, max_val = self._MAXLEN_RANGES[key]
+        if not isinstance(value, int):
+            raise ValueError(f"Config {key} must be an integer")
+        if not (min_val <= value <= max_val):
+            raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+        return value
