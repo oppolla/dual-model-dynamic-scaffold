@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Deque, Tuple
 from collections import deque
 import traceback
 
@@ -155,50 +155,169 @@ class CuriosityCallbacks:
 
 
 class CuriosityManager:
-    """Orchestrates curiosity computation, pressure management, and question generation."""
+    """Manages curiosity-driven exploration and learning."""
     
-    _DEFAULT_CONFIG = {
-        "weight_ignorance": 0.7,
-        "weight_novelty": 0.3,
-        "pressure_threshold": 0.7,
-        "pressure_drop": 0.3,
-        "novelty_threshold_spontaneous": 0.9,
-        "novelty_threshold_response": 0.8,
-        "silence_threshold": 20.0,
-        "question_cooldown": 60.0,
-        "queue_maxlen": 10,
-        "max_new_tokens": 8,
-        "base_temperature": 1.1,
-        "temperament_influence": 0.4,
-        "top_k": 30,
-        "default_hidden_size": 768,
-        "metrics_maxlen": 1000
-    }
-
     def __init__(
         self,
-        config: Optional[Dict[str, Any]] = None,
-        logger: Optional[Any] = None,
-        device: Optional[torch.device] = None
+        config: Dict[str, Any],
+        logger: Any,
+        device: torch.device = torch.device("cpu")
     ):
-        self.config = {**self._DEFAULT_CONFIG, **(config or {})}
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        """
+        Initialize curiosity manager.
+        
+        Args:
+            config: Configuration dictionary
+            logger: Logger instance
+            device: Device for tensor operations
+        """
+        self.config = config
         self.logger = logger
+        self.device = device
+        self.pressure: float = 0.0
+        self.last_update: float = time.time()
+        self.metrics: Deque[Dict[str, Any]] = deque(maxlen=config.get("metrics_maxlen", 1000))
+        self.unanswered_questions: Deque[Tuple[str, float]] = deque(maxlen=config.get("queue_maxlen", 10))
         self._initialize_components()
-
+        
     def _initialize_components(self) -> None:
         """Initialize curiosity components."""
         self.curiosity = Curiosity(
-            weight_ignorance=self.config["weight_ignorance"],
-            weight_novelty=self.config["weight_novelty"],
-            metrics_maxlen=self.config["metrics_maxlen"],
+            weight_ignorance=self.config.get("weight_ignorance", 0.7),
+            weight_novelty=self.config.get("weight_novelty", 0.3),
+            metrics_maxlen=self.config.get("metrics_maxlen", 1000),
             logger=self.logger
         )
-        self.pressure = CuriosityPressure()
         self.callbacks = CuriosityCallbacks(logger=self.logger)
         self.last_question_time: float = time.time()
-        self.unanswered_questions: deque = deque(maxlen=self.config["queue_maxlen"])
-        self.metrics: deque = deque(maxlen=self.config["metrics_maxlen"])
+        
+    def update_metrics(
+        self,
+        question: Optional[str] = None,
+        score: float = 0.5,
+        spontaneous: bool = False,
+        answered: bool = False,
+        conversation_id: Optional[str] = None,
+        state_hash: Optional[str] = None
+    ) -> None:
+        """
+        Update curiosity metrics.
+        
+        Args:
+            question: Optional question text
+            score: Curiosity score
+            spontaneous: Whether the question was spontaneous
+            answered: Whether the question was answered
+            conversation_id: Optional conversation ID
+            state_hash: Optional state hash
+        """
+        try:
+            metric = {
+                "question": question,
+                "score": score,
+                "spontaneous": spontaneous,
+                "answered": answered,
+                "timestamp": time.time(),
+                "conversation_id": conversation_id,
+                "state_hash": state_hash
+            }
+            self.metrics.append(metric)
+            self._log_metrics_update(metric)
+            self.callbacks.trigger_callback("metrics_updated", **metric)
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to update metrics: {str(e)}",
+                "stack_trace": traceback.format_exc()
+            })
+            
+    def _log_metrics_update(self, metric: Dict[str, Any]) -> None:
+        """Log metrics update event."""
+        if self.logger:
+            self.logger.record({
+                "event": "curiosity_metrics_update",
+                "metric": metric,
+                "timestamp": time.time()
+            })
+            
+    def get_metrics(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get metrics with optional limit.
+        
+        Args:
+            limit: Optional limit on number of metrics to return
+            
+        Returns:
+            List of metrics
+        """
+        metrics = list(self.metrics)
+        return metrics[-limit:] if limit is not None else metrics
+        
+    def clear_metrics(self) -> None:
+        """Clear all metrics."""
+        self.metrics.clear()
+        self.callbacks.trigger_callback("metrics_cleared")
+        
+    def update_pressure(
+        self,
+        temperament_score: float,
+        confidence: float,
+        silence_duration: float
+    ) -> None:
+        """
+        Update curiosity pressure based on system state.
+        
+        Args:
+            temperament_score: Current temperament score
+            confidence: Current confidence score
+            silence_duration: Time since last interaction
+        """
+        try:
+            # Calculate pressure components
+            temperament_effect = 0.1 * max(0.0, temperament_score)
+            confidence_effect = 0.05 * (1.0 - confidence)
+            silence_effect = 0.2 * (silence_duration / self.config.get("silence_threshold", 20.0))
+            
+            # Update pressure
+            time_delta = time.time() - self.last_update
+            self.pressure = min(1.0, max(0.0, 
+                self.pressure + time_delta * (temperament_effect + confidence_effect + silence_effect)
+            ))
+            self.last_update = time.time()
+            
+            self.logger.record({
+                "event": "curiosity_pressure_updated",
+                "pressure": self.pressure,
+                "temperament_effect": temperament_effect,
+                "confidence_effect": confidence_effect,
+                "silence_effect": silence_effect,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to update pressure: {str(e)}",
+                "stack_trace": traceback.format_exc()
+            })
+            
+    def get_pressure(self) -> float:
+        """Get current curiosity pressure."""
+        return self.pressure
+        
+    def reduce_pressure(self, amount: float) -> None:
+        """
+        Reduce curiosity pressure by specified amount.
+        
+        Args:
+            amount: Amount to reduce pressure by
+        """
+        self.pressure = max(0.0, self.pressure - amount)
+        self.logger.record({
+            "event": "curiosity_pressure_reduced",
+            "pressure": self.pressure,
+            "reduction": amount,
+            "timestamp": time.time()
+        })
 
     def compute_curiosity(
         self,
@@ -285,35 +404,6 @@ class CuriosityManager:
             self._log_error(f"Invalid dream memory format: {str(e)}")
         return memory_embeddings
 
-    def update_pressure(
-        self,
-        temperament: float,
-        confidence: float,
-        silence_duration: float
-    ) -> None:
-        """Update curiosity pressure based on system state."""
-        silence_threshold = max(self.config["silence_threshold"], 1e-6)
-        self.pressure.update(
-            temperament=temperament,
-            confidence=confidence,
-            silence=silence_duration,
-            silence_threshold=silence_threshold
-        )
-        self.callbacks.trigger_callback("pressure_updated", pressure=self.pressure.value)
-
-    def should_erupt(self, threshold: Optional[float] = None) -> bool:
-        """Check if curiosity pressure should trigger a question."""
-        thresh = threshold or self.config["pressure_threshold"]
-        if not 0.5 <= thresh <= 0.9:
-            thresh = 0.7
-            self._log_warning(f"Invalid pressure threshold {thresh}, using default 0.7")
-        
-        if self.pressure.should_erupt(thresh):
-            self.pressure.drop_pressure(self.config["pressure_drop"])
-            self.callbacks.trigger_callback("pressure_erupted", pressure=self.pressure.value)
-            return True
-        return False
-
     def generate_question(
         self,
         state: Any,
@@ -380,7 +470,7 @@ class CuriosityManager:
                     **inputs,
                     max_new_tokens=self.config["max_new_tokens"],
                     temperature=max(0.1, self.config["base_temperature"] + 
-                                  self.config["temperament_influence"] * state.temperament_score),
+                                  self.config["temperament_influence"] * getattr(state, 'temperament_score', 0.5)),
                     top_k=self.config["top_k"],
                     do_sample=True,
                     pad_token_id=tokenizer.pad_token_id,
@@ -403,99 +493,32 @@ class CuriosityManager:
         """Update state after question generation."""
         self.unanswered_questions.append((question, curiosity_score))
         self.last_question_time = current_time
-        self.pressure.drop_pressure(self.config["pressure_drop"])
+        self.pressure = self.get_pressure()
         self.callbacks.trigger_callback("question_generated", question=question, score=curiosity_score)
 
-    def update_metrics(
-        self,
-        question: str,
-        score: float,
-        spontaneous: bool = False,
-        answered: bool = False,
-        conversation_id: Optional[str] = None,
-        state_hash: Optional[str] = None
-    ) -> None:
-        """Update curiosity metrics with automatic cleanup and logging."""
-        metric = {
-            "question": question,
-            "score": score,
-            "spontaneous": spontaneous,
-            "answered": answered,
-            "timestamp": time.time(),
-            "conversation_id": conversation_id,
-            "state_hash": state_hash
-        }
-        self.metrics.append(metric)
-        self._log_event("metrics_update", metric)
-        self.callbacks.trigger_callback("metrics_updated", **metric)
+    def _update_state_novelty(self, state: Any, score: float) -> None:
+        """Update state novelty scores if available."""
+        if hasattr(state, 'curiosity') and hasattr(state.curiosity, 'novelty_scores'):
+            state.curiosity.novelty_scores.append(score)
 
-    def _log_metrics_update(self, metric: Dict) -> None:
-        """Log metrics update event."""
+    def _log_warning(self, message: str) -> None:
+        """Log warning if logger is available."""
         if self.logger:
             self.logger.record_event(
-                event_type="curiosity_metrics_update",
-                message="Curiosity metrics updated",
-                level="info",
-                additional_info=metric
+                event_type="curiosity_warning",
+                message=message,
+                level="warning"
             )
 
-    def get_metrics(self, limit: Optional[int] = None) -> List[Dict]:
-        """Get metrics with optional limit."""
-        metrics = list(self.metrics)
-        return metrics[-limit:] if limit is not None else metrics
-
-    def clear_metrics(self) -> None:
-        """Clear all metrics."""
-        self.metrics.clear()
-        self.callbacks.trigger_callback("metrics_cleared")
-
-    def check_silence(
-        self,
-        state: Any,
-        tokenizer: Any,
-        model: Any,
-        elapsed: float
-    ) -> Optional[str]:
-        """Check for prolonged silence and generate a question if needed."""
-        if not self._should_check_silence(elapsed):
-            return None
-
-        question = self._try_generate_silence_question(state, tokenizer, model)
-        if question:
-            return question
-        return self._try_reuse_unanswered_question()
-
-    def _should_check_silence(self, elapsed: float) -> bool:
-        """Determine if silence check should proceed."""
-        return (
-            elapsed > self.config["silence_threshold"] and
-            self.pressure.value > self.config["pressure_threshold"] and
-            self._check_cooldown(time.time())
-        )
-
-    def _try_generate_silence_question(self, state: Any, tokenizer: Any, model: Any) -> Optional[str]:
-        """Attempt to generate a new question due to silence."""
-        question = self.generate_question(state, tokenizer, model, spontaneous=True)
-        if question:
-            score = self.compute_curiosity(state, tokenizer, model, question)
-            self.update_metrics(question, score, spontaneous=True)
-            self._finalize_silence_question(question)
-            return question
-        return None
-
-    def _try_reuse_unanswered_question(self) -> Optional[str]:
-        """Attempt to reuse an unanswered question."""
-        if self.unanswered_questions:
-            question, score = self.unanswered_questions.popleft()
-            self.update_metrics(question, score, spontaneous=True)
-            self._finalize_silence_question(question, 0.7)
-            return question
-        return None
-
-    def _finalize_silence_question(self, question: str, pressure_drop_factor: float = 1.0) -> None:
-        """Update state after generating a silence question."""
-        self.pressure.drop_pressure(self.config["pressure_drop"] * pressure_drop_factor)
-        self.last_question_time = time.time()
+    def _log_event(self, event: str, data: Dict) -> None:
+        """Log event with additional data."""
+        if self.logger:
+            self.logger.record_event(
+                event_type=f"curiosity_{event}",
+                message=f"Curiosity event: {event}",
+                level="info",
+                additional_info=data
+            )
 
     def tune(
         self,
@@ -566,36 +589,6 @@ class CuriosityManager:
                 additional_info={"params": updates}
             )
 
-    def get_pressure(self) -> float:
-        """Get current pressure value."""
-        return self.pressure.value
-
-    def reduce_pressure(self, amount: float) -> None:
-        """Reduce pressure by specified amount."""
-        self.pressure.drop_pressure(amount)
-
-    def save_state(self) -> Dict:
-        """Save current state."""
-        return {
-            "pressure": self.pressure.value,
-            "last_question_time": self.last_question_time,
-            "unanswered_questions": list(self.unanswered_questions),
-            "metrics": list(self.metrics)
-        }
-
-    def load_state(self, state_dict: Dict) -> None:
-        """Load state from dictionary."""
-        self.pressure.value = state_dict.get("pressure", 0.0)
-        self.last_question_time = state_dict.get("last_question_time", time.time())
-        self.unanswered_questions = deque(
-            state_dict.get("unanswered_questions", []),
-            maxlen=self.config["queue_maxlen"]
-        )
-        self.metrics = deque(
-            state_dict.get("metrics", []),
-            maxlen=self.config["metrics_maxlen"]
-        )
-
     def generate_curiosity_question(
         self, state: Any, tokenizer: Any, model: Any, context: Optional[str] = None, spontaneous: bool = False
     ) -> Optional[str]:
@@ -625,27 +618,3 @@ class CuriosityManager:
     def tune_curiosity(self, **kwargs) -> None:
         """Tune curiosity parameters with kwargs."""
         self.tune(**kwargs)
-
-    def _log_warning(self, message: str) -> None:
-        """Log warning if logger is available."""
-        if self.logger:
-            self.logger.record_event(
-                event_type="curiosity_warning",
-                message=message,
-                level="warning"
-            )
-
-    def _log_event(self, event: str, data: Dict) -> None:
-        """Log event with additional data."""
-        if self.logger:
-            self.logger.record_event(
-                event_type=f"curiosity_{event}",
-                message=f"Curiosity event: {event}",
-                level="info",
-                additional_info=data
-            )
-
-    def _update_state_novelty(self, state: Any, score: float) -> None:
-        """Update state novelty scores if available."""
-        if hasattr(state, 'curiosity') and hasattr(state.curiosity, 'novelty_scores'):
-            state.curiosity.novelty_scores.append(score)

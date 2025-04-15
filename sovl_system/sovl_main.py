@@ -35,6 +35,7 @@ from sovl_state_manager import StateManager
 from sovl_logging import LoggingManager
 import logging
 from sovl_training_cycle import TrainingCycleManager
+from sovl_plugin import PluginManager
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Calculate confidence score for generated tokens."""
@@ -633,11 +634,17 @@ class SOVLSystem:
         self.context = SystemContext(config_path)
         self.state_tracker = StateTracker(self.context)
         self.error_manager = ErrorManager(self.context, self.state_tracker)
-        self.temperament_system = TemperamentSystem.create_from_config(
-            self.context.config_manager,
-            self.context.logger,
-            self.context.device
+        
+        # Initialize components with dependency injection
+        self._initialize_components()
+        
+        # Initialize plugin manager
+        self.plugin_manager = PluginManager(
+            config_manager=self.context.config_manager,
+            logger=self.context.logger,
+            state=self.state_tracker.state
         )
+        self.plugin_manager.set_system(self)  # Set system reference
         
         self.context.logger.record_event(
             event_type="system_initialization",
@@ -649,11 +656,42 @@ class SOVLSystem:
             }
         )
 
+    def _initialize_components(self):
+        """Initialize system components with proper dependency injection."""
+        # Initialize temperament system
+        self.temperament_system = TemperamentSystem.create_from_config(
+            self.context.config_manager,
+            self.context.logger,
+            self.context.device
+        )
+        
+        # Initialize other components with proper dependencies
+        self.generation_manager = GenerationManager(
+            config_manager=self.context.config_manager,
+            logger=self.context.logger,
+            state=self.state_tracker.state
+        )
+        
+        self.training_manager = TrainingManager(
+            context=self.context,
+            config_handler=self.context.config_handler,
+            model_loader=self.context.model_loader,
+            state_tracker=self.state_tracker,
+            error_manager=self.error_manager
+        )
+        
+        self.curiosity_engine = CuriosityEngine(
+            context=self.context,
+            model_loader=self.context.model_loader,
+            state_tracker=self.state_tracker,
+            error_manager=self.error_manager
+        )
+
     def _update_temperament(self) -> None:
         try:
             self.temperament_system.update_from_state(
                 self.state_tracker.state,
-                self.context.curiosity_manager
+                self.curiosity_engine.curiosity_manager if self.curiosity_engine else None
             )
             self.context.logger.record_event(
                 event_type="temperament_update",
@@ -675,7 +713,17 @@ class SOVLSystem:
 
     def generate_response(self, prompt: str) -> str:
         try:
-            response = self.context.model_manager.generate(prompt)
+            # Execute pre-generate hooks
+            self.plugin_manager.execute_hook("pre_generate", {"prompt": prompt})
+            
+            response = self.generation_manager.generate(prompt)
+            
+            # Execute post-generate hooks
+            self.plugin_manager.execute_hook("post_generate", {
+                "prompt": prompt,
+                "response": response
+            })
+            
             self.context.logger.record_event(
                 event_type="response_generation",
                 message="Response generated successfully",
@@ -687,15 +735,31 @@ class SOVLSystem:
             )
             return response
         except Exception as e:
+            # Execute error hooks
+            self.plugin_manager.execute_hook("on_error", {
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "stack_trace": traceback.format_exc()
+            })
             return self.error_manager.handle_generation_error(e, prompt)
-
-    def generate(self, prompt: str, max_new_tokens: int = 50, 
-                 scaffold_weight: Optional[float] = None, **kwargs) -> str:
-        return self.generate_response(prompt)
 
     def train_step(self, batch: List[dict], dry_run: bool = False, 
                    dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
-        return self.cycle_trainer.train_step(batch, dry_run, dry_run_params)
+        # Execute pre-training hooks
+        self.plugin_manager.execute_hook("on_training_step", {
+            "batch_size": len(batch),
+            "dry_run": dry_run
+        })
+        
+        result = self.training_manager.train_step(batch, dry_run, dry_run_params)
+        
+        # Execute post-training hooks
+        self.plugin_manager.execute_hook("on_training_step_complete", {
+            "batch_size": len(batch),
+            "result": result
+        })
+        
+        return result
 
     def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
                           epochs: Optional[int] = None, batch_size: Optional[int] = None):
@@ -748,6 +812,31 @@ class SOVLSystem:
                 "conversation_id": self.state_tracker.state.conversation_id
             })
             raise
+
+    def cleanup(self):
+        """Cleanup system resources."""
+        try:
+            # Execute cleanup hooks
+            self.plugin_manager.execute_hook("on_cleanup", {})
+            
+            # Save state
+            self.state_tracker.state.save_state()
+            
+            # Cleanup other components
+            self.generation_manager.cleanup()
+            self.training_manager.cleanup()
+            
+            self.context.logger.record_event(
+                event_type="system_cleanup",
+                message="System cleanup completed",
+                level="info"
+            )
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Cleanup failed: {str(e)}",
+                error_type="cleanup_error",
+                stack_trace=traceback.format_exc()
+            )
 
 if __name__ == "__main__":
     from sovl_conductor import SOVLOrchestrator

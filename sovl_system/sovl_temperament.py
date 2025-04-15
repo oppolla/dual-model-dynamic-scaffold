@@ -9,7 +9,6 @@ from threading import RLock
 from sovl_utils import synchronized, safe_divide, float_lt
 from sovl_config import ConfigManager
 from sovl_state import SOVLState
-from sovl_curiosity import CuriosityManager
 
 # Assuming the new Logger is imported
 from sovl_logger import Logger, LoggerConfig
@@ -98,33 +97,150 @@ class TemperamentConfig:
                 raise ValueError(f"Unknown configuration parameter: {key}")
 
 class TemperamentSystem:
-    """Manages model temperament with thread-safe operations."""
+    """Manages the temperament parameters and their evolution."""
     
-    STATE_VERSION: str = "1.0"
-    
-    def __init__(self, config: TemperamentConfig, logger: Logger, 
-                 device: torch.device = torch.device("cpu")) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        logger: Any,
+        initial_temperament: Optional[Dict[str, float]] = None
+    ):
         """
         Initialize temperament system.
-
+        
         Args:
-            config: Temperament configuration
-            logger: Logger instance
-            device: Device for tensor operations
+            config: Configuration dictionary with temperament parameters
+            logger: Logger instance for logging
+            initial_temperament: Optional initial temperament values
         """
-        self._config = config
-        self._logger = logger
-        self._device = device
-        self._score: float = 0.0
-        self._history: Deque[float] = deque(maxlen=config.history_maxlen)
-        self._confidence_history: Deque[float] = deque(maxlen=config.confidence_history_maxlen)
-        self._sleep_confidence_sum: float = 0.0
-        self._sleep_confidence_count: int = 0
-        self._last_update: float = time.time()
-        self._lock = RLock()
-        self._mood_cache: Optional[str] = None
-        self._mood_cache_time: float = 0
-        self._initialize_logging()
+        self.config = config
+        self.logger = logger
+        self.temperament = initial_temperament or self._get_default_temperament()
+        self.history = []
+        self.stability_threshold = self.config.get('stability_threshold', 0.1)
+        self.adaptation_rate = self.config.get('adaptation_rate', 0.01)
+        self.max_history_size = self.config.get('max_history_size', 100)
+        
+    def _get_default_temperament(self) -> Dict[str, float]:
+        """Get default temperament values from config."""
+        return {
+            'curiosity': self.config.get('default_curiosity', 0.5),
+            'cautiousness': self.config.get('default_cautiousness', 0.5),
+            'creativity': self.config.get('default_creativity', 0.5),
+            'focus': self.config.get('default_focus', 0.5),
+            'adaptability': self.config.get('default_adaptability', 0.5)
+        }
+        
+    def update_temperament(
+        self,
+        performance_metrics: Dict[str, float],
+        external_factors: Optional[Dict[str, float]] = None
+    ) -> Dict[str, float]:
+        """
+        Update temperament based on performance metrics and external factors.
+        
+        Args:
+            performance_metrics: Dictionary of performance metrics
+            external_factors: Optional dictionary of external factors
+            
+        Returns:
+            Updated temperament dictionary
+        """
+        try:
+            # Calculate temperament adjustments
+            adjustments = self._calculate_adjustments(performance_metrics, external_factors)
+            
+            # Apply adjustments with stability check
+            new_temperament = {}
+            for trait, value in self.temperament.items():
+                adjustment = adjustments.get(trait, 0.0)
+                new_value = value + adjustment
+                new_temperament[trait] = max(0.0, min(1.0, new_value))
+                
+            # Update history
+            self.history.append(new_temperament)
+            if len(self.history) > self.max_history_size:
+                self.history.pop(0)
+                
+            # Log update
+            self.logger.record({
+                "event": "temperament_updated",
+                "old_temperament": self.temperament,
+                "new_temperament": new_temperament,
+                "adjustments": adjustments
+            })
+            
+            self.temperament = new_temperament
+            return new_temperament
+            
+        except Exception as e:
+            self.logger.record({
+                "error": f"Temperament update failed: {str(e)}",
+                "stack_trace": traceback.format_exc()
+            })
+            return self.temperament
+            
+    def _calculate_adjustments(
+        self,
+        performance_metrics: Dict[str, float],
+        external_factors: Optional[Dict[str, float]]
+    ) -> Dict[str, float]:
+        """Calculate temperament adjustments based on metrics and factors."""
+        adjustments = {}
+        
+        # Base adjustments from performance metrics
+        if 'loss' in performance_metrics:
+            loss = performance_metrics['loss']
+            adjustments['curiosity'] = -loss * self.adaptation_rate
+            adjustments['cautiousness'] = loss * self.adaptation_rate
+            
+        if 'accuracy' in performance_metrics:
+            accuracy = performance_metrics['accuracy']
+            adjustments['creativity'] = accuracy * self.adaptation_rate
+            adjustments['focus'] = (1 - accuracy) * self.adaptation_rate
+            
+        # Apply external factors if provided
+        if external_factors:
+            for factor, value in external_factors.items():
+                if factor in self.temperament:
+                    adjustments[factor] = adjustments.get(factor, 0.0) + value * self.adaptation_rate
+                    
+        return adjustments
+        
+    def get_temperament_score(self, trait: str) -> float:
+        """
+        Get current score for a specific temperament trait.
+        
+        Args:
+            trait: Name of the temperament trait
+            
+        Returns:
+            Current score for the trait
+        """
+        return self.temperament.get(trait, 0.5)
+        
+    def get_stability(self) -> float:
+        """
+        Calculate current temperament stability.
+        
+        Returns:
+            Stability score between 0 and 1
+        """
+        if len(self.history) < 2:
+            return 1.0
+            
+        current = self.temperament
+        previous = self.history[-2]
+        
+        differences = [
+            abs(current[trait] - previous[trait])
+            for trait in current.keys()
+        ]
+        
+        avg_difference = sum(differences) / len(differences)
+        stability = 1.0 - min(1.0, avg_difference / self.stability_threshold)
+        
+        return stability
 
     def _initialize_logging(self) -> None:
         """Initialize logging configuration."""
@@ -467,16 +583,15 @@ class TemperamentSystem:
         )
         return cls(config=temperament_config, logger=logger, device=device)
 
-    def update_from_state(self, state: SOVLState, curiosity_manager: Optional[CuriosityManager] = None) -> None:
+    def update_from_state(self, state: SOVLState, curiosity_pressure: Optional[float] = None) -> None:
         """
         Update temperament based on system state.
 
         Args:
             state: Current system state
-            curiosity_manager: Optional curiosity manager for pressure calculation
+            curiosity_pressure: Optional curiosity pressure (0.0-1.0)
         """
         try:
-            curiosity_pressure = curiosity_manager.get_pressure() if curiosity_manager else 0.0
             self.compute_and_update(
                 sleep_confidence_sum=state.sleep_confidence_sum,
                 sleep_confidence_count=state.sleep_confidence_count,

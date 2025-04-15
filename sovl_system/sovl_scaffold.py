@@ -9,6 +9,7 @@ import traceback
 from threading import Lock
 import contextlib
 import logging
+import math
 
 # Assuming these are external dependencies that exist
 from sovl_logger import Logger
@@ -337,23 +338,32 @@ class LayerDiscoveryStrategy:
             raise
 
 class CrossAttentionLayer(nn.Module):
-    """Enhanced cross-attention layer with gating, memory efficiency, and dynamic control."""
+    """Implements cross-attention between base and scaffold models."""
     
     def __init__(
         self,
-        config_manager: ConfigManager,
-        logger: Logger,
+        config: Dict[str, Any],
+        logger: Any,
         hidden_size: Optional[int] = None,
         num_heads: Optional[int] = None,
         device: str = 'cpu'
     ):
-        super().__init__()
-        self.config_manager = config_manager
-        self.logger = logger
-        self.device = torch.device(device)
-        self.lock = Lock()
+        """
+        Initialize cross-attention layer.
         
-        # Load and validate configuration
+        Args:
+            config: Configuration dictionary with layer parameters
+            logger: Logger instance for logging
+            hidden_size: Optional hidden size override
+            num_heads: Optional number of attention heads override
+            device: Device for tensor operations
+        """
+        super().__init__()
+        self.config = config
+        self.logger = logger
+        self.device = device
+        
+        # Load configuration
         self._load_config(hidden_size, num_heads)
         
         # Initialize components
@@ -363,142 +373,85 @@ class CrossAttentionLayer(nn.Module):
         self._init_sparse_mask()
         self._init_weights()
         
-        # Key-value cache
-        self.use_cache = False
-        self.kv_cache = None
-
-    def _load_config(self, hidden_size: Optional[int], num_heads: Optional[int]):
-        """Load and validate configuration parameters."""
-        self.hidden_size = hidden_size or self.config_manager.get("core_config.hidden_size", 768)
-        self.num_heads = num_heads or self.config_manager.get("core_config.num_heads", 12)
-        assert self.hidden_size % self.num_heads == 0, "hidden_size must be divisible by num_heads"
+        # Initialize cache
+        self.reset_cache()
         
+    def _load_config(self, hidden_size: Optional[int], num_heads: Optional[int]) -> None:
+        """Load configuration parameters."""
+        self.hidden_size = hidden_size or self.config.get('hidden_size', 768)
+        self.num_heads = num_heads or self.config.get('num_heads', 12)
         self.head_dim = self.hidden_size // self.num_heads
-        self.dropout_rate = self.config_manager.get("controls_config.dropout_rate", 0.1)
-        self.use_gating = self.config_manager.get("controls_config.use_gating", True)
-        self.scale_attention = self.config_manager.get("controls_config.scale_attention", True)
-        self.use_residual = self.config_manager.get("controls_config.use_residual", True)
-        self.use_pooling = self.config_manager.get("controls_config.use_pooling", False)
-        self.use_sparse_attention = self.config_manager.get("controls_config.use_sparse_attention", False)
-        self.gradient_checkpointing = self.config_manager.get("core_config.gradient_checkpointing", False)
-        self.quantization_mode = self.config_manager.get("core_config.quantization", "fp16")
-        self.sparse_pattern = self.config_manager.get("controls_config.sparse_pattern", "window")
-        self.sparse_window_size = self.config_manager.get("controls_config.sparse_window_size", 128)
-        self.max_seq_len = self.config_manager.get("training_config.max_seq_length", 512)
         
-        self.scale = self.head_dim ** -0.5 if self.scale_attention else 1.0
-        self.influence_weight = nn.Parameter(
-            torch.tensor(self.config_manager.get("controls_config.scaffold_weight_cap", 1.0)),
-            requires_grad=False
-        )
-        self.blend_strength = nn.Parameter(
-            torch.tensor(self.config_manager.get("controls_config.dream_prompt_weight", 0.5)),
-            requires_grad=False
-        )
-
-    def _init_projections(self):
-        """Initialize attention projection layers with quantization support."""
-        try:
-            if self.quantization_mode in ['int8', 'int4']:
-                try:
-                    from bitsandbytes.nn import Linear8bitLt, Linear4bit
-                    LinearCls = Linear8bitLt if self.quantization_mode == 'int8' else Linear4bit
-                    self.q_proj = LinearCls(self.hidden_size, self.hidden_size)
-                    self.k_proj = LinearCls(self.hidden_size, self.hidden_size)
-                    self.v_proj = LinearCls(self.hidden_size, self.hidden_size)
-                    self.out_proj = LinearCls(self.hidden_size, self.hidden_size)
-                    return
-                except ImportError:
-                    self.logger.record({
-                        "warning": f"bitsandbytes not installed, falling back to fp16",
-                        "timestamp": time.time()
-                    })
-                    self.quantization_mode = 'fp16'
-
-            self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
-            self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
-            self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
-            self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
-        except Exception as e:
-            self.logger.record({
-                "error": f"Projection initialization failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
-    def _init_gating(self):
-        """Initialize gating mechanism if enabled."""
-        self.gate = nn.Sequential(
-            nn.Linear(self.hidden_size, self.hidden_size),
-            nn.Sigmoid()
-        ) if self.use_gating else None
-
-    def _init_normalization(self):
-        """Initialize normalization and dropout."""
+        # Validate configuration
+        if self.hidden_size % self.num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({self.hidden_size}) must be divisible by num_heads ({self.num_heads})"
+            )
+            
+        self.logger.record({
+            "event": "cross_attention_config_loaded",
+            "hidden_size": self.hidden_size,
+            "num_heads": self.num_heads,
+            "head_dim": self.head_dim
+        })
+        
+    def _init_projections(self) -> None:
+        """Initialize projection layers."""
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.k_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.v_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        
+    def _init_gating(self) -> None:
+        """Initialize gating mechanism."""
+        self.gate = nn.Parameter(torch.ones(1))
+        self.gate_bias = nn.Parameter(torch.zeros(1))
+        
+    def _init_normalization(self) -> None:
+        """Initialize normalization layers."""
         self.layer_norm = nn.LayerNorm(self.hidden_size)
-        self.dropout = nn.Dropout(self.dropout_rate)
-
-    def _init_sparse_mask(self):
+        
+    def _init_sparse_mask(self) -> None:
         """Initialize sparse attention mask."""
-        self.sparse_mask = (SparseMaskFactory.create(
-            seq_len=self.max_seq_len,
-            sparse_pattern=self.sparse_pattern,
-            window_size=self.sparse_window_size,
-            device=self.device,
-            logger=self.logger
-        ) if self.use_sparse_attention else None)
-
-    def _init_weights(self):
-        """Initialize weights with model-specific scaling."""
-        gain = self.config_manager.get("core_config.initializer_range", 0.02)
-        for module in [self.q_proj, self.k_proj, self.v_proj, self.out_proj]:
-            if hasattr(module, 'weight'):
-                nn.init.xavier_uniform_(module.weight, gain=gain)
-                nn.init.constant_(module.bias, 0.0)
-        if self.use_gating:
-            nn.init.xavier_uniform_(self.gate[0].weight, gain=gain)
-            nn.init.constant_(self.gate[0].bias, 0.0)
-
-    def reset_cache(self):
-        """Reset key-value cache for inference."""
-        with self.lock:
-            self.kv_cache = None
-            self.use_cache = False
-            self.logger.record({
-                "event": "cache_reset",
-                "timestamp": time.time()
-            })
-
-    def set_influence_weight(self, weight: float):
-        """Set the influence weight for attention output."""
-        with self.lock:
-            self.influence_weight.data = torch.tensor(max(0.0, weight), dtype=torch.float)
-
-    def set_blend_strength(self, strength: float):
-        """Set the blend strength for residual connection."""
-        with self.lock:
-            self.blend_strength.data = torch.tensor(max(0.0, min(1.0, strength)), dtype=torch.float)
-
-    def set_lifecycle_weight(self, weight: float, curve: str = 'sigmoid_linear'):
-        """Adjust influence weight based on lifecycle curve."""
-        try:
-            with NumericalGuard():
-                if curve == 'sigmoid_linear':
-                    adjusted = safe_divide(weight, 1 + torch.exp(-weight), logger=self.logger)
-                elif curve == 'exponential':
-                    adjusted = weight * torch.exp(-weight)
-                else:
-                    adjusted = weight
-                self.set_influence_weight(adjusted)
-        except Exception as e:
-            self.logger.record({
-                "error": f"Lifecycle weight adjustment failed: {str(e)}",
-                "curve": curve,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-
+        self.sparse_mask = None
+        
+    def _init_weights(self) -> None:
+        """Initialize layer weights."""
+        nn.init.xavier_uniform_(self.q_proj.weight)
+        nn.init.xavier_uniform_(self.k_proj.weight)
+        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        
+        nn.init.zeros_(self.q_proj.bias)
+        nn.init.zeros_(self.k_proj.bias)
+        nn.init.zeros_(self.v_proj.bias)
+        nn.init.zeros_(self.out_proj.bias)
+        
+    def reset_cache(self) -> None:
+        """Reset attention cache."""
+        self.cache = {
+            'k': None,
+            'v': None,
+            'attention_mask': None
+        }
+        
+    def set_influence_weight(self, weight: float) -> None:
+        """Set influence weight for cross-attention."""
+        self.gate.data.fill_(weight)
+        
+    def set_blend_strength(self, strength: float) -> None:
+        """Set blend strength for cross-attention."""
+        self.gate_bias.data.fill_(strength)
+        
+    def set_lifecycle_weight(self, weight: float, curve: str = 'sigmoid_linear') -> None:
+        """Set lifecycle-based weight adjustment."""
+        if curve == 'sigmoid_linear':
+            self.gate.data.fill_(torch.sigmoid(torch.tensor(weight * 2 - 1)))
+        elif curve == 'linear':
+            self.gate.data.fill_(weight)
+        else:
+            raise ValueError(f"Unknown curve type: {curve}")
+            
     def _compute_attention(
         self,
         q: torch.Tensor,
@@ -508,35 +461,35 @@ class CrossAttentionLayer(nn.Module):
         seq_len: int,
         batch_size: int
     ) -> torch.Tensor:
-        """Compute attention mechanism."""
-        if self.use_sparse_attention:
-            if self.sparse_mask.shape[-1] < seq_len:
-                self.sparse_mask = SparseMaskFactory.create(
-                    seq_len=seq_len,
-                    sparse_pattern=self.sparse_pattern,
-                    window_size=self.sparse_window_size,
-                    device=k.device,
-                    logger=self.logger
-                )
-            sparse_mask = self.sparse_mask[:seq_len, :seq_len].unsqueeze(0).unsqueeze(1)
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            attn_scores = attn_scores + (~sparse_mask).float() * float('-inf')
-            attn_probs = torch.softmax(attn_scores, dim=-1)
-            return torch.matmul(attn_probs, v)
-        elif hasattr(F, 'scaled_dot_product_attention'):
-            return F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attention_mask,
-                dropout_p=self.dropout_rate if self.training else 0.0,
-                is_causal=False
-            )
-        else:
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-            if attention_mask is not None:
-                attn_scores = attn_scores + attention_mask
-            attn_probs = torch.softmax(attn_scores, dim=-1)
-            return torch.matmul(attn_probs, v)
-
+        """Compute attention scores and apply mask."""
+        # Reshape for multi-head attention
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            scores = scores.masked_fill(attention_mask == 0, float('-inf'))
+            
+        # Apply sparse mask if available
+        if self.sparse_mask is not None:
+            scores = scores.masked_fill(self.sparse_mask == 0, float('-inf'))
+            
+        # Apply softmax
+        attn_weights = F.softmax(scores, dim=-1)
+        
+        # Compute attention output
+        attn_output = torch.matmul(attn_weights, v)
+        
+        # Reshape back to original dimensions
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
+        
+        return attn_output
+        
     def _forward(
         self,
         hidden_states: torch.Tensor,
@@ -547,106 +500,45 @@ class CrossAttentionLayer(nn.Module):
         dynamic_factor: Optional[torch.Tensor] = None,
         use_cache: bool = False
     ) -> torch.Tensor:
-        """Core forward pass logic."""
-        try:
-            with NumericalGuard(dtype=torch.float16 if self.quantization_mode == 'fp16' else torch.float32):
-                batch_size = hidden_states.size(0)
-                
-                # Validate inputs
-                if hidden_states.dim() != 3 or cross_states.dim() != 3:
-                    raise ValueError(f"Expected 3D tensors, got hidden_states={hidden_states.shape}, cross_states={cross_states.shape}")
-                if hidden_states.device != cross_states.device:
-                    cross_states = cross_states.to(hidden_states.device)
-
-                # Pool cross-states if enabled
-                if self.use_pooling:
-                    cross_states = cross_states.mean(dim=1, keepdim=True)
-
-                # Blend with memory tensors
-                if memory_tensors is not None and memory_weight > 0:
-                    if memory_tensors.shape[-1] != cross_states.shape[-1]:
-                        self.logger.record({
-                            "warning": f"Memory tensors dimension mismatch: {memory_tensors.shape[-1]} vs {cross_states.shape[-1]}",
-                            "timestamp": time.time()
-                        })
-                    else:
-                        memory_weight = max(0.0, min(1.0, memory_weight))
-                        cross_states = (1 - memory_weight) * cross_states + memory_weight * memory_tensors
-
-                # Project queries, keys, values
-                q = self.q_proj(hidden_states)
-                k = self.k_proj(cross_states)
-                v = self.v_proj(cross_states)
-
-                # Reshape for multi-head attention
-                q = q.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-                k = k.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-                v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
-
-                # Cache keys and values
-                with self.lock:
-                    self.use_cache = use_cache
-                    if use_cache:
-                        if self.kv_cache is None:
-                            self.kv_cache = (k, v)
-                        else:
-                            prev_k, prev_v = self.kv_cache
-                            k = torch.cat([prev_k, k], dim=2)
-                            v = torch.cat([prev_v, v], dim=2)
-                            self.kv_cache = (k, v)
-                    else:
-                        self.kv_cache = None
-
-                # Prepare attention mask
-                seq_len = q.size(-2)
-                attention_mask = AttentionMaskPreparer.prepare(
-                    attention_mask=attention_mask,
-                    batch_size=batch_size,
-                    num_heads=self.num_heads,
-                    seq_len=seq_len,
-                    device=q.device,
-                    logger=self.logger
-                )
-
-                # Compute attention
-                attn_output = self._compute_attention(q, k, v, attention_mask, seq_len, batch_size)
-
-                # Reshape and project
-                attn_output = attn_output.transpose(1, 2).contiguous()
-                attn_output = attn_output.view(batch_size, -1, self.hidden_size)
-                attn_output = self.out_proj(attn_output)
-
-                # Apply dynamic factor
-                if dynamic_factor is not None:
-                    attn_output = attn_output * dynamic_factor
-
-                # Apply gating
-                if self.use_gating:
-                    gate_values = self.gate(hidden_states)
-                    attn_output = gate_values * attn_output * self.influence_weight
-
-                # Apply dropout
-                attn_output = self.dropout(attn_output)
-
-                # Residual connection
-                if self.use_residual:
-                    hidden_states = (1 - self.blend_strength) * hidden_states + self.blend_strength * attn_output
-                    hidden_states = self.layer_norm(hidden_states)
-                else:
-                    hidden_states = attn_output
-
-                return hidden_states
-
-        except Exception as e:
-            self.logger.record({
-                "error": f"CrossAttentionLayer forward failed: {str(e)}",
-                "hidden_states_shape": list(hidden_states.shape),
-                "cross_states_shape": list(cross_states.shape),
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise
-
+        """Forward pass implementation."""
+        batch_size, seq_len, _ = hidden_states.shape
+        
+        # Apply layer normalization
+        hidden_states = self.layer_norm(hidden_states)
+        
+        # Project queries, keys, and values
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(cross_states)
+        v = self.v_proj(cross_states)
+        
+        # Apply memory if provided
+        if memory_tensors is not None and memory_weight > 0:
+            k = k + memory_tensors[0] * memory_weight
+            v = v + memory_tensors[1] * memory_weight
+            
+        # Compute attention
+        attn_output = self._compute_attention(
+            q, k, v, attention_mask, seq_len, batch_size
+        )
+        
+        # Apply output projection
+        attn_output = self.out_proj(attn_output)
+        
+        # Apply gating
+        attn_output = attn_output * self.gate + self.gate_bias
+        
+        # Apply dynamic factor if provided
+        if dynamic_factor is not None:
+            attn_output = attn_output * dynamic_factor
+            
+        # Update cache if enabled
+        if use_cache:
+            self.cache['k'] = k
+            self.cache['v'] = v
+            self.cache['attention_mask'] = attention_mask
+            
+        return attn_output
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -657,36 +549,15 @@ class CrossAttentionLayer(nn.Module):
         dynamic_factor: Optional[torch.Tensor] = None,
         use_cache: bool = False
     ) -> torch.Tensor:
-        """Forward pass with optional gradient checkpointing."""
+        """Forward pass with error handling."""
         try:
-            with torch.autocast(device_type=hidden_states.device.type, enabled=self.quantization_mode == 'fp16'):
-                if self.training and self.gradient_checkpointing:
-                    return checkpoint(
-                        self._forward,
-                        hidden_states,
-                        cross_states,
-                        attention_mask,
-                        memory_tensors,
-                        memory_weight,
-                        dynamic_factor,
-                        use_cache,
-                        use_reentrant=False
-                    )
-                return self._forward(
-                    hidden_states,
-                    cross_states,
-                    attention_mask,
-                    memory_tensors,
-                    memory_weight,
-                    dynamic_factor,
-                    use_cache
-                )
+            return self._forward(
+                hidden_states, cross_states, attention_mask,
+                memory_tensors, memory_weight, dynamic_factor, use_cache
+            )
         except Exception as e:
             self.logger.record({
-                "error": f"CrossAttentionLayer forward failed: {str(e)}",
-                "hidden_states_shape": list(hidden_states.shape),
-                "cross_states_shape": list(cross_states.shape),
-                "timestamp": time.time(),
+                "error": f"CrossAttentionLayer forward pass failed: {str(e)}",
                 "stack_trace": traceback.format_exc()
             })
             raise
@@ -774,7 +645,7 @@ class CrossAttentionInjector:
                 
             original_layer = layers[layer_idx]
             cross_attn_layer = CrossAttentionLayer(
-                config_manager=self.config_manager,
+                config=self.config_manager.get("core_config"),
                 logger=self.logger,
                 device=str(model.device)
             )

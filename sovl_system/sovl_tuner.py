@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Protocol
 import time
 from sovl_config import ConfigManager
 from sovl_logger import Logger
@@ -7,6 +7,20 @@ from sovl_curiosity import CuriosityManager
 from sovl_trainer import SOVLTrainer
 from sovl_scaffold import CrossAttentionInjector
 
+class ICuriosityManager(Protocol):
+    """Interface for curiosity management."""
+    def get_pressure(self) -> float: ...
+    def reduce_pressure(self, amount: float) -> None: ...
+
+class ITrainer(Protocol):
+    """Interface for model training."""
+    def train_step(self, batch: Dict[str, Any]) -> float: ...
+    def get_current_parameters(self) -> Dict[str, Any]: ...
+
+class ICrossAttentionInjector(Protocol):
+    """Interface for cross attention injection."""
+    def inject_cross_attention(self, model: Any, scaffold_model: Any, **kwargs) -> None: ...
+
 class SOVLTuner:
     """Centralized module for tuning SOVL system parameters dynamically."""
     
@@ -14,16 +28,16 @@ class SOVLTuner:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        curiosity_manager: Optional[CuriosityManager] = None,
-        trainer: Optional[SOVLTrainer] = None,
-        cross_attention_injector: Optional[CrossAttentionInjector] = None
+        curiosity_manager: Optional[ICuriosityManager] = None,
+        trainer: Optional[ITrainer] = None,
+        cross_attention_injector: Optional[ICrossAttentionInjector] = None
     ):
         self.config_manager = config_manager
         self.logger = logger
-        self.numerical_guard = NumericalGuard()
         self.curiosity_manager = curiosity_manager
         self.trainer = trainer
         self.cross_attention_injector = cross_attention_injector
+        self._guard = NumericalGuard(logger)
         
         # Cache configuration sections
         self.core_config = config_manager.get_section("core_config")
@@ -123,6 +137,58 @@ class SOVLTuner:
                 })
                 return False
         return True
+    
+    def tune_parameters(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Tune system parameters based on performance metrics."""
+        try:
+            # Get current parameters
+            current_params = self.trainer.get_current_parameters() if self.trainer else {}
+            
+            # Adjust parameters based on metrics
+            tuned_params = self._adjust_parameters(current_params, metrics)
+            
+            # Apply parameter changes
+            if self.trainer:
+                self.trainer.update_parameters(tuned_params)
+            
+            # Log tuning results
+            self.logger.record({
+                "event": "parameters_tuned",
+                "previous_params": current_params,
+                "new_params": tuned_params,
+                "metrics": metrics,
+                "timestamp": time.time()
+            })
+            
+            return tuned_params
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Parameter tuning failed: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc()
+            )
+            raise
+            
+    def _adjust_parameters(self, current_params: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Adjust parameters based on metrics."""
+        tuned_params = current_params.copy()
+        
+        # Adjust learning rate based on loss
+        if "loss" in metrics:
+            loss = metrics["loss"]
+            if loss > self.config_manager.get("loss_threshold", 2.0):
+                tuned_params["learning_rate"] *= 0.5
+            elif loss < self.config_manager.get("loss_target", 0.5):
+                tuned_params["learning_rate"] *= 1.1
+                
+        # Adjust curiosity pressure based on performance
+        if self.curiosity_manager and "performance" in metrics:
+            performance = metrics["performance"]
+            if performance < self.config_manager.get("performance_threshold", 0.7):
+                self.curiosity_manager.reduce_pressure(0.1)
+                
+        return tuned_params
     
     def tune_curiosity(
         self,
@@ -659,9 +725,9 @@ class SOVLTuner:
     
     def update_component_references(
         self,
-        curiosity_manager: Optional[CuriosityManager] = None,
-        trainer: Optional[SOVLTrainer] = None,
-        cross_attention_injector: Optional[CrossAttentionInjector] = None
+        curiosity_manager: Optional[ICuriosityManager] = None,
+        trainer: Optional[ITrainer] = None,
+        cross_attention_injector: Optional[ICrossAttentionInjector] = None
     ) -> None:
         """Update references to dependent components."""
         if curiosity_manager is not None:

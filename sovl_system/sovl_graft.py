@@ -154,6 +154,7 @@ class PluginManager:
         self.plugin_lock = Lock()
         self.state_version = "1.1"
         self.state_hash = None
+        self.system = None  # Will be set when system is initialized
 
         # Register schema
         self.config_manager.register_schema(self.SCHEMA)
@@ -186,6 +187,20 @@ class PluginManager:
             "plugin_directory": self.plugin_dir,
             "enabled_plugins": self.enabled_plugins,
             "state_hash": self.state_hash,
+            "timestamp": time.time(),
+            "conversation_id": self.state.history.conversation_id
+        })
+
+    def set_system(self, system: 'SOVLSystem') -> None:
+        """
+        Set the SOVLSystem reference for the plugin manager.
+        
+        Args:
+            system: The SOVLSystem instance
+        """
+        self.system = system
+        self.logger.record({
+            "event": "plugin_manager_system_set",
             "timestamp": time.time(),
             "conversation_id": self.state.history.conversation_id
         })
