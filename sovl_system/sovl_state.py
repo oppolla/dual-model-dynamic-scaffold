@@ -603,6 +603,70 @@ class ConversationHistory:
             history.add_message(msg["role"], msg["content"])
         return history
 
+@dataclass
+class DataStats:
+    """Tracks data loading and quality statistics."""
+    total_entries: int = 0
+    valid_entries: int = 0
+    invalid_entries: int = 0
+    last_load_time: float = 0.0
+    average_entry_length: float = 0.0
+    validation_errors: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    data_quality_score: float = 0.0
+    data_diversity_score: float = 0.0
+    last_update_time: float = 0.0
+
+    def update(self, 
+              total_entries: int,
+              valid_entries: int,
+              invalid_entries: int,
+              validation_errors: Dict[str, int],
+              average_entry_length: float) -> None:
+        """Update data statistics."""
+        self.total_entries = total_entries
+        self.valid_entries = valid_entries
+        self.invalid_entries = invalid_entries
+        self.last_load_time = time.time()
+        self.average_entry_length = average_entry_length
+        self.validation_errors = validation_errors
+        self.last_update_time = time.time()
+        
+        # Calculate data quality score (0-1)
+        if total_entries > 0:
+            self.data_quality_score = valid_entries / total_entries
+            
+        # Calculate data diversity score (placeholder for now)
+        self.data_diversity_score = min(1.0, average_entry_length / 1000.0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "total_entries": self.total_entries,
+            "valid_entries": self.valid_entries,
+            "invalid_entries": self.invalid_entries,
+            "last_load_time": self.last_load_time,
+            "average_entry_length": self.average_entry_length,
+            "validation_errors": dict(self.validation_errors),
+            "data_quality_score": self.data_quality_score,
+            "data_diversity_score": self.data_diversity_score,
+            "last_update_time": self.last_update_time
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DataStats':
+        """Create from dictionary."""
+        stats = cls()
+        stats.total_entries = data.get("total_entries", 0)
+        stats.valid_entries = data.get("valid_entries", 0)
+        stats.invalid_entries = data.get("invalid_entries", 0)
+        stats.last_load_time = data.get("last_load_time", 0.0)
+        stats.average_entry_length = data.get("average_entry_length", 0.0)
+        stats.validation_errors = defaultdict(int, data.get("validation_errors", {}))
+        stats.data_quality_score = data.get("data_quality_score", 0.0)
+        stats.data_diversity_score = data.get("data_diversity_score", 0.0)
+        stats.last_update_time = data.get("last_update_time", 0.0)
+        return stats
+
 class SOVLState(StateBase):
     """Manages the state of the SOVL system."""
     
@@ -626,82 +690,91 @@ class SOVLState(StateBase):
             maxlen=self.config_manager.get("max_messages"),
             conversation_id=str(uuid.uuid4())
         )
-        
+        # Initialize data stats
+        self.data_stats = DataStats()
+
     @synchronized("lock")
-    def add_dream_memory(self, tensor: torch.Tensor, weight: float, metadata: Dict) -> None:
-        """Add a dream memory with device validation."""
+    def update_data_stats(self, 
+                         total_entries: int,
+                         valid_entries: int,
+                         invalid_entries: int,
+                         validation_errors: Dict[str, int],
+                         average_entry_length: float) -> None:
+        """Update data statistics and notify interested components."""
         try:
-            # Validate and move tensor to correct device
-            tensor = self._validate_tensor_device(tensor)
+            # Update data stats
+            self.data_stats.update(
+                total_entries=total_entries,
+                valid_entries=valid_entries,
+                invalid_entries=invalid_entries,
+                validation_errors=validation_errors,
+                average_entry_length=average_entry_length
+            )
             
-            # Calculate memory size
-            memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)  # Convert to MB
-            
-            # Check memory limits
-            if self.total_dream_memory_mb + memory_size > self.config_manager.get("max_dream_memory_mb"):
-                self._log_warning("Memory limit exceeded, pruning old memories")
-                self._prune_dream_memory()
-                
-            # Add to memory
-            self.dream_memory.append({
-                "tensor": tensor,
-                "weight": weight,
-                "metadata": metadata,
-                "timestamp": time.time()
-            })
-            self.total_dream_memory_mb += memory_size
+            # Log the update
+            self._log_event(
+                "data_stats_updated",
+                message="Data statistics updated",
+                level="info",
+                additional_info=self.data_stats.to_dict()
+            )
             
         except Exception as e:
-            self._log_error(f"Failed to add dream memory: {str(e)}")
+            self._log_error(f"Failed to update data stats: {str(e)}")
             raise
-            
-    @synchronized("lock")
-    def _prune_dream_memory(self) -> None:
-        """Prune old memories to maintain memory limits."""
-        while self.total_dream_memory_mb > self.config_manager.get("max_dream_memory_mb") and self.dream_memory:
-            removed = self.dream_memory.popleft()
-            memory_size = removed["tensor"].element_size() * removed["tensor"].nelement() / (1024 * 1024)
-            self.total_dream_memory_mb -= memory_size
-            
-    @synchronized("lock")
-    def get_dream_memory_stats(self) -> Dict[str, Any]:
-        """Get dream memory statistics with device validation."""
-        try:
-            stats = {
-                "count": len(self.dream_memory),
-                "total_memory_mb": self.total_dream_memory_mb,
-                "max_memory_mb": self.config_manager.get("max_dream_memory_mb"),
-                "average_weight": 0.0,
-                "oldest_timestamp": None,
-                "newest_timestamp": None
+
+    def get_data_stats(self) -> Dict[str, Any]:
+        """Get current data statistics."""
+        with self.lock:
+            return self.data_stats.to_dict()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert state to dictionary for serialization."""
+        with self.lock:
+            state_dict = {
+                "seen_prompts": list(self.seen_prompts),
+                "temperament_score": self.temperament_score,
+                "last_temperament_score": self.last_temperament_score,
+                "confidence_history": list(self.confidence_history),
+                "temperament_history": list(self.temperament_history),
+                "dream_memory": [{
+                    "tensor": m["tensor"].cpu().numpy().tolist(),
+                    "weight": m["weight"],
+                    "metadata": m["metadata"],
+                    "timestamp": m["timestamp"]
+                } for m in self.dream_memory],
+                "total_dream_memory_mb": self.total_dream_memory_mb,
+                "history": self.history.to_dict(),
+                "data_stats": self.data_stats.to_dict()
             }
-            
-            if self.dream_memory:
-                weights = [m["weight"] for m in self.dream_memory]
-                timestamps = [m["timestamp"] for m in self.dream_memory]
-                stats["average_weight"] = sum(weights) / len(weights)
-                stats["oldest_timestamp"] = min(timestamps)
-                stats["newest_timestamp"] = max(timestamps)
-                
-            return stats
-            
-        except Exception as e:
-            self._log_error(f"Failed to get dream memory stats: {str(e)}")
-            return {}
-            
-    @synchronized("lock")
-    def validate_dream_memory(self) -> bool:
-        """Validate dream memory tensors are on correct device."""
-        try:
-            for memory in self.dream_memory:
-                if not isinstance(memory["tensor"], torch.Tensor):
-                    return False
-                if memory["tensor"].device != self.device:
-                    memory["tensor"] = memory["tensor"].to(self.device)
-            return True
-        except Exception as e:
-            self._log_error(f"Failed to validate dream memory: {str(e)}")
-            return False
+            return state_dict
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], config_manager: ConfigManager, logger: Logger, device: torch.device) -> 'SOVLState':
+        """Create state from dictionary."""
+        state = cls(config_manager, logger, device)
+        with state.lock:
+            state.seen_prompts = set(data.get("seen_prompts", []))
+            state.temperament_score = data.get("temperament_score", 0.0)
+            state.last_temperament_score = data.get("last_temperament_score", 0.0)
+            state.confidence_history = deque(data.get("confidence_history", []), 
+                                          maxlen=config_manager.get("confidence_history_maxlen"))
+            state.temperament_history = deque(data.get("temperament_history", []), 
+                                           maxlen=config_manager.get("temperament_history_maxlen"))
+            state.dream_memory = deque(maxlen=config_manager.get("dream_memory_maxlen"))
+            for m in data.get("dream_memory", []):
+                tensor = torch.tensor(m["tensor"], device=device)
+                state.dream_memory.append({
+                    "tensor": tensor,
+                    "weight": m["weight"],
+                    "metadata": m["metadata"],
+                    "timestamp": m["timestamp"]
+                })
+            state.total_dream_memory_mb = data.get("total_dream_memory_mb", 0.0)
+            state.history = ConversationHistory.from_dict(data.get("history", {}), 
+                                                       maxlen=config_manager.get("max_messages"))
+            state.data_stats = DataStats.from_dict(data.get("data_stats", {}))
+        return state
 
 class StateManager:
     """Manages state initialization and persistence for the SOVL system."""

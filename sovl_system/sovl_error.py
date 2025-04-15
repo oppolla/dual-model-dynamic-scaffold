@@ -137,6 +137,91 @@ class ErrorManager:
         """Clear error history."""
         self.error_history.clear()
 
+    def handle_data_error(
+        self,
+        error: Exception,
+        context: Dict[str, Any],
+        conversation_id: str,
+        reraise: bool = True
+    ) -> bool:
+        """Handle data-related errors with recovery and proper propagation.
+        
+        Args:
+            error: The exception that occurred
+            context: Additional context about the error
+            conversation_id: ID of the current conversation
+            reraise: Whether to re-raise the error after handling
+            
+        Returns:
+            bool: True if error was handled successfully, False otherwise
+            
+        Raises:
+            The original error if reraise is True and error is critical
+        """
+        try:
+            error_context = self._create_error_context(
+                error=error,
+                error_type="data",
+                additional_info={
+                    **context,
+                    "conversation_id": conversation_id,
+                    "error_type": type(error).__name__
+                }
+            )
+            
+            # Log the error
+            self._log_error(error_context)
+            
+            # Determine if this is a critical error
+            is_critical = isinstance(error, (
+                InsufficientDataError,
+                DataValidationError,
+                ValueError
+            ))
+            
+            # Attempt recovery for critical errors
+            if is_critical:
+                try:
+                    # Reset data parameters to safe defaults
+                    self.config_manager.update("data_config.batch_size", 1)
+                    self.config_manager.update("data_config.max_retries", 3)
+                    
+                    self.logger.record_event(
+                        event_type="data_recovery",
+                        message="Recovered from critical data error",
+                        level="info",
+                        additional_info={
+                            "error_type": type(error).__name__,
+                            "context": context
+                        }
+                    )
+                except Exception as recovery_error:
+                    self._log_error(self._create_error_context(
+                        error=recovery_error,
+                        error_type="recovery",
+                        additional_info={"original_error": error_context.error_message}
+                    ))
+                    return False
+            
+            # Re-raise critical errors if requested
+            if is_critical and reraise:
+                raise error
+                
+            return True
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="error_handling_failed",
+                message=f"Failed to handle data error: {str(e)}",
+                level="critical",
+                additional_info={
+                    "original_error": str(error),
+                    "context": context,
+                    "conversation_id": conversation_id
+                }
+            )
+            return False
+
 class ErrorHandler:
     """Handles error logging, recovery, and monitoring for the SOVL system."""
 

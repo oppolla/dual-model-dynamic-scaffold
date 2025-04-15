@@ -10,6 +10,10 @@ from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import memory_usage, safe_divide
 import threading
+import psutil
+import logging
+from sovl_config import ConfigManager
+import gc
 
 class MemoryManager:
     """
@@ -894,7 +898,6 @@ class MemoryManager:
                 )
 
         try:
-            import psutil
             stats["cpu_available"] = psutil.virtual_memory().available / (1024 ** 3)
         except ImportError:
             pass
@@ -1004,3 +1007,135 @@ class MemoryManager:
         if not (min_val <= value <= max_val):
             raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
         return value
+
+class MemoryMonitor:
+    """Monitors memory usage using Python's built-in capabilities."""
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger
+    ):
+        """Initialize memory monitor with configuration."""
+        self.config_manager = config_manager
+        self.logger = logger
+        self._initialized = False
+        
+        # Initialize configuration
+        self._initialize_config()
+        
+        # Mark as initialized
+        self._initialized = True
+        
+    def _initialize_config(self) -> None:
+        """Initialize memory monitoring configuration."""
+        try:
+            # Get memory configuration
+            self.max_memory_mb = self.config_manager.get("memory_config.max_memory_mb", 1024)
+            self.memory_threshold = self.config_manager.get("memory_config.memory_threshold", 0.8)
+            self.check_interval = self.config_manager.get("memory_config.check_interval", 1000)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize memory configuration: {str(e)}")
+            raise
+            
+    def get_memory_usage(self) -> Dict[str, Any]:
+        """Get current memory usage statistics."""
+        try:
+            # Get Python's memory usage
+            gc.collect()  # Force garbage collection
+            allocated = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+            reserved = torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+            
+            # Convert to MB
+            allocated_mb = allocated / (1024 * 1024)
+            reserved_mb = reserved / (1024 * 1024)
+            
+            # Calculate percentage used
+            percentage_used = (allocated_mb / self.max_memory_mb) if self.max_memory_mb > 0 else 0
+            
+            return {
+                "allocated_mb": allocated_mb,
+                "reserved_mb": reserved_mb,
+                "percentage_used": percentage_used,
+                "max_memory_mb": self.max_memory_mb,
+                "available_mb": max(0, self.max_memory_mb - allocated_mb)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get memory usage: {str(e)}")
+            return {
+                "allocated_mb": 0,
+                "reserved_mb": 0,
+                "percentage_used": 0,
+                "max_memory_mb": self.max_memory_mb,
+                "available_mb": self.max_memory_mb
+            }
+            
+    def check_memory_usage(self, threshold: Optional[float] = None) -> bool:
+        """Check if memory usage is below threshold."""
+        try:
+            # Use provided threshold or default
+            threshold = threshold or self.memory_threshold
+            
+            # Get current memory usage
+            memory_stats = self.get_memory_usage()
+            percentage_used = memory_stats["percentage_used"]
+            
+            # Check if below threshold
+            is_below_threshold = percentage_used < threshold
+            
+            if not is_below_threshold:
+                self.logger.warning(
+                    "Memory usage above threshold",
+                    extra={
+                        "percentage_used": percentage_used,
+                        "threshold": threshold,
+                        "allocated_mb": memory_stats["allocated_mb"],
+                        "max_memory_mb": memory_stats["max_memory_mb"]
+                    }
+                )
+                
+            return is_below_threshold
+            
+        except Exception as e:
+            self.logger.error(f"Failed to check memory usage: {str(e)}")
+            return True  # Default to safe state
+            
+    def log_memory_usage(self) -> None:
+        """Log current memory usage statistics."""
+        try:
+            memory_stats = self.get_memory_usage()
+            self.logger.info(
+                "Memory usage statistics",
+                extra=memory_stats
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to log memory usage: {str(e)}")
+            
+    def is_memory_available(self, required_mb: float) -> bool:
+        """Check if required memory is available."""
+        try:
+            memory_stats = self.get_memory_usage()
+            available_mb = memory_stats["available_mb"]
+            
+            # Check if enough memory is available
+            is_available = available_mb >= required_mb
+            
+            if not is_available:
+                self.logger.warning(
+                    "Insufficient memory available",
+                    extra={
+                        "required_mb": required_mb,
+                        "available_mb": available_mb,
+                        "allocated_mb": memory_stats["allocated_mb"],
+                        "max_memory_mb": memory_stats["max_memory_mb"]
+                    }
+                )
+                
+            return is_available
+            
+        except Exception as e:
+            self.logger.error(f"Failed to check memory availability: {str(e)}")
+            return False  # Default to safe state

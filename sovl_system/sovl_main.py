@@ -563,7 +563,8 @@ class ErrorManager:
             "training": self._recover_training,
             "curiosity": self._recover_curiosity,
             "memory": self._recover_memory,
-            "generation": self._recover_generation
+            "generation": self._recover_generation,
+            "data": self._recover_data
         }
         
     def _is_duplicate_error(self, error: Exception, error_type: str) -> bool:
@@ -788,6 +789,59 @@ class ErrorManager:
                 }
             )
             
+    def handle_data_error(self, error: Exception, context: Dict[str, Any], conversation_id: str) -> None:
+        """Handle data-related errors with duplicate detection."""
+        try:
+            error_key = f"data:{type(error).__name__}"
+            
+            # Check for duplicate error
+            if self._is_duplicate_error(error, "data"):
+                self.logger.record_event(
+                    event_type="duplicate_data_error",
+                    message=f"Duplicate data error detected: {error_key}",
+                    level="warning",
+                    additional_info={
+                        "error": str(error),
+                        "context": context,
+                        "conversation_id": conversation_id
+                    }
+                )
+                return
+                
+            # Increment error count
+            self.error_counts[error_key] += 1
+            
+            # Log error
+            self.logger.record_event(
+                event_type="data_error",
+                message=f"Data error: {str(error)}",
+                level="error",
+                additional_info={
+                    "error_key": error_key,
+                    "error_count": self.error_counts[error_key],
+                    "context": context,
+                    "conversation_id": conversation_id
+                }
+            )
+            
+            # Determine severity and take action using safe_compare
+            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
+                self._recover_data(error_key)
+            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
+                self._adjust_data_parameters(context)
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="error_handling_failed",
+                message=f"Failed to handle data error: {str(e)}",
+                level="critical",
+                additional_info={
+                    "original_error": str(error),
+                    "context": context,
+                    "conversation_id": conversation_id
+                }
+            )
+
     def _recover_training(self, error_key: str) -> None:
         """Recover from critical training errors."""
         try:
@@ -969,6 +1023,56 @@ class ErrorManager:
                 level="error"
             )
             return "An error occurred. Please try again."
+
+    def _recover_data(self, error_key: str) -> None:
+        """Recover from critical data errors."""
+        try:
+            self.error_counts[error_key] = 0
+            
+            # Reset data parameters
+            self.context.config_manager.update("data_config.batch_size", 1)
+            self.context.config_manager.update("data_config.max_retries", 3)
+            
+            self.logger.record_event(
+                event_type="data_recovery",
+                message="Recovered from critical data error",
+                level="info",
+                additional_info={"error_key": error_key}
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="recovery_failed",
+                message=f"Failed to recover from data error: {str(e)}",
+                level="critical",
+                additional_info={"error_key": error_key}
+            )
+
+    def _adjust_data_parameters(self, context: Dict[str, Any]) -> None:
+        """Adjust data parameters for non-critical errors."""
+        try:
+            # Adjust data parameters
+            current_batch_size = self.context.config_manager.get("data_config.batch_size", 32)
+            new_batch_size = max(1, current_batch_size // 2)
+            self.context.config_manager.update("data_config.batch_size", new_batch_size)
+            
+            self.logger.record_event(
+                event_type="data_adjustment",
+                message="Adjusted data parameters",
+                level="info",
+                additional_info={
+                    "old_batch_size": current_batch_size,
+                    "new_batch_size": new_batch_size,
+                    "context": context
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="adjustment_failed",
+                message=f"Failed to adjust data parameters: {str(e)}",
+                level="error"
+            )
 
 class MemoryMonitor:
     """Monitors system memory health."""
@@ -1304,6 +1408,16 @@ class CuriosityEngine:
             if not self._validate_configuration():
                 raise RuntimeError("Invalid configuration state")
                 
+            # Validate DataManager state
+            if not hasattr(self.cycle_manager, 'data_manager'):
+                raise RuntimeError("DataManager not initialized in cycle manager")
+                
+            if not hasattr(self.cycle_manager.data_manager, 'provider'):
+                raise RuntimeError("DataManager provider not initialized")
+                
+            if not isinstance(self.cycle_manager.data_manager.provider, DataProvider):
+                raise RuntimeError(f"Invalid DataManager provider type: {type(self.cycle_manager.data_manager.provider)}")
+                
             # Get current state
             state = self.state_tracker.get_state()
             
@@ -1319,7 +1433,11 @@ class CuriosityEngine:
             self._log_event("training_complete", {
                 "epochs": epochs,
                 "batch_size": batch_size,
-                "results": results
+                "results": results,
+                "data_manager_state": {
+                    "provider_type": type(self.cycle_manager.data_manager.provider).__name__,
+                    "provider_initialized": hasattr(self.cycle_manager.data_manager.provider, '_initialized')
+                }
             })
             
         except Exception as e:
