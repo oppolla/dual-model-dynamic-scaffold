@@ -93,5 +93,14 @@
       "validate_architecture": true,
       "skip_training": true
     }
+  },
+  "dynamic_weighting": {
+    "min_weight": 0.0,
+    "max_weight": 1.0,
+    "weight_decay": 0.01,
+    "momentum": 0.9,
+    "history_size": 10,
+    "enable_dynamic_scaling": true,
+    "weight_curves": ["linear", "sigmoid_linear"]
   }
 }

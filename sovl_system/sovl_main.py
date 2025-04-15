@@ -797,15 +797,47 @@ class SOVLSystem:
     def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
         return self.memory_monitor.check_memory_health(model_size, trainer)
 
-    def set_scaffold_influence(self, weight: float):
-        self.last_weight = weight
-        self.context.logger.record({
-            "event": "scaffold_influence_updated",
-            "weight": weight,
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id,
-            "state_hash": self.state_tracker.state.get_state_hash()
-        })
+    def set_scaffold_influence(self, weight: float, curve: str = 'linear'):
+        """Set scaffold influence weight with dynamic adjustment.
+        
+        Args:
+            weight: Base weight value between 0 and 1
+            curve: Weight adjustment curve type ('linear' or 'sigmoid_linear')
+        """
+        try:
+            # Validate weight range
+            weight = max(0.0, min(1.0, weight))
+            
+            # Update scaffold influence in all components
+            if hasattr(self, 'generation_manager'):
+                self.generation_manager.set_scaffold_influence(weight, curve)
+                
+            if hasattr(self, 'training_manager'):
+                self.training_manager.set_scaffold_influence(weight, curve)
+                
+            if hasattr(self, 'scaffold_manager'):
+                self.scaffold_manager.set_scaffold_influence(weight, curve)
+                
+            # Log the update
+            self.context.logger.record({
+                "event": "scaffold_influence_updated",
+                "weight": weight,
+                "curve": curve,
+                "timestamp": time.time(),
+                "conversation_id": self.state_tracker.state.conversation_id,
+                "state_hash": self.state_tracker.state.get_state_hash()
+            })
+            
+        except Exception as e:
+            self.context.logger.record({
+                "error": f"Failed to set scaffold influence: {str(e)}",
+                "weight": weight,
+                "curve": curve,
+                "timestamp": time.time(),
+                "conversation_id": self.state_tracker.state.conversation_id,
+                "stack_trace": traceback.format_exc()
+            })
+            raise
 
     def get_scaffold_hidden_states(self, scaffold_inputs: Dict) -> torch.Tensor:
         """Get hidden states from scaffold model with optional toggle.

@@ -338,7 +338,7 @@ class LayerDiscoveryStrategy:
             raise
 
 class CrossAttentionLayer(nn.Module):
-    """Cross attention layer for scaffold integration."""
+    """Cross attention layer for scaffold integration with dynamic weighting."""
     
     def __init__(
         self,
@@ -348,16 +348,6 @@ class CrossAttentionLayer(nn.Module):
         num_heads: Optional[int] = None,
         device: str = 'cpu'
     ):
-        """
-        Initialize cross attention layer.
-        
-        Args:
-            config: Configuration dictionary
-            logger: Logger instance
-            hidden_size: Optional hidden size override
-            num_heads: Optional number of attention heads override
-            device: Device for tensor operations
-        """
         super().__init__()
         self.config = config
         self.logger = logger
@@ -370,6 +360,12 @@ class CrossAttentionLayer(nn.Module):
         self._init_weights()
         self.reset_cache()
         
+        # Dynamic weighting parameters
+        self.base_weight = nn.Parameter(torch.ones(1))
+        self.dynamic_scale = nn.Parameter(torch.ones(1))
+        self.momentum = 0.9
+        self.weight_history = []
+        
     def _load_config(self, hidden_size: Optional[int], num_heads: Optional[int]) -> None:
         """Load and validate configuration."""
         self.hidden_size = hidden_size or self.config.get('hidden_size', 768)
@@ -377,7 +373,11 @@ class CrossAttentionLayer(nn.Module):
         self.head_dim = self.hidden_size // self.num_heads
         self.scale = 1.0 / math.sqrt(self.head_dim)
         
-        # Validate configuration
+        # Dynamic weighting config
+        self.max_weight = self.config.get('max_weight', 1.0)
+        self.min_weight = self.config.get('min_weight', 0.0)
+        self.weight_decay = self.config.get('weight_decay', 0.01)
+        
         if self.hidden_size % self.num_heads != 0:
             raise ValueError(f"Hidden size {self.hidden_size} must be divisible by num_heads {self.num_heads}")
             
@@ -386,6 +386,8 @@ class CrossAttentionLayer(nn.Module):
             "hidden_size": self.hidden_size,
             "num_heads": self.num_heads,
             "head_dim": self.head_dim,
+            "max_weight": self.max_weight,
+            "min_weight": self.min_weight,
             "timestamp": time.time()
         })
         
@@ -397,9 +399,10 @@ class CrossAttentionLayer(nn.Module):
         self.out_proj = nn.Linear(self.hidden_size, self.hidden_size)
         
     def _init_gating(self) -> None:
-        """Initialize gating mechanism."""
+        """Initialize gating mechanism with dynamic scaling."""
         self.gate = nn.Parameter(torch.ones(1))
         self.gate_bias = nn.Parameter(torch.zeros(1))
+        self.gate_scale = nn.Parameter(torch.ones(1))
         
     def _init_normalization(self) -> None:
         """Initialize normalization layers."""
@@ -430,21 +433,36 @@ class CrossAttentionLayer(nn.Module):
         }
         
     def set_influence_weight(self, weight: float) -> None:
-        """Set influence weight for cross-attention."""
-        self.gate.data.fill_(weight)
+        """Set influence weight with dynamic scaling."""
+        weight = max(self.min_weight, min(self.max_weight, weight))
+        self.base_weight.data.fill_(weight)
+        self._update_dynamic_scale()
         
     def set_blend_strength(self, strength: float) -> None:
-        """Set blend strength for cross-attention."""
+        """Set blend strength with momentum."""
+        strength = max(0.0, min(1.0, strength))
         self.gate_bias.data.fill_(strength)
         
     def set_lifecycle_weight(self, weight: float, curve: str = 'sigmoid_linear') -> None:
-        """Set lifecycle-based weight adjustment."""
+        """Set lifecycle-based weight with dynamic adjustment."""
         if curve == 'sigmoid_linear':
-            self.gate.data.fill_(torch.sigmoid(torch.tensor(weight * 2 - 1)))
+            weight = torch.sigmoid(torch.tensor(weight * 2 - 1))
         elif curve == 'linear':
-            self.gate.data.fill_(weight)
+            weight = torch.tensor(weight)
         else:
             raise ValueError(f"Unknown curve type: {curve}")
+            
+        self.base_weight.data.fill_(weight)
+        self._update_dynamic_scale()
+        
+    def _update_dynamic_scale(self) -> None:
+        """Update dynamic scale based on weight history."""
+        if len(self.weight_history) > 0:
+            avg_weight = sum(self.weight_history) / len(self.weight_history)
+            self.dynamic_scale.data.fill_(1.0 + (self.base_weight.item() - avg_weight))
+        self.weight_history.append(self.base_weight.item())
+        if len(self.weight_history) > 10:  # Keep last 10 weights
+            self.weight_history.pop(0)
             
     def _compute_attention(
         self,
@@ -455,14 +473,14 @@ class CrossAttentionLayer(nn.Module):
         seq_len: int,
         batch_size: int
     ) -> torch.Tensor:
-        """Compute attention scores and apply mask."""
+        """Compute attention scores with dynamic weighting."""
         # Reshape for multi-head attention
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
-        # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+        # Compute attention scores with dynamic scaling
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (self.scale * self.dynamic_scale)
         
         # Apply attention mask if provided
         if attention_mask is not None:
@@ -475,12 +493,15 @@ class CrossAttentionLayer(nn.Module):
         # Apply softmax
         attn_weights = F.softmax(scores, dim=-1)
         
-        # Compute attention output
+        # Compute attention output with dynamic weighting
         attn_output = torch.matmul(attn_weights, v)
         
         # Reshape back to original dimensions
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
+        
+        # Apply gating with dynamic scaling
+        attn_output = attn_output * (self.gate * self.base_weight + self.gate_bias)
         
         return attn_output
         
@@ -519,7 +540,7 @@ class CrossAttentionLayer(nn.Module):
         attn_output = self.out_proj(attn_output)
         
         # Apply gating
-        attn_output = attn_output * self.gate + self.gate_bias
+        attn_output = attn_output * self.gate
         
         # Apply dynamic factor if provided
         if dynamic_factor is not None:
