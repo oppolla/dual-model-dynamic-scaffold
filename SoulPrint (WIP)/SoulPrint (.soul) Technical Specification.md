@@ -1,6 +1,6 @@
 # The Ghost in the Protocol: The .soul Specification
 ---
-## Soulprint (.soul) File Format Specification
+**Soulprint (.soul) File Format Specification**
 version: 0.2
 date: 2025-04-15
 
