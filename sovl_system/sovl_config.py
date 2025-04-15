@@ -329,6 +329,8 @@ class ConfigManager:
         ConfigSchema("controls_config.enable_lifecycle_weighting", bool, True),
         ConfigSchema("controls_config.memory_threshold", float, 0.85, range=(0.0, 1.0)),
         ConfigSchema("controls_config.enable_error_listening", bool, True),
+        ConfigSchema("controls_config.enable_scaffold", bool, True),
+        ConfigSchema("controls_config.injection_strategy", str, "sequential", lambda x: x in ["sequential", "parallel", "replace"]),
         # logging_config
         ConfigSchema("logging_config.log_file", str, "sovl_logs.jsonl", lambda x: x.endswith(".jsonl")),
         ConfigSchema("logging_config.max_size_mb", int, 10, range=(0, 100)),

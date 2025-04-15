@@ -808,15 +808,49 @@ class SOVLSystem:
         })
 
     def get_scaffold_hidden_states(self, scaffold_inputs: Dict) -> torch.Tensor:
+        """Get hidden states from scaffold model with optional toggle.
+        
+        Args:
+            scaffold_inputs: Dictionary containing input tensors for scaffold model
+            
+        Returns:
+            torch.Tensor: Hidden states from scaffold model or zeros if disabled
+        """
         try:
-            return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.context.device)
+            # Check if scaffold is enabled in config
+            if not self.config_manager.get("controls_config.enable_scaffold", True):
+                return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.context.device)
+            
+            # Use mixed precision if available
+            with torch.autocast(
+                device_type=self.context.device.type,
+                dtype=torch.float16 if self.context.device.type == 'cuda' else torch.bfloat16
+            ):
+                # Get scaffold outputs with hidden states
+                scaffold_outputs = self.scaffolds[0](
+                    **{k: v for k, v in scaffold_inputs.items() if k in ['input_ids', 'attention_mask']},
+                    output_hidden_states=True,
+                )
+                
+                # Extract last layer hidden states
+                hidden_states = (
+                    scaffold_outputs.hidden_states[-1]
+                    if hasattr(scaffold_outputs, 'hidden_states')
+                    else scaffold_outputs.base_model_output.hidden_states[-1]
+                )
+                
+                # Detach to prevent gradient flow
+                return hidden_states.detach()
+                
         except Exception as e:
             self.context.logger.record({
                 "error": f"Failed to get scaffold hidden states: {str(e)}",
                 "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id
+                "conversation_id": self.state_tracker.state.conversation_id,
+                "stack_trace": traceback.format_exc()
             })
-            raise
+            # Fallback to zeros on error
+            return torch.zeros_like(scaffold_inputs["input_ids"], dtype=torch.float, device=self.context.device)
 
     def cleanup(self):
         """Cleanup system resources."""
