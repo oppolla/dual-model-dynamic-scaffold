@@ -11,6 +11,7 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare
 import json
+import os
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -836,3 +837,152 @@ class SOVLState(StateBase):
                 if attempt == max_retries - 1:
                     raise StateError(f"State loading failed after {max_retries} attempts: {str(e)}")
                 time.sleep(0.1)
+
+class StateManager:
+    """Manages state initialization and persistence for the SOVL system."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
+        self.config_manager = config_manager
+        self.logger = logger
+        self.device = device
+        self.state = None
+        self.lock = Lock()
+        
+    def initialize_state(self) -> SOVLState:
+        """Initialize a new SOVLState instance with default values."""
+        try:
+            with self.lock:
+                # Load configuration values
+                dream_memory_maxlen = self.config_manager.get("controls_config.dream_memory_maxlen", 10)
+                temperament_history_maxlen = self.config_manager.get("controls_config.temperament_history_maxlen", 5)
+                confidence_history_maxlen = self.config_manager.get("controls_config.confidence_history_maxlen", 5)
+                hidden_size = self.config_manager.get("core_config.hidden_size", 768)
+                max_seen_prompts = self.config_manager.get("controls_config.max_seen_prompts", 1000)
+                quantization_mode = self.config_manager.get("core_config.quantization", "fp16")
+                sleep_max_steps = self.config_manager.get("training_config.sleep_max_steps", 100)
+                prompt_timeout = self.config_manager.get("controls_config.prompt_timeout", 86400.0)
+                temperament_decay_rate = self.config_manager.get("controls_config.temperament_decay_rate", 0.95)
+                scaffold_unk_id = self.config_manager.get("controls_config.scaffold_unk_id", 0)
+                lora_capacity = self.config_manager.get("training_config.lora_capacity", 0)
+                
+                # Create SOVLConfig
+                sovl_config = SOVLConfig(
+                    dream_memory_maxlen=dream_memory_maxlen,
+                    temperament_history_maxlen=temperament_history_maxlen,
+                    confidence_history_maxlen=confidence_history_maxlen,
+                    hidden_size=hidden_size,
+                    max_seen_prompts=max_seen_prompts,
+                    quantization_mode=quantization_mode,
+                    sleep_max_steps=sleep_max_steps,
+                    prompt_timeout=prompt_timeout,
+                    temperament_decay_rate=temperament_decay_rate,
+                    scaffold_unk_id=scaffold_unk_id,
+                    lora_capacity=lora_capacity
+                )
+                
+                # Initialize state
+                self.state = SOVLState(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    config=sovl_config
+                )
+                
+                self.logger.record({
+                    "event": "state_initialized",
+                    "timestamp": time.time(),
+                    "state_hash": self.state.get_state_hash()
+                })
+                
+                return self.state
+                
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to initialize state: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise StateError(f"State initialization failed: {str(e)}")
+            
+    def load_state(self, state_path: Optional[str] = None) -> SOVLState:
+        """Load state from file or initialize new state if not found."""
+        try:
+            with self.lock:
+                if state_path is None:
+                    state_path = self.config_manager.get("state_config.state_path", "sovl_state.json")
+                
+                if os.path.exists(state_path):
+                    with open(state_path, 'r') as f:
+                        state_data = json.load(f)
+                    
+                    # Initialize state if not already done
+                    if self.state is None:
+                        self.initialize_state()
+                    
+                    # Load state data
+                    self.state.from_dict(state_data, self.device)
+                    
+                    self.logger.record({
+                        "event": "state_loaded",
+                        "timestamp": time.time(),
+                        "state_path": state_path,
+                        "state_hash": self.state.get_state_hash()
+                    })
+                else:
+                    # Initialize new state if file doesn't exist
+                    self.state = self.initialize_state()
+                    
+                    self.logger.record({
+                        "event": "new_state_created",
+                        "timestamp": time.time(),
+                        "state_path": state_path,
+                        "state_hash": self.state.get_state_hash()
+                    })
+                
+                return self.state
+                
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to load state: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise StateError(f"State loading failed: {str(e)}")
+            
+    def save_state(self, state_path: Optional[str] = None) -> None:
+        """Save current state to file."""
+        try:
+            with self.lock:
+                if self.state is None:
+                    raise StateError("No state to save")
+                
+                if state_path is None:
+                    state_path = self.config_manager.get("state_config.state_path", "sovl_state.json")
+                
+                state_data = self.state.to_dict()
+                
+                # Create directory if it doesn't exist
+                os.makedirs(os.path.dirname(state_path), exist_ok=True)
+                
+                with open(state_path, 'w') as f:
+                    json.dump(state_data, f, indent=2)
+                
+                self.logger.record({
+                    "event": "state_saved",
+                    "timestamp": time.time(),
+                    "state_path": state_path,
+                    "state_hash": self.state.get_state_hash()
+                })
+                
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to save state: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            raise StateError(f"State saving failed: {str(e)}")
+            
+    def get_state(self) -> SOVLState:
+        """Get the current state instance."""
+        if self.state is None:
+            raise StateError("State not initialized")
+        return self.state

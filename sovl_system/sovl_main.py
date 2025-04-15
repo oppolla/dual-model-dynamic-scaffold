@@ -31,6 +31,7 @@ from sovl_manager import ModelManager
 from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
 from sovl_error import ErrorHandler
+from sovl_state_manager import StateManager
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Calculate confidence score for generated tokens."""
@@ -58,11 +59,9 @@ class SOVLSystem:
         # Load and validate training data
         self._load_training_data()
 
-        # Initialize state
-        self._initialize_state()
-
-        # Load saved state
-        self.load_state()
+        # Initialize state manager and load state
+        self.state_manager = StateManager(self.config_manager, self.logger, self.device)
+        self.state = self.state_manager.load_state()
 
         # Post-initialization setup
         self._post_initialize()
@@ -284,36 +283,6 @@ class SOVLSystem:
             })
             self.train_data = []
             self.valid_data = []
-
-    def _initialize_state(self) -> None:
-        """Initialize system state and related components."""
-        self.memory_lock = Lock()
-        self.mem_usage_history = deque(maxlen=10)
-        self.dynamic_threshold_base = self.controls_config.get("memory_threshold", 0.85)
-        self.history = ConversationHistory(maxlen=self.controls_config.get("conversation_history_maxlen", 10))
-        self.last_trained = 0
-        self.last_weight = 0.0
-
-        self.state = SOVLState(
-            config_manager=self.config_manager,
-            dream_memory_maxlen=self.controls_config.get("dream_memory_maxlen", 10),
-            confidence_history_maxlen=self.controls_config.get("confidence_history_maxlen", 5),
-            temperament_history_maxlen=self.controls_config.get("temperament_history_maxlen", 5),
-            conversation_history_maxlen=self.controls_config.get("conversation_history_maxlen", 10),
-            max_seen_prompts=self.controls_config.get("max_seen_prompts", 1000),
-            prompt_timeout=self.controls_config.get("prompt_timeout", 86400.0),
-            temperament_decay_rate=self.controls_config.get("temperament_decay_rate", 0.95),
-            curiosity=CuriosityState(self.config_manager, self.logger)
-        )
-        self.state.set_scaffold_unk_id(self.scaffold_unk_id)
-
-        # Update component dependencies
-        self.error_handler.state = self.state
-        self.trainer.state = self.state
-        self.generation_manager.state = self.state
-        if self.curiosity_manager:
-            self.curiosity_manager.state = self.state.curiosity
-        self.generation_manager.curiosity_manager = self.curiosity_manager
 
     def _post_initialize(self) -> None:
         """Perform post-initialization setup."""
@@ -712,7 +681,7 @@ class SOVLSystem:
     def load_state(self) -> None:
         """Load saved system state."""
         try:
-            # Implementation depends on state persistence mechanism
+            self.state = self.state_manager.load_state()
             self.logger.record({
                 "event": "state_loaded",
                 "timestamp": time.time(),
