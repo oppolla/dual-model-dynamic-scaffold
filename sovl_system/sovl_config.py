@@ -254,6 +254,19 @@ class ConfigManager:
         ConfigSchema("training_config.dry_run_params.max_length", int, 128, range=(64, 2048)),
         ConfigSchema("training_config.dry_run_params.validate_architecture", bool, True),
         ConfigSchema("training_config.dry_run_params.skip_training", bool, True),
+        # New training config fields
+        ConfigSchema("training_config.weight_decay", float, 0.01, range=(0.0, 0.1)),
+        ConfigSchema("training_config.total_steps", int, 1000, range=(100, 10000)),
+        ConfigSchema("training_config.max_grad_norm", float, 1.0, range=(0.1, 10.0)),
+        ConfigSchema("training_config.use_amp", bool, True),
+        ConfigSchema("training_config.checkpoint_interval", int, 1000, range=(100, 10000)),
+        ConfigSchema("training_config.scheduler_type", str, "linear", lambda x: x in ["linear", "cosine", "constant"]),
+        ConfigSchema("training_config.cosine_min_lr", float, 1e-6, range=(1e-7, 1e-3)),
+        ConfigSchema("training_config.warmup_ratio", float, 0.1, range=(0.0, 0.5)),
+        ConfigSchema("training_config.metrics_to_track", list, ["loss", "accuracy", "confidence"], lambda x: all(isinstance(i, str) for i in x)),
+        ConfigSchema("training_config.repetition_n", int, 3, range=(1, 10)),
+        ConfigSchema("training_config.checkpoint_path", str, "checkpoints/sovl_trainer"),
+        ConfigSchema("training_config.validate_every_n_steps", int, 100, range=(10, 1000)),
         # curiosity_config
         ConfigSchema("curiosity_config.queue_maxlen", int, 10, range=(1, 50)),
         ConfigSchema("curiosity_config.novelty_history_maxlen", int, 20, range=(5, 100)),
@@ -332,7 +345,9 @@ class ConfigManager:
         ConfigSchema("controls_config.enable_scaffold", bool, True),
         ConfigSchema("controls_config.injection_strategy", str, "sequential", lambda x: x in ["sequential", "parallel", "replace"]),
         # logging_config
-        ConfigSchema("logging_config.log_file", str, "sovl_logs.jsonl", lambda x: x.endswith(".jsonl")),
+        ConfigSchema("logging_config.log_dir", str, "logs"),
+        ConfigSchema("logging_config.log_file", str, "sovl_logs.jsonl"),
+        ConfigSchema("logging_config.debug_log_file", str, "sovl_debug.log"),
         ConfigSchema("logging_config.max_size_mb", int, 10, range=(0, 100)),
         ConfigSchema("logging_config.compress_old", bool, False),
         ConfigSchema("logging_config.max_in_memory_logs", int, 1000, range=(100, 10000)),
@@ -366,13 +381,15 @@ class ConfigManager:
             self.store.rebuild_structured(self.DEFAULT_SCHEMA)
             self.store.update_cache(self.DEFAULT_SCHEMA)
             self._last_config_hash = self._compute_config_hash()
-            self.logger.record({
-                "event": "config_load",
-                "config_file": self.config_file,
-                "config_hash": self._last_config_hash,
-                "timestamp": time.time(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_load",
+                message=f"Loaded config from {self.config_file}",
+                level="info",
+                additional_info={
+                    "config_file": self.config_file,
+                    "config_hash": self._last_config_hash
+                }
+            )
 
     def _compute_config_hash(self) -> str:
         """Compute a hash of the current config for change tracking."""
@@ -380,12 +397,15 @@ class ConfigManager:
             config_str = json.dumps(self.store.flat_config, sort_keys=True)
             return hashlib.sha256(config_str.encode()).hexdigest()[:16]
         except Exception as e:
-            self.logger.record({
-                "error": f"Config hash computation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message="Config hash computation failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             return ""
 
     def _validate_and_set_defaults(self):
@@ -395,26 +415,41 @@ class ConfigManager:
             is_valid, corrected_value = self.validator.validate(schema.field, value)
             if not is_valid:
                 self.store.set_value(schema.field, corrected_value)
+                self.logger.record_event(
+                    event_type="config_validation",
+                    message=f"Set default value for {schema.field}",
+                    level="warning",
+                    additional_info={
+                        "field": schema.field,
+                        "default_value": corrected_value
+                    }
+                )
 
     def freeze(self):
         """Prevent further updates to the configuration."""
         with self.lock:
             self._frozen = True
-            self.logger.record({
-                "event": "config_frozen",
-                "timestamp": time.time(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_frozen",
+                message="Configuration frozen",
+                level="info",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
 
     def unfreeze(self):
         """Allow updates to the configuration."""
         with self.lock:
             self._frozen = False
-            self.logger.record({
-                "event": "config_unfrozen",
-                "timestamp": time.time(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_unfrozen",
+                message="Configuration unfrozen",
+                level="info",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
 
     def get(self, key: str, default: Any = None) -> Any:
         """
@@ -430,11 +465,15 @@ class ConfigManager:
         with self.lock:
             value = self.store.get_value(key, default)
             if value == {} or value is None:
-                self.logger.record({
-                    "warning": f"Key '{key}' is empty or missing. Using default: {default}",
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
+                self.logger.record_event(
+                    event_type="config_warning",
+                    message=f"Key '{key}' is empty or missing. Using default: {default}",
+                    level="warning",
+                    additional_info={
+                        "key": key,
+                        "default_value": default
+                    }
+                )
                 return default
             return value
 
@@ -451,11 +490,14 @@ class ConfigManager:
         with self.lock:
             missing_keys = [key for key in required_keys if self.get(key, None) is None]
             if missing_keys:
-                self.logger.record({
-                    "error": f"Missing required configuration keys: {', '.join(missing_keys)}",
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
+                self.logger.record_event(
+                    event_type="config_error",
+                    message=f"Missing required configuration keys: {', '.join(missing_keys)}",
+                    level="error",
+                    additional_info={
+                        "keys": missing_keys
+                    }
+                )
                 raise ValueError(f"Missing required configuration keys: {', '.join(missing_keys)}")
 
     def get_section(self, section: str) -> Dict[str, Any]:
@@ -472,24 +514,16 @@ class ConfigManager:
             return self.store.get_section(section)
 
     def update(self, key: str, value: Any) -> bool:
-        """
-        Update a configuration value with validation.
-
-        Args:
-            key: Dot-separated configuration key
-            value: New value
-
-        Returns:
-            True if update succeeded, False otherwise
-        """
+        """Update a configuration value with validation."""
         try:
             with self.lock:
                 if self._frozen:
-                    self.logger.record({
-                        "error": f"Cannot update {key}: configuration is frozen",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message="Cannot update: configuration is frozen",
+                        level="error",
+                        additional_info={"key": key}
+                    )
                     return False
 
                 is_valid, corrected_value = self.validator.validate(key, value)
@@ -499,23 +533,29 @@ class ConfigManager:
                 old_hash = self._last_config_hash
                 self.store.set_value(key, value)
                 self._last_config_hash = self._compute_config_hash()
-                self.logger.record({
-                    "event": "config_update",
-                    "key": key,
-                    "value": value,
-                    "old_hash": old_hash,
-                    "new_hash": self._last_config_hash,
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
+                self.logger.record_event(
+                    event_type="config_update",
+                    message=f"Updated configuration key: {key}",
+                    level="info",
+                    additional_info={
+                        "key": key,
+                        "value": value,
+                        "old_hash": old_hash,
+                        "new_hash": self._last_config_hash
+                    }
+                )
                 return True
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to update config key {key}: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message=f"Failed to update config key {key}",
+                level="error",
+                additional_info={
+                    "key": key,
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             return False
 
     def update_batch(self, updates: Dict[str, Any], rollback_on_failure: bool = True) -> bool:
@@ -532,11 +572,12 @@ class ConfigManager:
         try:
             with self.lock:
                 if self._frozen:
-                    self.logger.record({
-                        "error": "Cannot update batch: configuration is frozen",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message="Cannot update batch: configuration is frozen",
+                        level="error",
+                        additional_info={}
+                    )
                     return False
 
                 original_config = self.store.flat_config.copy()
@@ -547,21 +588,26 @@ class ConfigManager:
                             self.store.rebuild_structured(self.DEFAULT_SCHEMA)
                             self.store.update_cache(self.DEFAULT_SCHEMA)
                             self._last_config_hash = self._compute_config_hash()
-                            self.logger.record({
-                                "event": "config_rollback",
-                                "reason": f"Failed to update {key}",
-                                "timestamp": time.time(),
-                                "conversation_id": "init"
-                            })
+                            self.logger.record_event(
+                                event_type="config_rollback",
+                                message=f"Failed to update {key}",
+                                level="warning",
+                                additional_info={
+                                    "key": key
+                                }
+                            )
                         return False
                 return True
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to update batch config: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message="Failed to update batch config",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             if rollback_on_failure:
                 self.store.flat_config = original_config
                 self.store.rebuild_structured(self.DEFAULT_SCHEMA)
@@ -605,20 +651,26 @@ class ConfigManager:
                 for key in old_config:
                     if key not in self.store.flat_config:
                         diff[key] = {"old": old_config[key], "new": None}
-                self.logger.record({
-                    "event": "config_diff",
-                    "changed_keys": list(diff.keys()),
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
+                self.logger.record_event(
+                    event_type="config_diff",
+                    message="Configuration differences",
+                    level="info",
+                    additional_info={
+                        "changed_keys": list(diff.keys()),
+                        "differences": diff
+                    }
+                )
                 return diff
         except Exception as e:
-            self.logger.record({
-                "error": f"Config diff failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message="Config diff failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             return {}
 
     def register_schema(self, schemas: List[ConfigSchema]):
@@ -631,31 +683,37 @@ class ConfigManager:
         try:
             with self.lock:
                 if self._frozen:
-                    self.logger.record({
-                        "error": "Cannot register schema: configuration is frozen",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message="Cannot register schema: configuration is frozen",
+                        level="error",
+                        additional_info={}
+                    )
                     return
                 self.validator.register(schemas)
                 self._validate_and_set_defaults()
                 self.store.rebuild_structured(self.DEFAULT_SCHEMA + schemas)
                 self.store.update_cache(self.DEFAULT_SCHEMA + schemas)
                 self._last_config_hash = self._compute_config_hash()
-                self.logger.record({
-                    "event": "schema_registered",
-                    "new_fields": [s.field for s in schemas],
-                    "config_hash": self._last_config_hash,
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
+                self.logger.record_event(
+                    event_type="schema_registered",
+                    message=f"New fields registered: {', '.join([s.field for s in schemas])}",
+                    level="info",
+                    additional_info={
+                        "new_fields": [s.field for s in schemas],
+                        "config_hash": self._last_config_hash
+                    }
+                )
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to register schema: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message="Failed to register schema",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
 
     def get_state(self) -> Dict[str, Any]:
         """
@@ -688,20 +746,25 @@ class ConfigManager:
                 self.store.rebuild_structured(self.DEFAULT_SCHEMA)
                 self.store.update_cache(self.DEFAULT_SCHEMA)
                 self._last_config_hash = self._compute_config_hash()
-                self.logger.record({
-                    "event": "config_load_state",
-                    "config_file": self.config_file,
-                    "config_hash": self._last_config_hash,
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
+                self.logger.record_event(
+                    event_type="config_load_state",
+                    message="Configuration state loaded",
+                    level="info",
+                    additional_info={
+                        "config_file": self.config_file,
+                        "config_hash": self._last_config_hash
+                    }
+                )
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to load config state: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message="Failed to load config state",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
     def tune(self, **kwargs) -> bool:
@@ -731,33 +794,41 @@ class ConfigManager:
             with self.lock:
                 config = self.file_handler.load()
                 if not config:
-                    self.logger.record({
-                        "error": f"Profile file {profile_file} not found",
-                        "timestamp": time.time(),
-                        "conversation_id": "init"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Profile file {profile_file} not found",
+                        level="error",
+                        additional_info={
+                            "profile_file": profile_file
+                        }
+                    )
                     return False
                 self.store.flat_config = config
                 self._validate_and_set_defaults()
                 self.store.rebuild_structured(self.DEFAULT_SCHEMA)
                 self.store.update_cache(self.DEFAULT_SCHEMA)
                 self._last_config_hash = self._compute_config_hash()
-                self.logger.record({
-                    "event": "profile_load",
-                    "profile": profile,
-                    "config_file": profile_file,
-                    "config_hash": self._last_config_hash,
-                    "timestamp": time.time(),
-                    "conversation_id": "init"
-                })
+                self.logger.record_event(
+                    event_type="profile_load",
+                    message=f"Profile {profile} loaded",
+                    level="info",
+                    additional_info={
+                        "profile": profile,
+                        "config_file": profile_file,
+                        "config_hash": self._last_config_hash
+                    }
+                )
                 return True
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to load profile {profile}: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "init"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message=f"Failed to load profile {profile}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             return False
 
     def set_global_blend(self, weight_cap: Optional[float] = None, base_temp: Optional[float] = None) -> bool:
@@ -799,31 +870,42 @@ class ConfigManager:
             with self.lock:
                 # Check if section exists
                 if section not in self.store.structured_config:
-                    self.logger.record({
-                        "error": f"Configuration section '{section}' not found",
-                        "timestamp": time.time(),
-                        "conversation_id": "validate"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Configuration section '{section}' not found",
+                        level="error",
+                        additional_info={
+                            "section": section
+                        }
+                    )
                     return False
 
                 # Check for required keys
                 missing_keys = [key for key in required_keys if key not in self.store.structured_config[section]]
                 if missing_keys:
-                    self.logger.record({
-                        "error": f"Missing required keys in section '{section}': {', '.join(missing_keys)}",
-                        "timestamp": time.time(),
-                        "conversation_id": "validate"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Missing required keys in section '{section}': {', '.join(missing_keys)}",
+                        level="error",
+                        additional_info={
+                            "section": section,
+                            "missing_keys": missing_keys
+                        }
+                    )
                     return False
 
                 return True
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to validate section '{section}': {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "validate"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message=f"Failed to validate section '{section}'",
+                level="error",
+                additional_info={
+                    "section": section,
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             return False
 
     def tune_parameter(self, section: str, key: str, value: Any, min_value: Any = None, max_value: Any = None) -> bool:
@@ -844,37 +926,59 @@ class ConfigManager:
             with self.lock:
                 # Validate value range if min/max provided
                 if min_value is not None and value < min_value:
-                    self.logger.record({
-                        "error": f"Value {value} below minimum {min_value} for {section}.{key}",
-                        "timestamp": time.time(),
-                        "conversation_id": "tune"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Value {value} below minimum {min_value} for {section}.{key}",
+                        level="error",
+                        additional_info={
+                            "section": section,
+                            "key": key,
+                            "value": value,
+                            "min_value": min_value
+                        }
+                    )
                     return False
                     
                 if max_value is not None and value > max_value:
-                    self.logger.record({
-                        "error": f"Value {value} above maximum {max_value} for {section}.{key}",
-                        "timestamp": time.time(),
-                        "conversation_id": "tune"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Value {value} above maximum {max_value} for {section}.{key}",
+                        level="error",
+                        additional_info={
+                            "section": section,
+                            "key": key,
+                            "value": value,
+                            "max_value": max_value
+                        }
+                    )
                     return False
 
                 # Update the parameter
                 success = self.update(section, key, value)
                 if success:
-                    self.logger.record({
-                        "info": f"Tuned {section}.{key} to {value}",
-                        "timestamp": time.time(),
-                        "conversation_id": "tune"
-                    })
+                    self.logger.record_event(
+                        event_type="config_info",
+                        message=f"Tuned {section}.{key} to {value}",
+                        level="info",
+                        additional_info={
+                            "section": section,
+                            "key": key,
+                            "value": value
+                        }
+                    )
                 return success
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to tune {section}.{key}: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "tune"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message=f"Failed to tune {section}.{key}",
+                level="error",
+                additional_info={
+                    "section": section,
+                    "key": key,
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             return False
 
     def update_section(self, section: str, updates: Dict[str, Any]) -> bool:
@@ -892,47 +996,50 @@ class ConfigManager:
             with self.lock:
                 # Check if section exists
                 if section not in self.store.structured_config:
-                    self.logger.record({
-                        "error": f"Configuration section '{section}' not found",
-                        "timestamp": time.time(),
-                        "conversation_id": "update"
-                    })
+                    self.logger.record_event(
+                        event_type="config_error",
+                        message=f"Configuration section '{section}' not found",
+                        level="error",
+                        additional_info={
+                            "section": section
+                        }
+                    )
                     return False
 
                 # Update values
                 for key, value in updates.items():
                     if key in self.store.structured_config[section]:
                         self.store.structured_config[section][key] = value
-                        self.logger.record({
-                            "action": f"Updated {section}.{key}",
-                            "new_value": str(value),
-                            "timestamp": time.time(),
-                            "conversation_id": "update"
-                        })
+                        self.logger.record_event(
+                            event_type="config_update",
+                            message=f"Updated {section}.{key}",
+                            level="info",
+                            additional_info={
+                                "section": section,
+                                "key": key,
+                                "value": str(value)
+                            }
+                        )
 
                 # Save changes
                 self.save_config()
                 return True
 
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to update section '{section}': {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "update"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message=f"Failed to update section '{section}'",
+                level="error",
+                additional_info={
+                    "section": section,
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             return False
 
     def validate_or_raise(self, model_config: Optional[Any] = None) -> None:
-        """
-        Validate the entire configuration and raise a ValueError with detailed error messages if validation fails.
-        
-        Args:
-            model_config: Optional model configuration for layer validation
-            
-        Raises:
-            ValueError: If configuration validation fails, with detailed error messages
-        """
+        """Validate the entire configuration and raise a ValueError with detailed error messages if validation fails."""
         try:
             # Validate required keys
             self.validate_keys([
@@ -976,21 +1083,25 @@ class ConfigManager:
                         raise ValueError(f"Failed to validate custom layers: {str(e)}")
 
             # Log successful validation
-            self.logger.record({
-                "event": "config_validation",
-                "status": "success",
-                "timestamp": time.time(),
-                "conversation_id": "validate",
-                "config_snapshot": self.get_state()["config"]
-            })
+            self.logger.record_event(
+                event_type="config_validation",
+                message="Configuration validation successful",
+                level="info",
+                additional_info={
+                    "config_snapshot": self.get_state()["config"]
+                }
+            )
 
         except Exception as e:
-            self.logger.record({
-                "error": f"Configuration validation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "validate"
-            })
+            self.logger.record_event(
+                event_type="config_error",
+                message="Configuration validation failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise ValueError(f"Configuration validation failed: {str(e)}")
 
 if __name__ == "__main__":

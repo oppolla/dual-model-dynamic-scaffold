@@ -1,8 +1,8 @@
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from peft import LoraConfig, get_peft_model, TaskType
 import time
 import random
@@ -36,6 +36,7 @@ from sovl_logging import LoggingManager
 import logging
 from sovl_training_cycle import TrainingCycleManager
 from sovl_plugin import PluginManager
+import sys
 
 # Remove sovl_conductor import and use TYPE_CHECKING for type hints
 from typing import TYPE_CHECKING
@@ -53,40 +54,73 @@ def calculate_confidence_score(logits, generated_ids) -> float:
 
 class SystemContext:
     """Holds shared resources like logger, device, and config manager."""
+    
     def __init__(self, config_path: str):
         """
         Initialize system context with configuration and core components.
-
+        
+        Initialization order:
+        1. Initialize device
+        2. Create temporary logger for ConfigManager initialization
+        3. Initialize ConfigManager with temporary logger
+        4. Initialize LoggingManager with ConfigManager
+        5. Update ConfigManager's logger with LoggingManager's logger
+        6. Initialize remaining components
+        
         Args:
             config_path: Path to the configuration file
+            
+        Raises:
+            SystemInitializationError: If any critical component fails to initialize
         """
         # Initialize device first
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         try:
-            # Initialize ConfigManager first
-            self.config_manager = ConfigManager(config_path)
+            # Create temporary logger with basic configuration
+            temp_logger = Logger(LoggerConfig(
+                log_file="sovl_init.log",
+                max_size_mb=1,
+                compress_old=False,
+                max_in_memory_logs=100
+            ))
             
-            # Initialize LoggingManager with ConfigManager
+            # Initialize ConfigManager with temporary logger
+            self.config_manager = ConfigManager(config_path, temp_logger)
+            
+            # Get logging configuration from ConfigManager
+            log_dir = self.config_manager.get("logging_config.log_dir", "logs")
+            system_log_file = self.config_manager.get("logging_config.log_file", "sovl_logs.jsonl")
+            debug_log_file = self.config_manager.get("logging_config.debug_log_file", "sovl_debug.log")
+            
+            # Initialize LoggingManager with ConfigManager and aligned configuration
             self.logging_manager = LoggingManager(
                 config_manager=self.config_manager,
-                log_dir="logs",
-                system_log_file="sovl_system.log",
-                debug_log_file="sovl_debug.log"
+                log_dir=log_dir,
+                system_log_file=system_log_file,
+                debug_log_file=debug_log_file
             )
             
             # Get both system and debug logger instances
             self.logger = self.logging_manager.get_logger("system")
             self.debug_logger = self.logging_manager.get_logger("debug")
             
-            # Log initialization
+            # Update ConfigManager's logger with the proper logger
+            self.config_manager.logger = self.logger
+            
+            # Log successful initialization
             self.logger.record_event(
                 event_type="system_initialization",
-                message="System context initialized",
+                message="System context initialized successfully",
                 level="info",
                 additional_info={
                     "device": str(self.device),
-                    "config_path": config_path
+                    "config_path": config_path,
+                    "cuda_available": torch.cuda.is_available(),
+                    "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+                    "log_dir": log_dir,
+                    "system_log_file": system_log_file,
+                    "debug_log_file": debug_log_file
                 }
             )
             
@@ -99,14 +133,50 @@ class SystemContext:
                     "device": str(self.device),
                     "config_path": config_path,
                     "cuda_available": torch.cuda.is_available(),
-                    "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0
+                    "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+                    "config_hash": self.config_manager._last_config_hash,
+                    "log_dir": log_dir,
+                    "system_log_file": system_log_file,
+                    "debug_log_file": debug_log_file
                 }
             )
             
         except Exception as e:
-            # If logging isn't available, print error
-            print(f"Failed to initialize system context: {str(e)}")
-            raise
+            # Log initialization failure to both temporary and stderr
+            error_msg = f"Failed to initialize system context: {str(e)}"
+            stack_trace = traceback.format_exc()
+            
+            # Try to log to temporary logger if it exists
+            if 'temp_logger' in locals():
+                temp_logger.record_event(
+                    event_type="system_initialization_error",
+                    message=error_msg,
+                    level="error",
+                    additional_info={
+                        "stack_trace": stack_trace,
+                        "config_path": config_path
+                    }
+                )
+            
+            # Always print to stderr
+            print(f"CRITICAL: {error_msg}", file=sys.stderr)
+            print(f"Stack trace:\n{stack_trace}", file=sys.stderr)
+            
+            # Raise a custom exception with full context
+            raise SystemInitializationError(
+                message=error_msg,
+                config_path=config_path,
+                stack_trace=stack_trace
+            ) from e
+
+class SystemInitializationError(Exception):
+    """Custom exception for system initialization failures."""
+    
+    def __init__(self, message: str, config_path: str, stack_trace: str):
+        self.message = message
+        self.config_path = config_path
+        self.stack_trace = stack_trace
+        super().__init__(f"{message}\nConfig path: {config_path}\nStack trace:\n{stack_trace}")
 
 class ConfigHandler:
     """Manages configuration validation and access."""
@@ -120,37 +190,117 @@ class ConfigHandler:
         self.lora_config = context.config_manager.get_section("lora_config")
 
     def validate(self, model_config: Any = None) -> bool:
+        """
+        Validate the configuration, propagating any validation errors.
+        
+        Args:
+            model_config: Optional model configuration for layer validation
+            
+        Returns:
+            bool: True if validation succeeds
+            
+        Raises:
+            ValueError: If configuration validation fails
+        """
         try:
+            # First validate basic configuration without model context
+            self.context.config_manager.validate_or_raise(None)
+            return True
+        except ValueError as e:
+            # Log the error and re-raise to prevent silent failures
+            self.context.logger.record_event(
+                event_type="config_validation_error",
+                message="Configuration validation failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+
+    def validate_with_model(self, model_config: Any) -> bool:
+        """
+        Validate configuration with model-specific checks.
+        
+        Args:
+            model_config: Model configuration for layer validation
+            
+        Returns:
+            bool: True if validation succeeds
+            
+        Raises:
+            ValueError: If configuration validation fails
+        """
+        try:
+            # Validate with model context for layer-specific checks
             self.context.config_manager.validate_or_raise(model_config)
             return True
         except ValueError as e:
-            self.context.logger.record({
-                "error": str(e),
-                "timestamp": time.time(),
-                "conversation_id": "validate"
-            })
-            return False
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Unexpected error during config validation: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": "validate"
-            })
-            return False
+            # Log the error and re-raise to prevent silent failures
+            self.context.logger.record_event(
+                event_type="config_validation_error",
+                message="Model-specific configuration validation failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
 
 class ModelLoader:
-    """Loads and manages models, tokenizers, and scaffold integration."""
+    """Loads and manages models, tokenizers, and scaffold integration.
+    
+    Currently supports a single scaffold model, but designed to be extensible for multiple scaffolds.
+    The scaffolds list is maintained for future multi-scaffold support.
+    """
     def __init__(self, context: SystemContext, config_handler: ConfigHandler):
         self.context = context
         self.config_handler = config_handler
+        
+        # First validate basic configuration
+        self.config_handler.validate()
+        
+        # Initialize model manager and load base model
         self.model_manager = ModelManager(
             config_manager=context.config_manager,
             logger=context.logger,
             device=context.device
         )
+        
+        # Load base model and move to device
         self.base_model = self.model_manager.get_base_model()
-        self.scaffolds = [self.model_manager.get_scaffold_model()]
+        self.base_model = self.base_model.to(self.context.device)
+        
+        # Now validate with model context
+        base_config = AutoConfig.from_pretrained(
+            self.config_handler.core_config.get("base_model_name", "gpt2")
+        )
+        self.config_handler.validate_with_model(base_config)
+        
+        # Initialize scaffold models
+        # Currently only supports a single scaffold, but structured for future multi-scaffold support
+        self.scaffolds = []
+        self.active_scaffold_index = 0  # Track the currently active scaffold
+        
+        # Load and initialize the primary scaffold
+        primary_scaffold = self.model_manager.get_scaffold_model()
+        primary_scaffold = primary_scaffold.to(self.context.device)
+        self.scaffolds.append(primary_scaffold)
+        
+        # Log scaffold initialization
+        self.context.logger.record_event(
+            event_type="scaffold_initialized",
+            message="Primary scaffold model initialized",
+            level="info",
+            additional_info={
+                "scaffold_count": len(self.scaffolds),
+                "active_scaffold_index": self.active_scaffold_index,
+                "scaffold_device": next(primary_scaffold.parameters()).device
+            }
+        )
+        
         self.base_tokenizer = self.model_manager.get_base_tokenizer()
         self.scaffold_tokenizer = self.model_manager.get_scaffold_tokenizer()
         self.scaffold_unk_id = self.model_manager.get_scaffold_unk_id()
@@ -170,34 +320,125 @@ class ModelLoader:
             logger=context.logger
         )
         
-        # Log successful initialization
-        self.context.logger.record({
-            "event": "model_loader_initialized",
-            "base_vocab_size": len(self.base_tokenizer),
-            "scaffold_vocab_size": len(self.scaffold_tokenizer),
-            "token_map_size": len(self.scaffold_token_mapper.token_map),
-            "timestamp": time.time()
-        })
+        # Log successful initialization with device information
+        self.context.logger.record_event(
+            event_type="model_loader_initialized",
+            message="Model loader initialized successfully",
+            level="info",
+            additional_info={
+                "base_vocab_size": len(self.base_tokenizer),
+                "scaffold_vocab_size": len(self.scaffold_tokenizer),
+                "token_map_size": len(self.scaffold_token_mapper.token_map),
+                "base_model_device": next(self.base_model.parameters()).device,
+                "scaffold_model_device": next(self.scaffolds[self.active_scaffold_index].parameters()).device,
+                "target_device": str(self.context.device),
+                "scaffold_count": len(self.scaffolds)
+            }
+        )
+
+    def get_active_scaffold(self) -> torch.nn.Module:
+        """Get the currently active scaffold model.
+        
+        Returns:
+            torch.nn.Module: The active scaffold model
+            
+        Raises:
+            ValueError: If no scaffold models are available
+        """
+        if not self.scaffolds:
+            raise ValueError("No scaffold models available")
+        return self.scaffolds[self.active_scaffold_index]
 
     def inject_cross_attention(self):
         """Inject cross-attention layers into the base model."""
         try:
+            # Check if cross-attention is enabled
+            if not self.config_handler.controls_config.get("enable_cross_attention", True):
+                self.context.logger.record_event(
+                    event_type="cross_attention_skipped",
+                    message="Cross-attention injection disabled in controls_config",
+                    level="info",
+                    additional_info={
+                        "enable_cross_attention": False,
+                        "enable_dynamic_cross_attention": self.config_handler.controls_config.get("enable_dynamic_cross_attention", False)
+                    }
+                )
+                return
+
             # Validate scaffold token mapper
             if not self.scaffold_token_mapper:
                 raise ValueError("ScaffoldTokenMapper not initialized")
                 
-            # Get token map for injection
+            # Get and validate token map
             token_map = self.scaffold_token_mapper.get_token_map()
             if not token_map:
-                self.context.logger.log_error(
-                    error_msg="Empty token map from ScaffoldTokenMapper",
-                    error_type="validation_error",
+                self.context.logger.record_event(
+                    event_type="validation_error",
+                    message="Empty token map from ScaffoldTokenMapper",
+                    level="error",
                     additional_info={
                         "base_vocab_size": len(self.base_tokenizer),
                         "scaffold_vocab_size": len(self.scaffold_tokenizer)
                     }
                 )
                 raise ValueError("Empty token map from ScaffoldTokenMapper")
+
+            # Validate token map contents
+            if not all(isinstance(k, int) and isinstance(v, int) for k, v in token_map.items()):
+                self.context.logger.record_event(
+                    event_type="validation_error",
+                    message="Invalid token map: must contain integer key-value pairs",
+                    level="error",
+                    additional_info={
+                        "map_size": len(token_map),
+                        "invalid_entries": [
+                            (k, v) for k, v in token_map.items() 
+                            if not (isinstance(k, int) and isinstance(v, int))
+                        ]
+                    }
+                )
+                raise ValueError("Invalid token map: must contain integer key-value pairs")
+
+            # Validate special tokens in map
+            special_tokens = {
+                "pad_token": self.base_tokenizer.pad_token_id,
+                "bos_token": self.base_tokenizer.bos_token_id,
+                "eos_token": self.base_tokenizer.eos_token_id,
+                "unk_token": self.base_tokenizer.unk_token_id
+            }
+            missing_tokens = {
+                name: token_id for name, token_id in special_tokens.items()
+                if token_id is not None and token_id not in token_map
+            }
+            if missing_tokens:
+                self.context.logger.record_event(
+                    event_type="validation_error",
+                    message="Token map missing required special tokens",
+                    level="error",
+                    additional_info={
+                        "missing_tokens": missing_tokens,
+                        "map_size": len(token_map)
+                    }
+                )
+                raise ValueError(f"Token map missing required special tokens: {missing_tokens}")
+
+            # Ensure models are on the correct device
+            self.base_model = self.base_model.to(self.context.device)
+            active_scaffold = self.get_active_scaffold()
+            active_scaffold = active_scaffold.to(self.context.device)
+            
+            # Log device information
+            self.context.logger.record_event(
+                event_type="device_check",
+                message="Models moved to target device",
+                level="info",
+                additional_info={
+                    "base_model_device": next(self.base_model.parameters()).device,
+                    "scaffold_model_device": next(active_scaffold.parameters()).device,
+                    "target_device": str(self.context.device),
+                    "active_scaffold_index": self.active_scaffold_index
+                }
+            )
             
             # Create and configure injector
             injector = CrossAttentionInjector(
@@ -208,26 +449,41 @@ class ModelLoader:
             # Perform injection
             injector.inject_cross_attention(
                 model=self.base_model,
-                scaffold_model=self.scaffolds[0],
+                scaffold_model=active_scaffold,
                 core_config=self.config_handler.core_config,
                 cross_attn_config=self.config_handler.cross_attn_config,
                 lora_config=self.config_handler.lora_config,
-                token_map=token_map,  # Pass the actual token map
+                token_map=token_map,
                 device=self.context.device
             )
             
             # Log successful injection
-            self.context.logger.record({
-                "event": "cross_attention_injected",
-                "token_map_size": len(token_map),
-                "timestamp": time.time()
-            })
+            self.context.logger.record_event(
+                event_type="cross_attention_injected",
+                message="Cross-attention layers injected successfully",
+                level="info",
+                additional_info={
+                    "token_map_size": len(token_map),
+                    "base_vocab_size": len(self.base_tokenizer),
+                    "scaffold_vocab_size": len(self.scaffold_tokenizer),
+                    "device": str(self.context.device),
+                    "dynamic_enabled": self.config_handler.controls_config.get("enable_dynamic_cross_attention", False),
+                    "dynamic_enabled": self.config_handler.controls_config.get("enable_dynamic_cross_attention", False)
+                }
+            )
             
         except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Cross-attention injection failed: {str(e)}",
-                error_type="injection_error",
-                stack_trace=traceback.format_exc()
+            self.context.logger.record_event(
+                event_type="injection_error",
+                message="Cross-attention injection failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc(),
+                    "base_model_device": next(self.base_model.parameters()).device if hasattr(self, 'base_model') else None,
+                    "scaffold_model_device": next(self.scaffolds[0].parameters()).device if hasattr(self, 'scaffolds') and self.scaffolds else None,
+                    "target_device": str(self.context.device)
+                }
             )
             raise
 
@@ -236,53 +492,35 @@ class StateTracker:
     def __init__(self, context: SystemContext, config_handler: ConfigHandler):
         self.context = context
         self.state_manager = StateManager(
-            config_manager=config_handler.config_manager,
+            config_manager=context.config_manager,
             logger=context.logger,
             device=context.device
         )
-        self.state = self.state_manager.load_state()
-
-    def update_conversation(self, prompt: str, response: str):
-        self.state.conversation_history.append({"prompt": prompt, "response": response})
-
-    def update_data_exposure(self, data_exposure: float):
-        self.state.update_data_exposure(data_exposure)
-
-    def update_gestation_metrics(self, batch_size: int, avg_loss: float):
-        self.state.update_gestation_metrics(batch_size, avg_loss)
-
-    def update_dream_metrics(self, dream_prompt: str, is_novel: bool, memory_count: int):
-        self.state.update_dream_metrics(dream_prompt, is_novel, memory_count)
-
-    def update_sleep_metrics(self, batch_size: int, data_exposure: float):
-        self.state.update_sleep_metrics(batch_size, data_exposure)
-
-    def update_curiosity_metrics(self, question: str, score: float, spontaneous: bool, answered: bool):
-        if self.state.curiosity:
-            self.state.curiosity.update_metrics(
-                question=question,
-                score=score,
-                spontaneous=spontaneous,
-                answered=answered,
-                conversation_id=self.state.conversation_id,
-                state_hash=self.state.get_state_hash()
-            )
+        self.state = None  # Initialize state as None, will be loaded when needed
 
     def load_state(self):
+        """Load the current state from the state manager."""
         try:
             self.state = self.state_manager.load_state()
-            self.context.logger.record({
-                "event": "state_loaded",
-                "timestamp": time.time(),
-                "conversation_id": self.state.conversation_id,
-                "state_hash": self.state.get_state_hash()
-            })
+            self.context.logger.record_event(
+                event_type="state_loaded",
+                message="State loaded successfully",
+                level="info",
+                additional_info={
+                    "conversation_id": self.state.history.conversation_id,
+                    "state_hash": self.state.get_state_hash()
+                }
+            )
         except Exception as e:
-            self.context.logger.record({
-                "error": f"State loading failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state.conversation_id
-            })
+            self.context.logger.record_event(
+                event_type="state_error",
+                message="Failed to load state",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
 class ErrorManager:
@@ -381,17 +619,36 @@ class TemperamentAdjuster:
         })
 
     def update_temperament(self, curiosity_manager: Optional[CuriosityManager] = None):
+        """Update temperament based on current state and optional curiosity manager."""
         try:
-            self.temperament_system.update_from_state(
-                state=self.state_tracker.state,
-                curiosity_manager=curiosity_manager
-            )
+            if curiosity_manager is None:
+                self.context.logger.record_event(
+                    event_type="temperament_update_skipped",
+                    message="No curiosity manager provided, updating temperament without curiosity influence",
+                    level="warning",
+                    additional_info={
+                        "conversation_id": self.state_tracker.state.conversation_id,
+                        "state_hash": self.state_tracker.state.get_state_hash()
+                    }
+                )
+                # Update temperament without curiosity influence
+                self.temperament_system.update_from_state(
+                    state=self.state_tracker.state,
+                    curiosity_manager=None
+                )
+            else:
+                # Update with curiosity influence
+                self.temperament_system.update_from_state(
+                    state=self.state_tracker.state,
+                    curiosity_manager=curiosity_manager
+                )
         except Exception as e:
             self.context.logger.record({
                 "error": f"Failed to update temperament: {str(e)}",
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state_tracker.state.conversation_id
+                "conversation_id": self.state_tracker.state.conversation_id,
+                "has_curiosity_manager": curiosity_manager is not None
             })
             raise
 
@@ -403,24 +660,55 @@ class CuriosityEngine:
         self.model_loader = model_loader
         self.state_tracker = state_tracker
         self.error_manager = error_manager
-        self.curiosity_manager = (
-            CuriosityManager(
+        
+        # Check if curiosity is enabled
+        self.enable_curiosity = self.context.config_manager.get("curiosity_config.enable_curiosity", True)
+        
+        # Initialize curiosity manager if enabled
+        if self.enable_curiosity:
+            self.curiosity_manager = CuriosityManager(
                 config=self.context.config_manager.get_section("curiosity_config"),
                 logger=context.logger,
                 device=context.device,
                 state=state_tracker.state
-            ) if self.context.config_manager.get_section("curiosity_config").get("enable_curiosity", True)
-            else None
-        )
+            )
+            self.context.logger.record_event(
+                event_type="curiosity_initialized",
+                message="Curiosity manager initialized successfully",
+                level="info",
+                additional_info={
+                    "config": {
+                        "weight_ignorance": self.context.config_manager.get("curiosity_config.weight_ignorance", 0.7),
+                        "weight_novelty": self.context.config_manager.get("curiosity_config.weight_novelty", 0.3),
+                        "base_temperature": self.context.config_manager.get("curiosity_config.base_temperature", 1.1)
+                    }
+                }
+            )
+        else:
+            self.curiosity_manager = None
+            self.context.logger.record_event(
+                event_type="curiosity_disabled",
+                message="Curiosity is disabled in configuration",
+                level="info",
+                additional_info={
+                    "reason": "enable_curiosity is False in curiosity_config"
+                }
+            )
 
     def generate_question(self, context_str: str = "", spontaneous: bool = False) -> Optional[str]:
-        if not self.curiosity_manager:
-            self.context.logger.record({
-                "warning": "Curiosity manager not initialized",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id
-            })
+        """Generate a curiosity-driven question if enabled."""
+        if not self.enable_curiosity or not self.curiosity_manager:
+            self.context.logger.record_event(
+                event_type="curiosity_skipped",
+                message="Question generation skipped - curiosity is disabled",
+                level="info",
+                additional_info={
+                    "context": context_str,
+                    "spontaneous": spontaneous
+                }
+            )
             return None
+
         try:
             question = self.curiosity_manager.generate_question(
                 context=context_str,
@@ -429,12 +717,15 @@ class CuriosityEngine:
                 tokenizer=self.model_loader.base_tokenizer
             )
             if question:
-                self.context.logger.log_curiosity_event(
+                self.context.logger.record_event(
                     event_type="question_generated",
-                    question=question,
-                    spontaneous=spontaneous,
-                    conversation_id=self.state_tracker.state.conversation_id,
-                    state_hash=self.state_tracker.state.get_state_hash()
+                    message="Curiosity question generated successfully",
+                    level="info",
+                    additional_info={
+                        "question": question,
+                        "spontaneous": spontaneous,
+                        "context_length": len(context_str)
+                    }
                 )
             return question
         except Exception as e:
@@ -448,14 +739,33 @@ class CycleTrainer:
         self.config_handler = config_handler
         self.model_loader = model_loader
         self.state_tracker = state_tracker
+        
+        # Ensure models are on the correct device
+        self.model_loader.base_model = self.model_loader.base_model.to(self.context.device)
+        self.model_loader.scaffolds[0] = self.model_loader.scaffolds[0].to(self.context.device)
+        
+        # Initialize trainer with models on correct device
         self.trainer = self._initialize_trainer()
         self.training_cycle_manager = TrainingCycleManager(
             trainer=self.trainer,
             config_manager=context.config_manager,
             logger=context.logger
         )
+        
+        # Log device information
+        self.context.logger.record_event(
+            event_type="cycle_trainer_initialized",
+            message="Cycle trainer initialized with models on correct device",
+            level="info",
+            additional_info={
+                "base_model_device": next(self.model_loader.base_model.parameters()).device,
+                "scaffold_model_device": next(self.model_loader.scaffolds[0].parameters()).device,
+                "target_device": str(self.context.device)
+            }
+        )
 
     def _initialize_trainer(self) -> SOVLTrainer:
+        # Get base training config
         training_config = TrainingConfig(
             learning_rate=self.config_handler.training_config.get("learning_rate", 0.0003),
             grad_accum_steps=self.config_handler.training_config.get("accumulation_steps", 4),
@@ -489,29 +799,53 @@ class CycleTrainer:
             enable_dreaming=self.config_handler.controls_config.get("enable_dreaming", True),
             repetition_n=3,
             sigmoid_scale=self.config_handler.training_config.get("sigmoid_scale", 0.5),
-            sigmoid_shift=self.config_handler.training_config.get("sigmoid_shift", 5.0),
-            curiosity_weight_ignorance=self.config_handler.curiosity_config.get("weight_ignorance", 0.7),
-            curiosity_weight_novelty=self.config_handler.curiosity_config.get("weight_novelty", 0.3),
-            curiosity_pressure_threshold=self.config_handler.curiosity_config.get("pressure_threshold", 0.7),
-            curiosity_pressure_drop=self.config_handler.curiosity_config.get("pressure_drop", 0.3),
-            curiosity_novelty_threshold_spontaneous=self.config_handler.curiosity_config.get("novelty_threshold_spontaneous", 0.9),
-            curiosity_novelty_threshold_response=self.config_handler.curiosity_config.get("novelty_threshold_response", 0.8),
-            curiosity_silence_threshold=self.config_handler.curiosity_config.get("silence_threshold", 20.0),
-            curiosity_question_cooldown=self.config_handler.curiosity_config.get("question_cooldown", 60.0),
-            curiosity_queue_maxlen=self.config_handler.curiosity_config.get("queue_maxlen", 10),
-            curiosity_max_new_tokens=self.config_handler.curiosity_config.get("max_new_tokens", 8),
-            curiosity_base_temperature=self.config_handler.curiosity_config.get("base_temperature", 1.1),
-            curiosity_temperament_influence=self.config_handler.curiosity_config.get("temperament_influence", 0.4),
-            curiosity_top_k=self.config_handler.curiosity_config.get("top_k", 30)
+            sigmoid_shift=self.config_handler.training_config.get("sigmoid_shift", 5.0)
         )
+
+        # Handle curiosity configuration based on enable_curiosity
+        if self.config_handler.curiosity_config.get("enable_curiosity", True):
+            training_config.curiosity_weight_ignorance = self.config_handler.curiosity_config.get("weight_ignorance", 0.7)
+            training_config.curiosity_weight_novelty = self.config_handler.curiosity_config.get("weight_novelty", 0.3)
+            training_config.curiosity_pressure_threshold = self.config_handler.curiosity_config.get("pressure_threshold", 0.7)
+            training_config.curiosity_pressure_drop = self.config_handler.curiosity_config.get("pressure_drop", 0.3)
+            training_config.curiosity_novelty_threshold_spontaneous = self.config_handler.curiosity_config.get("novelty_threshold_spontaneous", 0.9)
+            training_config.curiosity_novelty_threshold_response = self.config_handler.curiosity_config.get("novelty_threshold_response", 0.8)
+            training_config.curiosity_silence_threshold = self.config_handler.curiosity_config.get("silence_threshold", 20.0)
+            training_config.curiosity_question_cooldown = self.config_handler.curiosity_config.get("question_cooldown", 60.0)
+            training_config.curiosity_queue_maxlen = self.config_handler.curiosity_config.get("queue_maxlen", 10)
+            training_config.curiosity_max_new_tokens = self.config_handler.curiosity_config.get("max_new_tokens", 8)
+            training_config.curiosity_base_temperature = self.config_handler.curiosity_config.get("base_temperature", 1.1)
+            training_config.curiosity_temperament_influence = self.config_handler.curiosity_config.get("temperament_influence", 0.4)
+            training_config.curiosity_top_k = self.config_handler.curiosity_config.get("top_k", 30)
+        else:
+            # Set all curiosity-related parameters to 0 or disabled values
+            training_config.curiosity_weight_ignorance = 0.0
+            training_config.curiosity_weight_novelty = 0.0
+            training_config.curiosity_pressure_threshold = 0.0
+            training_config.curiosity_pressure_drop = 0.0
+            training_config.curiosity_novelty_threshold_spontaneous = 0.0
+            training_config.curiosity_novelty_threshold_response = 0.0
+            training_config.curiosity_silence_threshold = 0.0
+            training_config.curiosity_question_cooldown = 0.0
+            training_config.curiosity_queue_maxlen = 0
+            training_config.curiosity_max_new_tokens = 0
+            training_config.curiosity_base_temperature = 0.0
+            training_config.curiosity_temperament_influence = 0.0
+            training_config.curiosity_top_k = 0
+
         def loss_fn(logits, labels):
+            # Ensure inputs are on the correct device
+            logits = logits.to(self.context.device)
+            labels = labels.to(self.context.device)
             mask = labels != -100
             return F.cross_entropy(
                 logits.view(-1, logits.size(-1))[mask.view(-1)],
                 labels.view(-1)[mask.view(-1)],
                 ignore_index=-100
             )
-        return SOVLTrainer(
+
+        # Initialize trainer with models on correct device
+        trainer = SOVLTrainer(
             model=self.model_loader.scaffolds[0],
             config=training_config,
             device=self.context.device,
@@ -521,78 +855,20 @@ class CycleTrainer:
             tokenizer=self.model_loader.base_tokenizer,
             state=self.state_tracker.state
         )
-
-    def train_step(self, batch: List[dict], dry_run: bool = False, 
-                   dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
-        """
-        Perform a single training step on a batch of data.
-
-        Args:
-            batch: List of training examples
-            dry_run: Whether to perform a dry run
-            dry_run_params: Optional parameters for dry run
-
-        Returns:
-            Optional[float]: Loss value if not dry run, None otherwise
-
-        Raises:
-            ValueError: If batch format is invalid
-        """
-        # Validate batch format
-        for i, item in enumerate(batch):
-            if "prompt" not in item or "completion" not in item:
-                self.context.logger.log_error(
-                    error_msg=f"Invalid batch item at index {i}: missing prompt or completion",
-                    error_type="data_format_error",
-                    additional_info={
-                        "item": item,
-                        "batch_size": len(batch),
-                        "required_fields": ["prompt", "completion"]
-                    }
-                )
-                raise ValueError(f"Invalid batch item at index {i}: missing prompt or completion")
-
-        try:
-            scaffold_provider = self.model_loader.scaffold_manager.get_scaffold_context
-            return self.trainer.train_step_with_scaffold(
-                batch=batch,
-                scaffold_provider=scaffold_provider,
-                dry_run=dry_run,
-                dry_run_params=dry_run_params
-            )
-        except Exception as e:
-            self.context.logger.record({
-                "event": "training_error",
-                "error": str(e),
-                "batch_size": len(batch),
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "state_hash": self.state_tracker.state.get_state_hash()
-            })
-            raise
-
-    def run_training_cycle(self, train_data: List, valid_data: List, 
-                          epochs: Optional[int] = None, batch_size: Optional[int] = None):
-        try:
-            def scaffold_provider(batch):
-                prompts = batch.get("prompt", [])
-                scaffold_inputs = self.model_loader.generation_manager.tokenize_and_map(prompts)
-                return self.model_loader.get_scaffold_hidden_states(scaffold_inputs)
-            self.training_cycle_manager.run_training_cycle(
-                train_data=train_data,
-                valid_data=valid_data,
-                scaffold_provider=scaffold_provider,
-                epochs=epochs,
-                batch_size=batch_size
-            )
-        except Exception as e:
-            self.context.logger.record({
-                "error": f"Training cycle failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "state_hash": self.state_tracker.state.get_state_hash()
-            })
-            raise
+        
+        # Log trainer initialization with device information
+        self.context.logger.record_event(
+            event_type="trainer_initialized",
+            message="Trainer initialized with models on correct device",
+            level="info",
+            additional_info={
+                "model_device": next(trainer.model.parameters()).device,
+                "target_device": str(self.context.device),
+                "use_amp": training_config.use_amp
+            }
+        )
+        
+        return trainer
 
 class GestationTrainer:
     """Manages gestation-specific training."""
@@ -672,6 +948,18 @@ class TrainingManager:
         self.model_loader = model_loader
         self.state_tracker = state_tracker
         self.error_manager = error_manager
+        
+        # Initialize training data
+        self.train_data, self.valid_data = self._load_training_data()
+        
+        # Initialize PluginManager
+        self.plugin_manager = PluginManager(
+            config_manager=context.config_manager,
+            logger=context.logger,
+            state=state_tracker.state
+        )
+        
+        # Initialize components
         self.cycle_trainer = CycleTrainer(context, config_handler, model_loader, state_tracker)
         self.gestation_trainer = GestationTrainer(context, config_handler, model_loader, state_tracker)
         self.sleep_trainer = SleepTrainer(context, config_handler, model_loader, state_tracker)
@@ -683,9 +971,77 @@ class TrainingManager:
             cross_attention_injector=CrossAttentionInjector(context.config_manager, context.logger)
         )
 
-    def train_step(self, batch: List[dict], dry_run: bool = False, 
-                   dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
-        return self.cycle_trainer.train_step(batch, dry_run, dry_run_params)
+    def _load_training_data(self) -> Tuple[List, List]:
+        """
+        Load and validate training data from configuration.
+        
+        Returns:
+            Tuple[List, List]: Training and validation data
+            
+        Raises:
+            ValueError: If data loading fails
+            InsufficientDataError: If insufficient data is available
+        """
+        try:
+            data_path = self.context.config_manager.get("training_config.data_path", "data/train.json")
+            valid_split_ratio = self.context.config_manager.get("core_config.valid_split_ratio", 0.2)
+            
+            self.context.logger.record_event(
+                event_type="data_loading",
+                message="Loading training data",
+                level="info",
+                additional_info={
+                    "data_path": data_path,
+                    "valid_split_ratio": valid_split_ratio
+                }
+            )
+            
+            data = load_training_data(
+                path=data_path,
+                valid_split_ratio=valid_split_ratio
+            )
+            
+            train_data = data.get("train", [])
+            valid_data = data.get("valid", [])
+            
+            if not train_data:
+                raise InsufficientDataError("No training data available")
+            if not valid_data:
+                raise InsufficientDataError("No validation data available")
+            
+            self.context.logger.record_event(
+                event_type="data_loaded",
+                message="Training data loaded successfully",
+                level="info",
+                additional_info={
+                    "train_samples": len(train_data),
+                    "valid_samples": len(valid_data)
+                }
+            )
+            
+            return train_data, valid_data
+            
+        except InsufficientDataError as e:
+            self.context.logger.record_event(
+                event_type="data_error",
+                message="Insufficient training data",
+                level="error",
+                additional_info={
+                    "error": str(e)
+                }
+            )
+            raise
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="data_error",
+                message="Failed to load training data",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise ValueError(f"Failed to load training data: {str(e)}")
 
     def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
                           epochs: Optional[int] = None, batch_size: Optional[int] = None):
@@ -707,11 +1063,10 @@ class TrainingManager:
 
         # Validate data presence
         if not train_data:
-            self.context.logger.log_error(
-                error_msg="No training data available for training cycle",
-                error_type="training_error",
-                conversation_id=self.state_tracker.state.conversation_id,
-                state_hash=self.state_tracker.state.get_state_hash(),
+            self.context.logger.record_event(
+                event_type="training_error",
+                message="No training data available for training cycle",
+                level="error",
                 additional_info={
                     "using_provided_data": train_data is not self.train_data,
                     "valid_data_available": bool(valid_data)
@@ -732,10 +1087,15 @@ class TrainingManager:
             }
         )
 
-        # Execute pre-training hooks
+        # Execute pre-training hooks with full context
         self.plugin_manager.execute_hook("on_training_step", {
             "batch_size": len(train_data),
-            "dry_run": False
+            "dry_run": False,
+            "train_samples": len(train_data),
+            "valid_samples": len(valid_data),
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "state": self.state_tracker.state.to_dict()
         })
         
         try:
@@ -747,31 +1107,60 @@ class TrainingManager:
                 batch_size=batch_size
             )
             
-            # Execute post-training hooks
+            # Execute post-training hooks with full context
             self.plugin_manager.execute_hook("on_training_step_complete", {
                 "batch_size": len(train_data),
-                "result": "success"
+                "result": "success",
+                "train_samples": len(train_data),
+                "valid_samples": len(valid_data),
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "state": self.state_tracker.state.to_dict()
             })
             
         except Exception as e:
+            # Execute error hook if training fails
+            self.plugin_manager.execute_hook("on_training_error", {
+                "error": str(e),
+                "stack_trace": traceback.format_exc(),
+                "train_samples": len(train_data),
+                "valid_samples": len(valid_data),
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "state": self.state_tracker.state.to_dict()
+            })
+            
             # Log training error
-            self.context.logger.log_error(
-                error_msg=f"Training cycle failed: {str(e)}",
-                error_type="training_error",
-                stack_trace=traceback.format_exc(),
-                conversation_id=self.state_tracker.state.conversation_id,
-                state_hash=self.state_tracker.state.get_state_hash()
+            self.context.logger.record_event(
+                event_type="training_error",
+                message="Training cycle failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
             )
             raise
 
     def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
+        """Handle completion of a training cycle."""
         self.state_tracker.update_data_exposure(data_exposure)
-        self.context.logger.record({
-            "event": "training_complete_handled",
+        
+        # Execute training complete hook
+        self.plugin_manager.execute_hook("on_training_complete", {
             "epoch": epoch,
             "avg_loss": avg_loss,
             "data_exposure": data_exposure,
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id,
-            "state_hash": self.state_tracker.state.get_state_hash()
+            "state": self.state_tracker.state.to_dict()
         })
+        
+        self.context.logger.record_event(
+            event_type="training_complete",
+            message="Training cycle completed",
+            level="info",
+            additional_info={
+                "epoch": epoch,
+                "avg_loss": avg_loss,
+                "data_exposure": data_exposure
+            }
+        )
