@@ -1,4 +1,4 @@
-# Ghost in the Protocol: Preserving AI Identity Across Resets
+# Ghost in the Protocol: Preserving AI Identity Across Rebirths
 ---
 **Soulprint (.soul) File Format Specification**
 version: 0.2
