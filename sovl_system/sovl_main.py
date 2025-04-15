@@ -215,56 +215,52 @@ class ConfigHandler:
         try:
             controls_config = self.context.config_manager.get_section("controls_config", {})
             
-            # Define required keys with default values and validation ranges
-            required_keys = {
-                "memory_threshold": (0.85, (0.5, 0.95)),
-                "memory_decay_rate": (0.95, (0.8, 1.0)),
-                "dream_memory_weight": (0.1, (0.0, 0.5)),
-                "conversation_history_maxlen": (10, (5, 50)),
-                "dream_memory_maxlen": (10, (5, 50)),
-                "dream_memory_decay": (0.95, (0.8, 1.0)),
-                "dream_prune_threshold": (0.1, (0.0, 0.5)),
-                "confidence_history_maxlen": (1000, (3, 1000)),
-                "temperament_history_maxlen": (1000, (3, 1000)),
-                "token_map_weight_cap": (2.0, (1.0, 5.0))
+            # Define error handling configuration keys with defaults and valid ranges
+            error_handling_keys = {
+                "error_handling.max_history_per_error": (10, (5, 20)),
+                "error_handling.critical_threshold": (5, (3, 10)),
+                "error_handling.warning_threshold": (10, (5, 15)),
+                "error_handling.retry_attempts": (3, (1, 5)),
+                "error_handling.retry_delay": (1.0, (0.5, 5.0)),
             }
             
-            # Check for missing keys and add them with default values
-            for key, (default, _) in required_keys.items():
+            # Validate error handling configuration
+            for key, (default, (min_val, max_val)) in error_handling_keys.items():
                 if key not in controls_config:
                     controls_config[key] = default
                     self.context.logger.record_event(
                         event_type="config_missing_key",
-                        message=f"Added missing key {key} with default value {default}",
+                        message=f"Added missing error_handling key {key} with default {default}",
                         level="warning"
                     )
-            
-            # Validate value ranges
-            for key, (default, (min_val, max_val)) in required_keys.items():
                 value = controls_config[key]
-                if not isinstance(value, (int, float)) or not (min_val <= value <= max_val):
+                if not (min_val <= value <= max_val):
+                    controls_config[key] = default
                     self.context.logger.record_event(
                         event_type="config_invalid_value",
-                        message=f"Invalid value for {key}: {value}. Resetting to default {default}",
+                        message=f"Invalid {key}: {value}. Reset to default {default}",
                         level="warning"
                     )
-                    controls_config[key] = default
             
-            # Update the config with validated values
+            # Update controls config with validated values
             self.context.config_manager.set_section("controls_config", controls_config)
             
-            # Log the final configuration state
+            # Log successful validation
             self.context.logger.record_event(
                 event_type="controls_config_validated",
                 message="Controls configuration validated successfully",
-                level="info"
+                level="info",
+                additional_info={"error_handling_config": {
+                    key: controls_config[key] for key in error_handling_keys.keys()
+                }}
             )
             
         except Exception as e:
             self.context.logger.record_event(
                 event_type="controls_config_validation_failed",
-                message=f"Failed to validate controls config: {str(e)}",
-                level="error"
+                message=f"Failed to validate controls configuration: {str(e)}",
+                level="error",
+                stack_trace=traceback.format_exc()
             )
             raise
 
@@ -790,82 +786,146 @@ class StateTracker:
         return self.state
 
 class ErrorManager:
-    """Handles errors and recovery across components."""
+    """Manages error handling and recovery for the SOVL system."""
+    
     def __init__(self, context: SystemContext, state_tracker: StateTracker):
+        """Initialize the error manager with context and state tracker."""
         self.context = context
         self.state_tracker = state_tracker
         self.error_handler = ErrorHandler(
-            config_manager=context.config_manager,
-            logger=context.logger,
-            error_log_file="sovl_errors.jsonl",
-            max_error_log_size_mb=10,
-            compress_old=True,
-            state=state_tracker.state
-        )
-
-    def handle_generation_error(self, error: Exception, prompt: str) -> str:
-        self.context.logger.log_error(
-            error_msg=f"Generation failed: {str(error)}",
-            error_type="generation_error",
-            stack_trace=traceback.format_exc(),
-            conversation_id=self.state_tracker.state.conversation_id,
-            state_hash=self.state_tracker.state.get_state_hash(),
-            additional_info={"prompt": prompt}
-        )
-        return self.error_handler.handle_generation_error(error, prompt)
-
-    def handle_curiosity_error(self, error: Exception, context: str) -> Optional[str]:
-        self.context.logger.log_error(
-            error_msg=f"Curiosity error: {str(error)}",
-            error_type="curiosity_error",
-            stack_trace=traceback.format_exc(),
-            conversation_id=self.state_tracker.state.conversation_id,
-            state_hash=self.state_tracker.state.get_state_hash(),
-            additional_info={"context": context}
-        )
-        return self.error_handler.handle_curiosity_error(error, context)
-
-class MemoryMonitor:
-    """Monitors system memory health."""
-    def __init__(self, context: SystemContext):
-        self.context = context
-        self.memory_manager = MemoryManager(
-            config_manager=context.config_manager,
-            device=context.device,
+            config=context.config_manager.get_section("error_handling"),
             logger=context.logger
         )
 
-    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
-        """
-        Check memory health and log the results.
-
-        Args:
-            model_size: Size of the model in bytes
-            trainer: Optional trainer instance for additional memory stats
-
-        Returns:
-            bool: True if memory health is good, False otherwise
-        """
+    def handle_generation_error(self, error: Exception, prompt: str) -> str:
+        """Handle generation errors and attempt recovery."""
+        state = self.state_tracker.get_state()
         try:
-            # Get memory health status
-            is_healthy = self.memory_manager.check_memory_health(model_size, trainer)
+            # First attempt standard error handling
+            self.error_handler.handle_generation_error(error, prompt, state)
             
-            # Log memory health check
+            # If error persists, attempt recovery
+            error_key = f"generation:generate:{type(error).__name__}"
+            if self.error_handler.error_counts[error_key] >= self.error_handler.severity_thresholds["critical"]:
+                self.error_handler._recover_generation(error_key)
+                self.context.logger.record_event(
+                    event_type="generation_recovery_triggered",
+                    message="Triggered generation recovery after error",
+                    level="info"
+                )
+                
+            return "An error occurred during generation. The system has attempted recovery."
+            
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="generation_error_handling_failed",
+                message=f"Failed to handle generation error: {str(e)}",
+                level="error",
+                stack_trace=traceback.format_exc()
+            )
+            return "A critical error occurred during generation."
+
+    def handle_training_error(self, error: Exception, batch_size: int) -> None:
+        """Handle training errors and attempt recovery."""
+        state = self.state_tracker.get_state()
+        try:
+            # First attempt standard error handling
+            self.error_handler.handle_training_error(error, batch_size, state)
+            
+            # If error persists, attempt recovery
+            error_key = f"training:train_step:{type(error).__name__}"
+            if self.error_handler.error_counts[error_key] >= self.error_handler.severity_thresholds["critical"]:
+                self.error_handler._recover_training(error_key)
+                self.context.logger.record_event(
+                    event_type="training_recovery_triggered",
+                    message="Triggered training recovery after error",
+                    level="info"
+                )
+                
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="training_error_handling_failed",
+                message=f"Failed to handle training error: {str(e)}",
+                level="error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def handle_curiosity_error(self, error: Exception, event_type: str) -> None:
+        """Handle curiosity errors and attempt recovery."""
+        state = self.state_tracker.get_state()
+        try:
+            # First attempt standard error handling
+            self.error_handler.handle_curiosity_error(error, event_type, state)
+            
+            # If error persists, attempt recovery
+            error_key = f"curiosity:{event_type}:{type(error).__name__}"
+            if self.error_handler.error_counts[error_key] >= self.error_handler.severity_thresholds["critical"]:
+                self.error_handler._recover_curiosity(error_key)
+                self.context.logger.record_event(
+                    event_type="curiosity_recovery_triggered",
+                    message="Triggered curiosity recovery after error",
+                    level="info"
+                )
+                
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="curiosity_error_handling_failed",
+                message=f"Failed to handle curiosity error: {str(e)}",
+                level="error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def handle_memory_error(self, error: Exception, model_size: int) -> bool:
+        """Handle memory errors and attempt recovery."""
+        state = self.state_tracker.get_state()
+        try:
+            # First attempt standard error handling
+            self.error_handler.handle_memory_error(error, model_size, state)
+            
+            # If error persists, attempt recovery
+            error_key = f"memory:check_health:{type(error).__name__}"
+            if self.error_handler.error_counts[error_key] >= self.error_handler.severity_thresholds["critical"]:
+                self.error_handler._recover_memory(error_key)
+                self.context.logger.record_event(
+                    event_type="memory_recovery_triggered",
+                    message="Triggered memory recovery after error",
+                    level="info"
+                )
+                
+            # Check if system is healthy after recovery
+            return self.error_handler.error_counts[error_key] < self.error_handler.severity_thresholds["critical"]
+            
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="memory_error_handling_failed",
+                message=f"Failed to handle memory error: {str(e)}",
+                level="error",
+                stack_trace=traceback.format_exc()
+            )
+            return False
+
+class MemoryMonitor:
+    """Monitors system memory health."""
+
+    def __init__(self, context: SystemContext):
+        """Initialize the memory monitor with context."""
+        self.context = context
+        self.memory_manager = MemoryManager(context)
+
+    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
+        """Check memory health and handle any errors."""
+        try:
+            is_healthy = self.memory_manager.check_memory_health(model_size, trainer)
             self.context.logger.log_memory_health(
                 model_size=model_size,
                 trainer=trainer,
                 health_status="healthy" if is_healthy else "unhealthy",
                 device=self.context.device
             )
-            
             return is_healthy
         except Exception as e:
-            # Log error if memory check fails
-            self.context.logger.log_error(
-                error_msg=f"Memory health check failed: {str(e)}",
-                error_type="memory_error",
-                stack_trace=traceback.format_exc()
-            )
+            # Handle memory errors through ErrorManager
+            self.context.error_manager.handle_memory_error(e, model_size)
             return False
 
 class TemperamentAdjuster:
