@@ -3,7 +3,7 @@ from collections import deque, defaultdict
 from dataclasses import dataclass, field
 import torch
 import uuid
-from threading import Lock
+from threading import Lock, RLock
 import time
 import traceback
 import hashlib
@@ -642,28 +642,72 @@ class SOVLState(StateBase):
             prompt, _ = self.seen_prompts.popleft()
             self._log_event("seen_prompt_pruned", prompt=prompt)
 
-    def update_temperament(self, score: float):
-        """Update temperament score and history with decay."""
-        try:
-            score = self._validate_number(score, "Score")
-            score = max(-1.0, min(1.0, score))
-            with self.lock:
-                with NumericalGuard():
-                    self.last_temperament_score = self.temperament_score
-                    self.temperament_score = score * self._config.temperament_decay_rate + \
-                                            self.temperament_score * (1 - self._config.temperament_decay_rate)
-                    self.temperament_history.append(self.temperament_score)
-                    self._update_state_hash()
-                    self._log_event(
-                        "temperament_updated",
-                        score=self.temperament_score,
-                        raw_score=score,
-                        history_length=len(self.temperament_history),
-                        state_hash=self.state_hash
-                    )
-        except Exception as e:
-            self._log_error("Temperament update failed", score=score)
-            raise StateError(f"Temperament update failed: {str(e)}")
+    def update_temperament(self, new_temperament: Dict[str, float]) -> None:
+        """
+        Update temperament state with proper synchronization.
+        
+        Args:
+            new_temperament: New temperament values
+        """
+        with self.lock:
+            # Validate new temperament
+            if not all(0.0 <= v <= 1.0 for v in new_temperament.values()):
+                raise StateError("Invalid temperament values: must be between 0.0 and 1.0")
+                
+            # Update state
+            self.temperament_score = new_temperament.copy()
+            self.temperament_history.append(self.temperament_score.copy())
+            self._update_temperament_score()
+            self.state_hash = self._compute_state_hash()
+            
+            # Log update
+            self.logger.record_event(
+                event_type="state_temperament_updated",
+                message="Temperament state updated",
+                level="info",
+                additional_info={
+                    "new_temperament": new_temperament,
+                    "temperament_score": self.temperament_score,
+                    "conversation_id": self.history.conversation_id,
+                    "state_hash": self.state_hash
+                }
+            )
+            
+    def _update_temperament_score(self) -> None:
+        """Update the temperament score based on current state."""
+        with self.lock:
+            # Calculate weighted average of temperament traits
+            weights = {
+                "curiosity": 0.4,
+                "confidence": 0.3,
+                "stability": 0.2,
+                "adaptability": 0.1
+            }
+            
+            score = sum(
+                self.temperament_score[trait] * weight
+                for trait, weight in weights.items()
+            )
+            
+            # Normalize to [-1.0, 1.0] range
+            self.temperament_score = (score * 2.0) - 1.0
+            
+    @property
+    def temperament_score(self) -> float:
+        """Get the current temperament score."""
+        with self.lock:
+            return self.temperament_score
+            
+    def _compute_state_hash(self) -> str:
+        """Compute a hash of the current state."""
+        with self.lock:
+            state_data = {
+                "temperament": self.temperament_score,
+                "conversation_id": self.history.conversation_id
+            }
+            return hashlib.sha256(
+                json.dumps(state_data, sort_keys=True).encode()
+            ).hexdigest()
 
     def update_confidence(self, confidence: float):
         """Update confidence history."""

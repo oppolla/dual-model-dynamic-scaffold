@@ -189,8 +189,41 @@ class ConfigHandler:
         self.controls_config = context.config_manager.get_section("controls_config")
         self.lora_config = context.config_manager.get_section("lora_config")
         
-        # Validate curiosity-related configurations
-        self._validate_curiosity_configs()
+        # Validate all configurations
+        self._validate_all_configs()
+
+    def _validate_all_configs(self):
+        """Validate and synchronize all configurations."""
+        try:
+            # Validate curiosity-related configurations
+            self._validate_curiosity_configs()
+            
+            # Validate temperament-related configurations
+            self._validate_temperament_configs()
+            
+            # Log final configuration state
+            self.context.logger.record_event(
+                event_type="config_validation",
+                message="All configurations validated successfully",
+                level="info",
+                additional_info={
+                    "curiosity_config": self.curiosity_config,
+                    "controls_config": {k: v for k, v in self.controls_config.items() 
+                                     if k.startswith(("curiosity_", "temp_"))}
+                }
+            )
+            
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="config_validation_error",
+                message="Failed to validate configurations",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
 
     def _validate_curiosity_configs(self):
         """Validate and synchronize curiosity-related configurations."""
@@ -210,7 +243,8 @@ class ConfigHandler:
                 "max_new_tokens": 8,
                 "base_temperature": 1.1,
                 "temperament_influence": 0.4,
-                "top_k": 30
+                "top_k": 30,
+                "enable_curiosity": True
             }
             
             # Check for missing keys in curiosity_config
@@ -244,7 +278,8 @@ class ConfigHandler:
                 "curiosity_max_new_tokens": "max_new_tokens",
                 "curiosity_base_temperature": "base_temperature",
                 "curiosity_temperament_influence": "temperament_influence",
-                "curiosity_top_k": "top_k"
+                "curiosity_top_k": "top_k",
+                "enable_curiosity": "enable_curiosity"
             }
             
             mismatches = []
@@ -269,21 +304,88 @@ class ConfigHandler:
                 for mismatch in mismatches:
                     self.controls_config[mismatch["controls_key"]] = self.curiosity_config[mismatch["curiosity_key"]]
             
-            # Log final configuration state
-            self.context.logger.record_event(
-                event_type="config_validation",
-                message="Curiosity configuration validation complete",
-                level="info",
-                additional_info={
-                    "curiosity_config": self.curiosity_config,
-                    "controls_config": {k: v for k, v in self.controls_config.items() if k.startswith("curiosity_")}
-                }
-            )
-            
         except Exception as e:
             self.context.logger.record_event(
                 event_type="config_validation_error",
                 message="Failed to validate curiosity configurations",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+
+    def _validate_temperament_configs(self):
+        """Validate and synchronize temperament-related configurations."""
+        try:
+            # Define required keys and their default values
+            required_keys = {
+                "temp_eager_threshold": 0.8,
+                "temp_sluggish_threshold": 0.6,
+                "temp_mood_influence": 0.0,
+                "temp_curiosity_boost": 0.2,
+                "temp_restless_drop": 0.1,
+                "temp_melancholy_noise": 0.02,
+                "temp_smoothing_factor": 0.5,
+                "temperament_decay_rate": 0.9,
+                "enable_temperament": True
+            }
+            
+            # Check for missing keys in controls_config
+            missing_keys = [key for key in required_keys if key not in self.controls_config]
+            if missing_keys:
+                self.context.logger.record_event(
+                    event_type="config_validation",
+                    message="Missing keys in controls_config for temperament",
+                    level="warning",
+                    additional_info={
+                        "missing_keys": missing_keys,
+                        "default_values": {k: required_keys[k] for k in missing_keys}
+                    }
+                )
+                # Add missing keys with default values
+                for key in missing_keys:
+                    self.controls_config[key] = required_keys[key]
+            
+            # Validate value ranges
+            value_ranges = {
+                "temp_eager_threshold": (0.7, 0.9),
+                "temp_sluggish_threshold": (0.4, 0.6),
+                "temp_mood_influence": (0.0, 1.0),
+                "temp_curiosity_boost": (0.0, 0.5),
+                "temp_restless_drop": (0.0, 0.5),
+                "temp_melancholy_noise": (0.0, 0.05),
+                "temp_smoothing_factor": (0.0, 1.0),
+                "temperament_decay_rate": (0.0, 1.0)
+            }
+            
+            invalid_values = []
+            for key, (min_val, max_val) in value_ranges.items():
+                if key in self.controls_config:
+                    value = self.controls_config[key]
+                    if not (min_val <= value <= max_val):
+                        invalid_values.append({
+                            "key": key,
+                            "value": value,
+                            "range": (min_val, max_val)
+                        })
+            
+            if invalid_values:
+                self.context.logger.record_event(
+                    event_type="config_validation",
+                    message="Invalid values in temperament configurations",
+                    level="warning",
+                    additional_info={"invalid_values": invalid_values}
+                )
+                # Reset invalid values to defaults
+                for invalid in invalid_values:
+                    self.controls_config[invalid["key"]] = required_keys[invalid["key"]]
+            
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="config_validation_error",
+                message="Failed to validate temperament configurations",
                 level="error",
                 additional_info={
                     "error": str(e),
@@ -688,53 +790,72 @@ class MemoryMonitor:
             return False
 
 class TemperamentAdjuster:
-    """Modulates model behavior based on temperament."""
+    """Adjusts temperament based on system state and curiosity."""
+    
     def __init__(self, context: SystemContext, state_tracker: StateTracker):
         self.context = context
         self.state_tracker = state_tracker
-        self.temperament_system = TemperamentSystem.create_from_config(
-            config_manager=context.config_manager,
+        self.temperament_system = TemperamentSystem(
+            config=context.config,
             logger=context.logger,
-            device=context.device
+            state=state_tracker.state
         )
-        self.context.logger.record({
-            "event": "temperament_initialized",
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id
-        })
-
+        
     def update_temperament(self, curiosity_manager: Optional[CuriosityManager] = None):
-        """Update temperament based on current state and optional curiosity manager."""
+        """
+        Update temperament based on system state and curiosity pressure.
+        
+        Args:
+            curiosity_manager: Optional CuriosityManager instance to get pressure from
+        """
         try:
-            if curiosity_manager is None:
-                self.context.logger.record_event(
-                    event_type="temperament_update_skipped",
-                    message="No curiosity manager provided, updating temperament without curiosity influence",
-                    level="warning",
-                    additional_info={
-                        "conversation_id": self.state_tracker.state.conversation_id,
-                        "state_hash": self.state_tracker.state.get_state_hash()
-                    }
-                )
-                # Update temperament without curiosity influence
-                self.temperament_system.update_from_state(
-                    state=self.state_tracker.state,
-                    curiosity_manager=None
-                )
-            else:
-                # Update with curiosity influence
-                self.temperament_system.update_from_state(
-                    state=self.state_tracker.state,
-                    curiosity_manager=curiosity_manager
-                )
+            state = self.state_tracker.state
+            
+            # Get curiosity pressure if manager is provided
+            curiosity_pressure = None
+            if curiosity_manager:
+                try:
+                    curiosity_pressure = curiosity_manager.pressure_mgr.value
+                    self.context.logger.record_event(
+                        event_type="temperament_curiosity_pressure",
+                        message="Retrieved curiosity pressure",
+                        level="info",
+                        additional_info={
+                            "pressure": curiosity_pressure,
+                            "conversation_id": state.conversation_id,
+                            "state_hash": state.state_hash
+                        }
+                    )
+                except Exception as e:
+                    self.context.logger.record_event(
+                        event_type="temperament_warning",
+                        message="Failed to get curiosity pressure",
+                        level="warning",
+                        additional_info={
+                            "error": str(e),
+                            "conversation_id": state.conversation_id,
+                            "state_hash": state.state_hash
+                        }
+                    )
+            
+            # Update temperament with pressure
+            self.temperament_system.update_from_state(
+                state=state,
+                curiosity_pressure=curiosity_pressure
+            )
+            
         except Exception as e:
-            self.context.logger.record({
-                "error": f"Failed to update temperament: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "has_curiosity_manager": curiosity_manager is not None
-            })
+            self.context.logger.record_event(
+                event_type="temperament_error",
+                message="Temperament update failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc(),
+                    "conversation_id": state.conversation_id,
+                    "state_hash": state.state_hash
+                }
+            )
             raise
 
 class CuriosityEngine:

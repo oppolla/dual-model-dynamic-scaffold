@@ -101,21 +101,41 @@ class TemperamentSystem:
         self,
         config: Dict[str, Any],
         logger: Any,
-        initial_state: Optional[Dict[str, float]] = None
+        state: SOVLState,
+        device: torch.device = torch.device("cpu")
     ):
         """
         Initialize temperament system.
         
         Args:
             config: Configuration dictionary
-            logger: Logger instance
-            initial_state: Optional initial state dictionary
+            logger: Logger instance from LoggingManager
+            state: SOVLState instance for state management
+            device: Device for tensor operations
         """
         self.config = config
         self.logger = logger
-        self.state = TemperamentState(**(initial_state or {}))
-        self._load_config()
+        self.state = state
+        self._device = device
+        self._mood_cache = None
+        self._mood_cache_time = 0.0
+        self._last_update = time.time()
+        self._lock = RLock()
         
+        # Log device initialization
+        self._log_event(
+            event_type="temperament_init",
+            message="TemperamentSystem initialized",
+            level="info",
+            additional_info={
+                "device": str(device),
+                "conversation_id": state.conversation_id,
+                "state_hash": state.state_hash
+            }
+        )
+        
+        self._load_config()
+
     def _load_config(self) -> None:
         """Load and validate configuration."""
         self.learning_rate = self.config.get('learning_rate', 0.01)
@@ -126,14 +146,47 @@ class TemperamentSystem:
         if not 0 < self.learning_rate < 1:
             raise ValueError(f"Learning rate must be between 0 and 1, got {self.learning_rate}")
             
-        self.logger.record({
-            "event": "temperament_config_loaded",
-            "learning_rate": self.learning_rate,
-            "stability_threshold": self.stability_threshold,
-            "max_volatility": self.max_volatility,
-            "timestamp": time.time()
-        })
-        
+        self.logger.record_event(
+            event_type="temperament_config_loaded",
+            message="Temperament configuration loaded",
+            level="info",
+            additional_info={
+                "learning_rate": self.learning_rate,
+                "stability_threshold": self.stability_threshold,
+                "max_volatility": self.max_volatility,
+                "conversation_id": self.state.conversation_id,
+                "state_hash": self.state.state_hash
+            }
+        )
+
+    def _log_error(self, error_msg: str, error_type: str, stack_trace: str, **kwargs) -> None:
+        """Log an error with standardized format."""
+        self.logger.record_event(
+            event_type="temperament_error",
+            message=error_msg,
+            level="error",
+            additional_info={
+                "error_type": error_type,
+                "stack_trace": stack_trace,
+                "conversation_id": self.state.conversation_id,
+                "state_hash": self.state.state_hash,
+                **kwargs
+            }
+        )
+
+    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Log an event with standardized format."""
+        self.logger.record_event(
+            event_type=event_type,
+            message=message,
+            level=level,
+            additional_info={
+                "conversation_id": self.state.conversation_id,
+                "state_hash": self.state.state_hash,
+                **kwargs
+            }
+        )
+
     def update_temperament(
         self,
         performance_metrics: Dict[str, float],
@@ -150,39 +203,53 @@ class TemperamentSystem:
             Updated temperament dictionary
         """
         try:
-            # Calculate temperament adjustments
-            adjustments = self._calculate_adjustments(performance_metrics, external_factors)
-            
-            # Apply adjustments with stability check
-            new_temperament = {}
-            for trait, value in self.state.temperament.items():
-                adjustment = adjustments.get(trait, 0.0)
-                new_value = value + adjustment
-                new_temperament[trait] = max(0.0, min(1.0, new_value))
+            with self._lock:
+                # Calculate temperament adjustments
+                adjustments = self._calculate_adjustments(performance_metrics, external_factors)
                 
-            # Update history
-            self.state.history.append(new_temperament)
-            if len(self.state.history) > self.state.max_history_size:
-                self.state.history.pop(0)
+                # Get current state
+                current_temperament = self.state.temperament
                 
-            # Log update
-            self.logger.record({
-                "event": "temperament_updated",
-                "old_temperament": self.state.temperament,
-                "new_temperament": new_temperament,
-                "adjustments": adjustments
-            })
-            
-            self.state.temperament = new_temperament
-            return new_temperament
-            
+                # Apply adjustments with stability check
+                new_temperament = {}
+                for trait, value in current_temperament.items():
+                    adjustment = adjustments.get(trait, 0.0)
+                    new_value = value + adjustment
+                    new_temperament[trait] = max(0.0, min(1.0, new_value))
+                    
+                # Update state through SOVLState
+                self.state.update_temperament(new_temperament)
+                
+                # Log update
+                self._log_event(
+                    event_type="temperament_updated",
+                    message="Temperament updated with new adjustments",
+                    level="info",
+                    additional_info={
+                        "old_temperament": current_temperament,
+                        "new_temperament": new_temperament,
+                        "adjustments": adjustments,
+                        "performance_metrics": performance_metrics,
+                        "external_factors": external_factors,
+                        "conversation_id": self.state.conversation_id,
+                        "state_hash": self.state.state_hash
+                    }
+                )
+                
+                return new_temperament
+                
         except Exception as e:
-            self.logger.record({
-                "error": f"Temperament update failed: {str(e)}",
-                "stack_trace": traceback.format_exc()
-            })
+            self._log_error(
+                error_msg=f"Temperament update failed: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc(),
+                performance_metrics=performance_metrics,
+                external_factors=external_factors,
+                conversation_id=self.state.conversation_id,
+                state_hash=self.state.state_hash
+            )
             return self.state.temperament
-            
+
     def _calculate_adjustments(
         self,
         performance_metrics: Dict[str, float],
@@ -245,33 +312,23 @@ class TemperamentSystem:
         
         return stability
 
-    def _initialize_logging(self) -> None:
-        """Initialize logging configuration."""
-        self._logger.record({
-            "event": "temperament_system_initialized",
-            "state_version": self.STATE_VERSION,
-            "timestamp": time.time(),
-            "conversation_id": str(uuid.uuid4())  # Ensure conversation_id
-        })
-
     @property
-    @synchronized("_lock")
     def score(self) -> float:
         """Current temperament score (-1.0 to 1.0)."""
-        return self._score
+        return self.state.temperament_score
 
     @property
-    @synchronized("_lock")
     def mood_label(self) -> str:
         """Get current mood label based on score, cached for 1 second."""
         if self._mood_cache is not None and (time.time() - self._mood_cache_time) < 1.0:
             return self._mood_cache
         
-        if float_lt(self._score, -0.5):
+        score = self.score
+        if float_lt(score, -0.5):
             label = "melancholic"
-        elif float_lt(self._score, 0.0):
+        elif float_lt(score, 0.0):
             label = "restless"
-        elif float_lt(self._score, self.config.sluggish_threshold):
+        elif float_lt(score, self.config.sluggish_threshold):
             label = "calm"
         else:
             label = "curious"
@@ -314,19 +371,18 @@ class TemperamentSystem:
             if updates:
                 self._apply_config_updates(updates)
                 self._log_adjustments(updates)
-                self._logger.record({
-                    "event": "temperament_adjusted",
-                    "message": f"Temperament params updated: {updates}",
-                    "timestamp": time.time(),
-                    "conversation_id": str(uuid.uuid4())
-                })
+                self._log_event(
+                    event_type="temperament_adjusted",
+                    message=f"Temperament params updated: {updates}",
+                    level="info",
+                    additional_info={"updates": updates}
+                )
 
         except Exception as e:
-            self._logger.log_error(
+            self._log_error(
                 error_msg=f"Temperament adjustment failed: {str(e)}",
                 error_type=type(e).__name__,
-                stack_trace=traceback.format_exc(),
-                conversation_id=str(uuid.uuid4())
+                stack_trace=traceback.format_exc()
             )
             raise
 
@@ -356,12 +412,12 @@ class TemperamentSystem:
 
     def _log_adjustments(self, updates: Dict[str, float]) -> None:
         """Log temperament adjustments."""
-        self._logger.record({
-            "event": "temperament_adjusted",
-            "updates": updates,
-            "timestamp": time.time(),
-            "conversation_id": str(uuid.uuid4())
-        })
+        self._log_event(
+            event_type="temperament_adjusted",
+            message="Temperament parameters adjusted",
+            level="info",
+            additional_info={"updates": updates}
+        )
 
     @synchronized("_lock")
     def update_temperament(self, confidence: float, lifecycle_stage: float, 
@@ -390,25 +446,26 @@ class TemperamentSystem:
             self._apply_smoothing(target_score, time_since_last)
             self._update_state()
             self._log_update(confidence, avg_confidence, lifecycle_stage)
-            self._logger.record({
-                "event": "temperament_updated",
-                "message": f"Temperament score: {self._score:.3f} ({self.mood_label}, "
-                           f"lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}",
-                "timestamp": time.time(),
-                "conversation_id": str(uuid.uuid4()),
-                "mood": self.mood_label,
-                "confidence_score": confidence
-            })
+            self._log_event(
+                event_type="temperament_updated",
+                message="Temperament state updated",
+                level="info",
+                additional_info={
+                    "score": self._score,
+                    "mood": self.mood_label,
+                    "confidence": confidence,
+                    "avg_confidence": avg_confidence,
+                    "lifecycle_stage": lifecycle_stage
+                }
+            )
 
         except Exception as e:
-            self._logger.log_error(
+            self._log_error(
                 error_msg=f"Temperament update failed: {str(e)}",
                 error_type=type(e).__name__,
                 stack_trace=traceback.format_exc(),
-                conversation_id=str(uuid.uuid4()),
-                confidence_score=confidence,
-                lifecycle_stage=lifecycle_stage,
-                curiosity_pressure=curiosity_pressure
+                conversation_id=self.state.conversation_id,
+                state_hash=self.state.state_hash
             )
             raise
 
@@ -444,26 +501,76 @@ class TemperamentSystem:
 
     def _calculate_lifecycle_bias(self, lifecycle_stage: float) -> float:
         """Calculate lifecycle bias based on stage."""
-        if float_lt(lifecycle_stage, self.config.early_lifecycle):
-            return self.config.curiosity_boost * (1 - lifecycle_stage / self.config.early_lifecycle)
-        
-        if float_lt(lifecycle_stage, self.config.mid_lifecycle):
-            if len(self.state.history) >= self.config.history_maxlen:
-                variance = torch.var(torch.tensor(list(self.state.history), device=self._device)).item()
-                return -0.2 * variance
+        try:
+            if float_lt(lifecycle_stage, self.config.early_lifecycle):
+                return self.config.curiosity_boost * (1 - lifecycle_stage / self.config.early_lifecycle)
+            
+            if float_lt(lifecycle_stage, self.config.mid_lifecycle):
+                if len(self.state.history) >= self.config.history_maxlen:
+                    # Ensure tensor is created on correct device
+                    history_tensor = torch.tensor(
+                        list(self.state.history),
+                        device=self._device
+                    )
+                    variance = torch.var(history_tensor).item()
+                    return -0.2 * variance
+                return 0.0
+            
+            return -self.config.curiosity_boost * (
+                (lifecycle_stage - self.config.mid_lifecycle) / 
+                (1.0 - self.config.mid_lifecycle)
+            )
+        except Exception as e:
+            self._log_error(
+                error_msg=f"Failed to calculate lifecycle bias: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc(),
+                lifecycle_stage=lifecycle_stage
+            )
             return 0.0
-        
-        return -self.config.curiosity_boost * (
-            (lifecycle_stage - self.config.mid_lifecycle) / 
-            (1.0 - self.config.mid_lifecycle)
-        )
 
     def _calculate_noise(self) -> float:
         """Calculate random noise for temperament."""
-        noise = torch.randn(1, device=self._device).item() * self.config.melancholy_noise
-        if self.mood_label == "melancholic":
-            noise += torch.randn(1, device=self._device).item() * self.config.melancholy_noise
-        return noise
+        try:
+            # Ensure tensors are created on correct device
+            noise = torch.randn(1, device=self._device).item() * self.config.melancholy_noise
+            if self.mood_label == "melancholic":
+                noise += torch.randn(1, device=self._device).item() * self.config.melancholy_noise
+            return noise
+        except Exception as e:
+            self._log_error(
+                error_msg=f"Failed to calculate noise: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc()
+            )
+            return 0.0
+
+    def _validate_tensor_device(self, tensor: torch.Tensor, name: str) -> torch.Tensor:
+        """
+        Validate and move tensor to correct device if needed.
+        
+        Args:
+            tensor: Input tensor
+            name: Name of tensor for logging
+            
+        Returns:
+            Tensor on correct device
+        """
+        if tensor.device != self._device:
+            self._log_event(
+                event_type="temperament_device_mismatch",
+                message=f"Moving {name} from {tensor.device} to {self._device}",
+                level="warning",
+                additional_info={
+                    "tensor_name": name,
+                    "source_device": str(tensor.device),
+                    "target_device": str(self._device),
+                    "conversation_id": self.state.conversation_id,
+                    "state_hash": self.state.state_hash
+                }
+            )
+            return tensor.to(self._device)
+        return tensor
 
     def _apply_smoothing(self, target_score: float, time_since_last: Optional[float]) -> None:
         """Apply smoothing to temperament score."""
@@ -483,16 +590,18 @@ class TemperamentSystem:
 
     def _log_update(self, confidence: float, avg_confidence: float, lifecycle_stage: float) -> None:
         """Log temperament update details."""
-        self._logger.record({
-            "event": "temperament_updated",
-            "score": self._score,
-            "mood": self.mood_label,
-            "confidence_score": confidence,
-            "avg_confidence": avg_confidence,
-            "lifecycle_stage": lifecycle_stage,
-            "timestamp": time.time(),
-            "conversation_id": str(uuid.uuid4())
-        })
+        self._log_event(
+            event_type="temperament_updated",
+            message="Temperament state updated",
+            level="info",
+            additional_info={
+                "score": self._score,
+                "mood": self.mood_label,
+                "confidence": confidence,
+                "avg_confidence": avg_confidence,
+                "lifecycle_stage": lifecycle_stage
+            }
+        )
 
     @synchronized("_lock")
     def compute_and_update(self, sleep_confidence_sum: float, sleep_confidence_count: int,
@@ -532,37 +641,42 @@ class TemperamentSystem:
             )
             
             # Log the update
-            self._logger.record({
-                "event": "temperament_computed",
-                "avg_confidence": avg_confidence,
-                "lifecycle_stage": lifecycle_stage,
-                "curiosity_pressure": curiosity_pressure,
-                "score": self._score,
-                "mood": self.mood_label,
-                "timestamp": time.time(),
-                "conversation_id": str(uuid.uuid4())
-            })
+            self._log_event(
+                event_type="temperament_computed",
+                message="Temperament computation completed",
+                level="info",
+                additional_info={
+                    "avg_confidence": avg_confidence,
+                    "lifecycle_stage": lifecycle_stage,
+                    "curiosity_pressure": curiosity_pressure,
+                    "score": self._score,
+                    "mood": self.mood_label
+                }
+            )
             
         except Exception as e:
-            self._logger.log_error(
+            self._log_error(
                 error_msg=f"Temperament computation failed: {str(e)}",
                 error_type=type(e).__name__,
-                stack_trace=traceback.format_exc(),
-                conversation_id=str(uuid.uuid4())
+                stack_trace=traceback.format_exc()
             )
             raise
 
     @classmethod
-    def create_from_config(cls, config_manager: ConfigManager, logger: Logger, 
-                          device: torch.device = torch.device("cpu")) -> 'TemperamentSystem':
+    def create_from_config(
+        cls,
+        config_manager: ConfigManager,
+        logger: Any,
+        device: torch.device = torch.device("cpu")
+    ) -> 'TemperamentSystem':
         """
         Create a TemperamentSystem instance from a ConfigManager.
-
+        
         Args:
             config_manager: ConfigManager instance containing temperament settings
-            logger: Logger instance for recording events
+            logger: Logger instance from LoggingManager
             device: Device for tensor operations
-
+            
         Returns:
             Initialized TemperamentSystem instance
         """
@@ -588,13 +702,41 @@ class TemperamentSystem:
 
     def update_from_state(self, state: SOVLState, curiosity_pressure: Optional[float] = None) -> None:
         """
-        Update temperament based on system state.
-
+        Update temperament based on system state and curiosity pressure.
+        
         Args:
             state: Current system state
-            curiosity_pressure: Optional curiosity pressure (0.0-1.0)
+            curiosity_pressure: Optional curiosity pressure value (0.0-1.0)
         """
         try:
+            # Log warning if no curiosity pressure provided
+            if curiosity_pressure is None:
+                self._log_event(
+                    event_type="temperament_warning",
+                    message="No curiosity pressure provided",
+                    level="warning",
+                    additional_info={
+                        "conversation_id": state.conversation_id,
+                        "state_hash": state.state_hash
+                    }
+                )
+            else:
+                # Validate curiosity pressure
+                if not 0.0 <= curiosity_pressure <= 1.0:
+                    raise ValueError(f"Invalid curiosity pressure: {curiosity_pressure}")
+                    
+                self._log_event(
+                    event_type="temperament_curiosity_pressure",
+                    message="Using curiosity pressure for temperament update",
+                    level="info",
+                    additional_info={
+                        "pressure": curiosity_pressure,
+                        "conversation_id": state.conversation_id,
+                        "state_hash": state.state_hash
+                    }
+                )
+            
+            # Calculate averages and update temperament
             self.compute_and_update(
                 sleep_confidence_sum=state.sleep_confidence_sum,
                 sleep_confidence_count=state.sleep_confidence_count,
@@ -602,20 +744,34 @@ class TemperamentSystem:
                 lora_capacity=state.lora_capacity,
                 curiosity_pressure=curiosity_pressure
             )
+            
+            # Update state with new temperament
             state.temperament_score = self.score
             state.mood_label = self.mood_label
-            self._logger.record({
-                "event": "temperament_updated",
-                "score": self.score,
-                "mood": self.mood_label,
-                "timestamp": time.time(),
-                "conversation_id": state.conversation_id
-            })
+            
+            # Log the update
+            self._log_event(
+                event_type="temperament_updated",
+                message=f"Temperament updated: score={self.score:.3f}, mood={self.mood_label}",
+                level="info",
+                additional_info={
+                    "score": self.score,
+                    "mood": self.mood_label,
+                    "curiosity_pressure": curiosity_pressure,
+                    "data_exposure": state.data_exposure,
+                    "lora_capacity": state.lora_capacity,
+                    "conversation_id": state.conversation_id,
+                    "state_hash": state.state_hash
+                }
+            )
+            
         except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to update temperament: {str(e)}",
+            self._log_error(
+                error_msg=f"Failed to update temperament from state: {str(e)}",
                 error_type=type(e).__name__,
                 stack_trace=traceback.format_exc(),
-                conversation_id=state.conversation_id
+                curiosity_pressure=curiosity_pressure,
+                data_exposure=state.data_exposure if state else None,
+                lora_capacity=state.lora_capacity if state else None
             )
             raise
