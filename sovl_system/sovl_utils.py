@@ -7,6 +7,7 @@ import numpy as np
 import random
 from threading import Lock
 import traceback
+from functools import wraps
 
 # Assuming Logger is a custom class; if not, replace with logging.Logger
 from sovl_logger import Logger
@@ -172,19 +173,7 @@ def safe_divide(
     epsilon: float = 1e-10,
     logger: Optional[Logger] = None
 ) -> torch.Tensor:
-    """
-    Perform batch-safe division with auto device handling and type promotion.
-    
-    Args:
-        numerator: Numerator tensor
-        denominator: Denominator tensor
-        default: Value for invalid divisions
-        epsilon: Small value to avoid division by zero
-        logger: Optional logger for error reporting
-    
-    Returns:
-        Result tensor
-    """
+    """Perform batch-safe division with auto device handling and type promotion."""
     try:
         if not isinstance(numerator, torch.Tensor) or not isinstance(denominator, torch.Tensor):
             raise ValueError("Both numerator and denominator must be tensors")
@@ -210,6 +199,18 @@ def safe_divide(
                 "stack_trace": traceback.format_exc()
             })
         raise
+
+def float_lt(a: float, b: float, eps: float = 1e-6) -> bool:
+    """Float comparison with epsilon tolerance."""
+    return a < b - eps
+
+def float_gt(a: float, b: float, eps: float = 1e-6) -> bool:
+    """Float comparison with epsilon tolerance."""
+    return a > b + eps
+
+def float_eq(a: float, b: float, eps: float = 1e-6) -> bool:
+    """Float comparison with epsilon tolerance."""
+    return abs(a - b) <= eps
 
 def memory_usage(device: torch.device = None) -> Dict[str, float]:
     """Get memory usage statistics in GB."""
@@ -524,3 +525,14 @@ def adjust_temperature(
                 "stack_trace": traceback.format_exc()
             })
         return base_temp
+
+def synchronized(lock_name: str):
+    """Thread synchronization decorator."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            lock = getattr(self, lock_name)
+            with lock:
+                return func(self, *args, **kwargs)
+        return wrapper
+    return decorator

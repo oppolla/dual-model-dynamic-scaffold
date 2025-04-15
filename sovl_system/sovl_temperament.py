@@ -97,39 +97,44 @@ class TemperamentConfig:
                 raise ValueError(f"Unknown configuration parameter: {key}")
 
 class TemperamentSystem:
-    """Manages the temperament parameters and their evolution."""
+    """Manages the temperament state and dynamics of the SOVL system."""
     
     def __init__(
         self,
         config: Dict[str, Any],
         logger: Any,
-        initial_temperament: Optional[Dict[str, float]] = None
+        initial_state: Optional[Dict[str, float]] = None
     ):
         """
         Initialize temperament system.
         
         Args:
-            config: Configuration dictionary with temperament parameters
-            logger: Logger instance for logging
-            initial_temperament: Optional initial temperament values
+            config: Configuration dictionary
+            logger: Logger instance
+            initial_state: Optional initial state dictionary
         """
         self.config = config
         self.logger = logger
-        self.temperament = initial_temperament or self._get_default_temperament()
-        self.history = []
-        self.stability_threshold = self.config.get('stability_threshold', 0.1)
-        self.adaptation_rate = self.config.get('adaptation_rate', 0.01)
-        self.max_history_size = self.config.get('max_history_size', 100)
+        self.state = TemperamentState(**(initial_state or {}))
+        self._load_config()
         
-    def _get_default_temperament(self) -> Dict[str, float]:
-        """Get default temperament values from config."""
-        return {
-            'curiosity': self.config.get('default_curiosity', 0.5),
-            'cautiousness': self.config.get('default_cautiousness', 0.5),
-            'creativity': self.config.get('default_creativity', 0.5),
-            'focus': self.config.get('default_focus', 0.5),
-            'adaptability': self.config.get('default_adaptability', 0.5)
-        }
+    def _load_config(self) -> None:
+        """Load and validate configuration."""
+        self.learning_rate = self.config.get('learning_rate', 0.01)
+        self.stability_threshold = self.config.get('stability_threshold', 0.1)
+        self.max_volatility = self.config.get('max_volatility', 0.5)
+        
+        # Validate configuration
+        if not 0 < self.learning_rate < 1:
+            raise ValueError(f"Learning rate must be between 0 and 1, got {self.learning_rate}")
+            
+        self.logger.record({
+            "event": "temperament_config_loaded",
+            "learning_rate": self.learning_rate,
+            "stability_threshold": self.stability_threshold,
+            "max_volatility": self.max_volatility,
+            "timestamp": time.time()
+        })
         
     def update_temperament(
         self,
@@ -152,25 +157,25 @@ class TemperamentSystem:
             
             # Apply adjustments with stability check
             new_temperament = {}
-            for trait, value in self.temperament.items():
+            for trait, value in self.state.temperament.items():
                 adjustment = adjustments.get(trait, 0.0)
                 new_value = value + adjustment
                 new_temperament[trait] = max(0.0, min(1.0, new_value))
                 
             # Update history
-            self.history.append(new_temperament)
-            if len(self.history) > self.max_history_size:
-                self.history.pop(0)
+            self.state.history.append(new_temperament)
+            if len(self.state.history) > self.state.max_history_size:
+                self.state.history.pop(0)
                 
             # Log update
             self.logger.record({
                 "event": "temperament_updated",
-                "old_temperament": self.temperament,
+                "old_temperament": self.state.temperament,
                 "new_temperament": new_temperament,
                 "adjustments": adjustments
             })
             
-            self.temperament = new_temperament
+            self.state.temperament = new_temperament
             return new_temperament
             
         except Exception as e:
@@ -178,7 +183,7 @@ class TemperamentSystem:
                 "error": f"Temperament update failed: {str(e)}",
                 "stack_trace": traceback.format_exc()
             })
-            return self.temperament
+            return self.state.temperament
             
     def _calculate_adjustments(
         self,
@@ -191,19 +196,19 @@ class TemperamentSystem:
         # Base adjustments from performance metrics
         if 'loss' in performance_metrics:
             loss = performance_metrics['loss']
-            adjustments['curiosity'] = -loss * self.adaptation_rate
-            adjustments['cautiousness'] = loss * self.adaptation_rate
+            adjustments['curiosity'] = -loss * self.learning_rate
+            adjustments['cautiousness'] = loss * self.learning_rate
             
         if 'accuracy' in performance_metrics:
             accuracy = performance_metrics['accuracy']
-            adjustments['creativity'] = accuracy * self.adaptation_rate
-            adjustments['focus'] = (1 - accuracy) * self.adaptation_rate
+            adjustments['creativity'] = accuracy * self.learning_rate
+            adjustments['focus'] = (1 - accuracy) * self.learning_rate
             
         # Apply external factors if provided
         if external_factors:
             for factor, value in external_factors.items():
-                if factor in self.temperament:
-                    adjustments[factor] = adjustments.get(factor, 0.0) + value * self.adaptation_rate
+                if factor in self.state.temperament:
+                    adjustments[factor] = adjustments.get(factor, 0.0) + value * self.learning_rate
                     
         return adjustments
         
@@ -217,7 +222,7 @@ class TemperamentSystem:
         Returns:
             Current score for the trait
         """
-        return self.temperament.get(trait, 0.5)
+        return self.state.temperament.get(trait, 0.5)
         
     def get_stability(self) -> float:
         """
@@ -226,11 +231,11 @@ class TemperamentSystem:
         Returns:
             Stability score between 0 and 1
         """
-        if len(self.history) < 2:
+        if len(self.state.history) < 2:
             return 1.0
             
-        current = self.temperament
-        previous = self.history[-2]
+        current = self.state.temperament
+        previous = self.state.history[-2]
         
         differences = [
             abs(current[trait] - previous[trait])
@@ -268,7 +273,7 @@ class TemperamentSystem:
             label = "melancholic"
         elif float_lt(self._score, 0.0):
             label = "restless"
-        elif float_lt(self._score, self._config.sluggish_threshold):
+        elif float_lt(self._score, self.config.sluggish_threshold):
             label = "calm"
         else:
             label = "curious"
@@ -349,7 +354,7 @@ class TemperamentSystem:
     def _apply_config_updates(self, updates: Dict[str, float]) -> None:
         """Apply validated updates to configuration."""
         for key, value in updates.items():
-            setattr(self._config, key, value)
+            setattr(self.config, key, value)
 
     def _log_adjustments(self, updates: Dict[str, float]) -> None:
         """Log temperament adjustments."""
@@ -411,15 +416,15 @@ class TemperamentSystem:
 
     def _update_confidence(self, confidence: float) -> None:
         """Update confidence tracking."""
-        self._confidence_history.append(confidence)
-        self._sleep_confidence_sum += confidence
-        self._sleep_confidence_count += 1
+        self.state.confidence_history.append(confidence)
+        self.state.sleep_confidence_sum += confidence
+        self.state.sleep_confidence_count += 1
 
     def _calculate_avg_confidence(self) -> float:
         """Calculate average confidence with safe division."""
         return safe_divide(
-            self._sleep_confidence_sum,
-            self._sleep_confidence_count,
+            self.state.sleep_confidence_sum,
+            self.state.sleep_confidence_count,
             default=0.5
         )
 
@@ -430,36 +435,36 @@ class TemperamentSystem:
         bias = self._calculate_lifecycle_bias(lifecycle_stage)
         
         target_score = base_score + bias + (
-            self._config.confidence_feedback_strength * (avg_confidence - 0.5)
+            self.config.confidence_feedback_strength * (avg_confidence - 0.5)
         )
 
         if curiosity_pressure is not None:
-            target_score += self._config.curiosity_boost * curiosity_pressure
+            target_score += self.config.curiosity_boost * curiosity_pressure
 
         target_score += self._calculate_noise()
         return max(-1.0, min(1.0, target_score))
 
     def _calculate_lifecycle_bias(self, lifecycle_stage: float) -> float:
         """Calculate lifecycle bias based on stage."""
-        if float_lt(lifecycle_stage, self._config.early_lifecycle):
-            return self._config.curiosity_boost * (1 - lifecycle_stage / self._config.early_lifecycle)
+        if float_lt(lifecycle_stage, self.config.early_lifecycle):
+            return self.config.curiosity_boost * (1 - lifecycle_stage / self.config.early_lifecycle)
         
-        if float_lt(lifecycle_stage, self._config.mid_lifecycle):
-            if len(self._history) >= self._config.history_maxlen:
-                variance = torch.var(torch.tensor(list(self._history), device=self._device)).item()
+        if float_lt(lifecycle_stage, self.config.mid_lifecycle):
+            if len(self.state.history) >= self.config.history_maxlen:
+                variance = torch.var(torch.tensor(list(self.state.history), device=self._device)).item()
                 return -0.2 * variance
             return 0.0
         
-        return -self._config.curiosity_boost * (
-            (lifecycle_stage - self._config.mid_lifecycle) / 
-            (1.0 - self._config.mid_lifecycle)
+        return -self.config.curiosity_boost * (
+            (lifecycle_stage - self.config.mid_lifecycle) / 
+            (1.0 - self.config.mid_lifecycle)
         )
 
     def _calculate_noise(self) -> float:
         """Calculate random noise for temperament."""
-        noise = torch.randn(1, device=self._device).item() * self._config.melancholy_noise
+        noise = torch.randn(1, device=self._device).item() * self.config.melancholy_noise
         if self.mood_label == "melancholic":
-            noise += torch.randn(1, device=self._device).item() * self._config.melancholy_noise
+            noise += torch.randn(1, device=self._device).item() * self.config.melancholy_noise
         return noise
 
     def _apply_smoothing(self, target_score: float, time_since_last: Optional[float]) -> None:
@@ -467,14 +472,14 @@ class TemperamentSystem:
         if time_since_last is None:
             time_since_last = time.time() - self._last_update
         
-        decay = self._config.decay_rate * time_since_last
-        smoothing = self._config.temp_smoothing_factor * (1.0 - decay)
+        decay = self.config.decay_rate * time_since_last
+        smoothing = self.config.temp_smoothing_factor * (1.0 - decay)
         self._score = (1.0 - smoothing) * target_score + smoothing * self._score
         self._score = max(-1.0, min(1.0, self._score))
 
     def _update_state(self) -> None:
         """Update internal state after temperament change."""
-        self._history.append(self._score)
+        self.state.history.append(self._score)
         self._last_update = time.time()
         self._mood_cache = None
 

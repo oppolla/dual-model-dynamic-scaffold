@@ -338,7 +338,7 @@ class LayerDiscoveryStrategy:
             raise
 
 class CrossAttentionLayer(nn.Module):
-    """Implements cross-attention between base and scaffold models."""
+    """Cross attention layer for scaffold integration."""
     
     def __init__(
         self,
@@ -349,11 +349,11 @@ class CrossAttentionLayer(nn.Module):
         device: str = 'cpu'
     ):
         """
-        Initialize cross-attention layer.
+        Initialize cross attention layer.
         
         Args:
-            config: Configuration dictionary with layer parameters
-            logger: Logger instance for logging
+            config: Configuration dictionary
+            logger: Logger instance
             hidden_size: Optional hidden size override
             num_heads: Optional number of attention heads override
             device: Device for tensor operations
@@ -362,37 +362,31 @@ class CrossAttentionLayer(nn.Module):
         self.config = config
         self.logger = logger
         self.device = device
-        
-        # Load configuration
         self._load_config(hidden_size, num_heads)
-        
-        # Initialize components
         self._init_projections()
         self._init_gating()
         self._init_normalization()
         self._init_sparse_mask()
         self._init_weights()
-        
-        # Initialize cache
         self.reset_cache()
         
     def _load_config(self, hidden_size: Optional[int], num_heads: Optional[int]) -> None:
-        """Load configuration parameters."""
+        """Load and validate configuration."""
         self.hidden_size = hidden_size or self.config.get('hidden_size', 768)
         self.num_heads = num_heads or self.config.get('num_heads', 12)
         self.head_dim = self.hidden_size // self.num_heads
+        self.scale = 1.0 / math.sqrt(self.head_dim)
         
         # Validate configuration
         if self.hidden_size % self.num_heads != 0:
-            raise ValueError(
-                f"hidden_size ({self.hidden_size}) must be divisible by num_heads ({self.num_heads})"
-            )
+            raise ValueError(f"Hidden size {self.hidden_size} must be divisible by num_heads {self.num_heads}")
             
         self.logger.record({
             "event": "cross_attention_config_loaded",
             "hidden_size": self.hidden_size,
             "num_heads": self.num_heads,
-            "head_dim": self.head_dim
+            "head_dim": self.head_dim,
+            "timestamp": time.time()
         })
         
     def _init_projections(self) -> None:
@@ -468,7 +462,7 @@ class CrossAttentionLayer(nn.Module):
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         
         # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
         
         # Apply attention mask if provided
         if attention_mask is not None:

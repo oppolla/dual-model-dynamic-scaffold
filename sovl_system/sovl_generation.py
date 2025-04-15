@@ -1,7 +1,7 @@
 import torch
 import time
 from collections import deque
-from typing import Optional, Dict, Any, List, Union, Callable, Tuple
+from typing import Optional, Dict, Any, List, Union, Callable, Tuple, Set
 import contextlib
 import traceback
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -681,3 +681,71 @@ class GenerationManager:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             self._log_event(event="generate_cleanup", data={})
+
+def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
+    """Calculate confidence score for generated tokens."""
+    try:
+        # Get probabilities for generated tokens
+        probs = torch.softmax(logits, dim=-1)
+        token_probs = torch.gather(probs, -1, generated_ids.unsqueeze(-1)).squeeze(-1)
+        
+        # Calculate average confidence
+        confidence = token_probs.mean().item()
+        return max(0.0, min(1.0, confidence))
+    except Exception as e:
+        logger.record({
+            "error": f"Confidence calculation failed: {str(e)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        return 0.5
+
+def detect_repetitions(token_ids: List[int], special_ids: Set[int], min_rep_length: int = 3) -> Optional[Tuple[int, int]]:
+    """Detect repeating token sequences."""
+    try:
+        filtered = [i for i in token_ids if i not in special_ids]
+        for i in range(len(filtered) - 2 * min_rep_length + 1):
+            window = filtered[i:i + min_rep_length]
+            next_window = filtered[i + min_rep_length:i + 2 * min_rep_length]
+            if window == next_window:
+                return (i, i + min_rep_length)
+        return None
+    except Exception as e:
+        logger.record({
+            "error": f"Repetition detection failed: {str(e)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        return None
+
+def adjust_temperature(
+    base_temp: float,
+    temperament_score: float,
+    mood_influence: float = 0.3,
+    min_temp: float = 0.5,
+    max_temp: float = 1.5,
+    curiosity_pressure: Optional[float] = None
+) -> float:
+    """Adjust temperature based on temperament and curiosity."""
+    try:
+        # Clamp input values
+        base_temp = max(min_temp, min(max_temp, base_temp))
+        temperament_score = max(-1.0, min(1.0, temperament_score))
+        mood_influence = max(0.0, min(1.0, mood_influence))
+        
+        # Calculate temperature adjustment
+        temp_adjustment = mood_influence * 0.3 * temperament_score
+        if curiosity_pressure is not None:
+            curiosity_pressure = max(0.0, min(1.0, curiosity_pressure))
+            temp_adjustment += curiosity_pressure * 0.1
+        
+        # Apply adjustment
+        adjusted_temp = max(min_temp, min(max_temp, base_temp + temp_adjustment))
+        return adjusted_temp
+    except Exception as e:
+        logger.record({
+            "error": f"Temperature adjustment failed: {str(e)}",
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc()
+        })
+        return base_temp
