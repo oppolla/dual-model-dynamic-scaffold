@@ -7,6 +7,9 @@ import traceback
 from threading import RLock
 from sovl_utils import synchronized, safe_divide, float_lt
 from sovl_logger import Logger
+from sovl_config import ConfigManager
+from sovl_state import SOVLState
+from sovl_curiosity import CuriosityManager
 
 @dataclass
 class TemperamentConfig:
@@ -413,5 +416,74 @@ class TemperamentSystem:
                 "error": f"Temperament computation failed: {str(e)}",
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc()
+            })
+            raise
+
+    @classmethod
+    def create_from_config(cls, config_manager: ConfigManager, logger: Logger, 
+                          device: torch.device = torch.device("cpu")) -> 'TemperamentSystem':
+        """
+        Create a TemperamentSystem instance from a ConfigManager.
+
+        Args:
+            config_manager: ConfigManager instance containing temperament settings
+            logger: Logger instance for recording events
+            device: Device for tensor operations
+
+        Returns:
+            Initialized TemperamentSystem instance
+        """
+        controls_config = config_manager.get_section("controls_config")
+        temperament_config = TemperamentConfig(
+            eager_threshold=controls_config.get("temp_eager_threshold", 0.7),
+            sluggish_threshold=controls_config.get("temp_sluggish_threshold", 0.3),
+            mood_influence=controls_config.get("temp_mood_influence", 0.5),
+            curiosity_boost=controls_config.get("temp_curiosity_boost", 0.2),
+            restless_drop=controls_config.get("temp_restless_drop", 0.1),
+            melancholy_noise=controls_config.get("temp_melancholy_noise", 0.1),
+            confidence_feedback_strength=controls_config.get("temp_conf_feedback_strength", 0.3),
+            temp_smoothing_factor=controls_config.get("temp_smoothing_factor", 0.1),
+            history_maxlen=controls_config.get("temperament_history_maxlen", 5),
+            lifecycle_params={
+                "gestation": controls_config.get("temp_gestation_params", {"bias": 0.2, "decay": 0.1}),
+                "awakening": controls_config.get("temp_awakening_params", {"bias": 0.1, "decay": 0.05}),
+                "maturity": controls_config.get("temp_maturity_params", {"bias": 0.0, "decay": 0.0}),
+                "decline": controls_config.get("temp_decline_params", {"bias": -0.1, "decay": 0.05})
+            }
+        )
+        return cls(config=temperament_config, logger=logger, device=device)
+
+    def update_from_state(self, state: SOVLState, curiosity_manager: Optional[CuriosityManager] = None) -> None:
+        """
+        Update temperament based on system state.
+
+        Args:
+            state: Current system state
+            curiosity_manager: Optional curiosity manager for pressure calculation
+        """
+        try:
+            curiosity_pressure = curiosity_manager.get_pressure() if curiosity_manager else 0.0
+            self.compute_and_update(
+                sleep_confidence_sum=state.sleep_confidence_sum,
+                sleep_confidence_count=state.sleep_confidence_count,
+                data_exposure=state.data_exposure,
+                lora_capacity=state.lora_capacity,
+                curiosity_pressure=curiosity_pressure
+            )
+            state.temperament_score = self.score
+            state.mood_label = self.mood_label
+            self._logger.record({
+                "event": "temperament_updated",
+                "score": self.score,
+                "mood_label": self.mood_label,
+                "timestamp": time.time(),
+                "conversation_id": state.conversation_id
+            })
+        except Exception as e:
+            self._logger.record({
+                "error": f"Failed to update temperament: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": state.conversation_id
             })
             raise

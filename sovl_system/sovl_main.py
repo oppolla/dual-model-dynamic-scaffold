@@ -181,29 +181,26 @@ class SOVLSystem:
         )
 
     def _initialize_temperament(self) -> None:
-        """Set up the temperament system."""
-        temperament_config = TemperamentConfig(
-            eager_threshold=self.controls_config.get("temp_eager_threshold", 0.7),
-            sluggish_threshold=self.controls_config.get("temp_sluggish_threshold", 0.3),
-            mood_influence=self.controls_config.get("temp_mood_influence", 0.5),
-            curiosity_boost=self.controls_config.get("temp_curiosity_boost", 0.2),
-            restless_drop=self.controls_config.get("temp_restless_drop", 0.1),
-            melancholy_noise=self.controls_config.get("temp_melancholy_noise", 0.1),
-            confidence_feedback_strength=self.controls_config.get("temp_conf_feedback_strength", 0.3),
-            temp_smoothing_factor=self.controls_config.get("temp_smoothing_factor", 0.1),
-            history_maxlen=self.controls_config.get("temperament_history_maxlen", 5),
-            lifecycle_params={
-                "gestation": self.controls_config.get("temp_gestation_params", {"bias": 0.2, "decay": 0.1}),
-                "awakening": self.controls_config.get("temp_awakening_params", {"bias": 0.1, "decay": 0.05}),
-                "maturity": self.controls_config.get("temp_maturity_params", {"bias": 0.0, "decay": 0.0}),
-                "decline": self.controls_config.get("temp_decline_params", {"bias": -0.1, "decay": 0.05})
-            }
-        )
-        self.temperament_system = TemperamentSystem(
-            config=temperament_config,
-            logger=self.logger,
-            device=self.device
-        )
+        """Initialize the temperament system."""
+        try:
+            self.temperament_system = TemperamentSystem.create_from_config(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                device=self.device
+            )
+            self.logger.record({
+                "event": "temperament_initialized",
+                "timestamp": time.time(),
+                "conversation_id": self.state.conversation_id
+            })
+        except Exception as e:
+            self.logger.record({
+                "error": f"Failed to initialize temperament system: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "conversation_id": self.state.conversation_id
+            })
+            raise
 
     def _initialize_trainer(self) -> None:
         """Set up the trainer with training configuration."""
@@ -350,16 +347,6 @@ class SOVLSystem:
 
     def _insert_cross_attention(self) -> None:
         """Inject cross-attention layers into the model."""
-        if not self.cross_attn_config.get("enable_cross_attention", True):
-            self.logger.record({
-                "event": "cross_attention",
-                "status": "disabled",
-                "timestamp": time.time(),
-                "conversation_id": "init"
-            })
-            return
-
-        print("Injecting cross-attention layers...")
         try:
             self.cross_attention_injector.inject_cross_attention(
                 model=self.base_model,
@@ -370,23 +357,9 @@ class SOVLSystem:
                 token_map=self.scaffold_token_mapper,
                 device=self.device
             )
-
-            expected_layers = self.core_config.get("cross_attn_layers", [])
-            if not self.cross_attention_injector.verify_injection(
-                self.base_model,
-                expected_layers,
-                self.base_model.config
-            ):
-                raise ValueError("Cross-attention layer verification failed")
-            self.logger.record({
-                "event": "cross_attention_injected",
-                "timestamp": time.time(),
-                "conversation_id": "init"
-            })
         except Exception as e:
             self.error_handler.handle_cross_attention_error(e)
             raise
-        print("Cross-attention injection complete.")
 
     def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
         """Check system memory health."""
@@ -484,31 +457,18 @@ class SOVLSystem:
             )
 
     def _update_temperament(self) -> None:
-        """Update temperament based on current state."""
+        """Update the temperament system based on current state."""
         try:
-            curiosity_pressure = self.curiosity_manager.get_pressure() if self.curiosity_manager else 0.0
-            self.temperament_system.compute_and_update(
-                sleep_confidence_sum=self.state.sleep_confidence_sum,
-                sleep_confidence_count=self.state.sleep_confidence_count,
-                data_exposure=self.state.data_exposure,
-                lora_capacity=self.state.lora_capacity,
-                curiosity_pressure=curiosity_pressure
+            self.temperament_system.update_from_state(
+                state=self.state,
+                curiosity_manager=self.curiosity_manager
             )
-            self.state.temperament_score = self.temperament_system.score
-            self.state.mood_label = self.temperament_system.mood_label
-            self.logger.record({
-                "event": "temperament_updated",
-                "score": self.temperament_system.score,
-                "mood_label": self.temperament_system.mood_label,
-                "timestamp": time.time(),
-                "conversation_id": self.history.conversation_id
-            })
         except Exception as e:
             self.logger.record({
                 "error": f"Failed to update temperament: {str(e)}",
                 "timestamp": time.time(),
                 "stack_trace": traceback.format_exc(),
-                "conversation_id": self.history.conversation_id
+                "conversation_id": self.state.conversation_id
             })
             raise
 

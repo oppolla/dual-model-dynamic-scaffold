@@ -1056,6 +1056,66 @@ class CrossAttentionInjector:
             })
             raise
 
+    def inject_cross_attention(
+        self,
+        model: nn.Module,
+        scaffold_model: nn.Module,
+        core_config: Dict[str, Any],
+        cross_attn_config: Dict[str, Any],
+        lora_config: Dict[str, Any],
+        token_map: Optional[Dict] = None,
+        device: Optional[torch.device] = None
+    ) -> None:
+        """
+        Inject cross-attention layers into the model with full configuration support.
+
+        Args:
+            model: The base model to inject cross-attention into
+            scaffold_model: The scaffold model providing context
+            core_config: Core configuration containing layer specifications
+            cross_attn_config: Cross-attention specific configuration
+            lora_config: LoRA configuration for adapter layers
+            token_map: Optional token mapping between models
+            device: Device to perform operations on
+        """
+        try:
+            if not cross_attn_config.get("enable_cross_attention", True):
+                self.logger.record({
+                    "event": "cross_attention",
+                    "status": "disabled",
+                    "timestamp": time.time()
+                })
+                return
+
+            print("Injecting cross-attention layers...")
+            
+            # Get layer configuration
+            layers_to_inject = core_config.get("cross_attn_layers", [])
+            injection_strategy = cross_attn_config.get("injection_strategy", "sequential")
+            
+            # Perform injection
+            self.inject(
+                base_model=model,
+                scaffold_model=scaffold_model,
+                layers_to_inject=layers_to_inject,
+                injection_strategy=injection_strategy,
+                token_map=token_map
+            )
+            
+            # Verify injection
+            if not self.verify_injection(model, layers_to_inject, model.config):
+                raise ValueError("Cross-attention layer verification failed")
+                
+            self.logger.record({
+                "event": "cross_attention_injected",
+                "timestamp": time.time()
+            })
+            print("Cross-attention injection complete.")
+            
+        except Exception as e:
+            self.error_handler.handle_cross_attention_error(e)
+            raise
+
 def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for scaffold generation."""
     try:
