@@ -650,6 +650,132 @@ class TrainingCycleManager:
         self.training_config = config_manager.get_section("training_config")
         self.controls_config = config_manager.get_section("controls_config")
         
+    def _validate_data(
+        self, train_data: List[Dict[str, Any]], valid_data: List[Dict[str, Any]], batch_size: int
+    ) -> Dict[str, Any]:
+        """Validate training and validation data sufficiency.
+
+        Args:
+            train_data: List of training data dictionaries.
+            valid_data: List of validation data dictionaries.
+            batch_size: Size of each training batch.
+
+        Returns:
+            Dict indicating validation status; contains 'status' key with 'insufficient_data'
+            if validation fails, else None.
+        """
+        if len(train_data) < batch_size or not valid_data:
+            self.logger.record({
+                "warning": "Insufficient data for training",
+                "train_data_size": len(train_data),
+                "valid_data_size": len(valid_data),
+                "batch_size": batch_size,
+                "timestamp": time.time()
+            })
+            return {"status": "insufficient_data"}
+        return {}
+
+    def _log_cycle_start(
+        self, epochs: int, batch_size: int, influence_weight: float
+    ) -> None:
+        """Log the start of a training cycle.
+
+        Args:
+            epochs: Number of training epochs.
+            batch_size: Size of each training batch.
+            influence_weight: Lifecycle influence weight for the cycle.
+        """
+        self.logger.record({
+            "event": "training_cycle_start",
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "data_exposure": self.trainer.data_exposure,
+            "scaffold_influence": influence_weight,
+            "timestamp": time.time()
+        })
+
+    def _handle_dry_run(
+        self,
+        train_data: List[Dict[str, Any]],
+        scaffold_provider: Optional[Callable],
+        dry_run_params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Handle dry run execution if configured.
+
+        Args:
+            train_data: List of training data dictionaries.
+            scaffold_provider: Optional provider for scaffold context.
+            dry_run_params: Parameters for dry run configuration.
+
+        Returns:
+            Dict containing dry run results, including status and loss.
+        """
+        if dry_run_params.get("skip_training", True):
+            dry_batch = train_data[:dry_run_params.get("max_samples", 2)]
+            loss, metrics = self.trainer.train_step_with_scaffold(
+                batch=dry_batch,
+                scaffold_provider=scaffold_provider,
+                dry_run=True,
+                dry_run_params=dry_run_params
+            )
+            self.logger.record({
+                "event": "dry_run_training_complete",
+                "loss": loss,
+                "timestamp": time.time()
+            })
+            return {"status": "dry_run_complete", "loss": loss}
+        return {}
+
+    def _execute_training(
+        self,
+        train_data: List[Dict[str, Any]],
+        valid_data: List[Dict[str, Any]],
+        scaffold_provider: Optional[Callable],
+        epochs: int
+    ) -> Dict[str, Any]:
+        """Execute the core training loop.
+
+        Args:
+            train_data: List of training data dictionaries.
+            valid_data: List of validation data dictionaries.
+            scaffold_provider: Optional provider for scaffold context.
+            epochs: Number of training epochs.
+
+        Returns:
+            Dict containing training results, including history, best validation loss,
+            final epoch, and early stopping status.
+        """
+        return self.trainer.run_training_cycle(
+            train_data=train_data,
+            validation_data=valid_data,
+            scaffold_provider=scaffold_provider,
+            max_epochs=epochs,
+            early_stopping_patience=self.training_config.get("max_patience", 3)
+        )
+
+    def _process_training_results(self, training_results: Dict[str, Any], start_time: float) -> Dict[str, Any]:
+        """Process training results and update trainer state.
+
+        Args:
+            training_results: Dict containing training outcomes.
+            start_time: Timestamp when training started.
+
+        Returns:
+            Updated training results dict.
+        """
+        self.trainer.last_weight = self.trainer.get_life_curve_weight()
+        self.logger.record({
+            "event": "training_cycle_complete",
+            "duration": time.time() - start_time,
+            "last_weight": self.trainer.last_weight,
+            "training_history": training_results.get("training_history", []),
+            "best_val_loss": training_results.get("best_val_loss", float("inf")),
+            "final_epoch": training_results.get("final_epoch", 0),
+            "early_stopped": training_results.get("early_stopped", False),
+            "timestamp": time.time()
+        })
+        return training_results
+
     def run_training_cycle(
         self,
         train_data: List[Dict[str, Any]],
@@ -658,89 +784,61 @@ class TrainingCycleManager:
         epochs: Optional[int] = None,
         batch_size: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Run a complete training cycle with validation."""
+        """Run a complete training cycle with validation.
+
+        Args:
+            train_data: List of training data dictionaries.
+            valid_data: List of validation data dictionaries.
+            scaffold_provider: Optional provider for scaffold context.
+            epochs: Number of training epochs, defaults to config value.
+            batch_size: Size of each training batch, defaults to config value.
+
+        Returns:
+            Dict containing training results or status if cycle is skipped.
+
+        Raises:
+            Exception: If training fails due to unexpected errors.
+        """
         try:
             epochs = epochs or self.training_config.get("train_epochs", 3)
             batch_size = batch_size or self.training_config.get("batch_size", 1)
-            
+
             # Validate data
-            if len(train_data) < batch_size or not valid_data:
-                self.logger.record({
-                    "warning": "Insufficient data for training",
-                    "train_data_size": len(train_data),
-                    "valid_data_size": len(valid_data),
-                    "batch_size": batch_size,
-                    "timestamp": time.time()
-                })
-                return {"status": "insufficient_data"}
-            
+            validation_result = self._validate_data(train_data, valid_data, batch_size)
+            if validation_result:
+                return validation_result
+
             # Get lifecycle weight
             influence_weight = (
                 self.trainer.get_life_curve_weight()
                 if self.controls_config.get("enable_lifecycle_weighting", True)
                 else self.trainer.last_weight
             )
-            
+
             # Log cycle start
-            self.logger.record({
-                "event": "training_cycle_start",
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "data_exposure": self.trainer.data_exposure,
-                "scaffold_influence": influence_weight,
-                "timestamp": time.time()
-            })
-            
-            # Handle dry run if configured
+            self._log_cycle_start(epochs, batch_size, influence_weight)
+
+            # Handle dry run
             if self.training_config.get("dry_run", False):
                 dry_run_params = self.training_config.get("dry_run_params", {})
-                if dry_run_params.get("skip_training", True):
-                    dry_batch = train_data[:dry_run_params.get("max_samples", 2)]
-                    loss, metrics = self.trainer.train_step_with_scaffold(
-                        batch=dry_batch,
-                        scaffold_provider=scaffold_provider,
-                        dry_run=True,
-                        dry_run_params=dry_run_params
-                    )
-                    self.logger.record({
-                        "event": "dry_run_training_complete",
-                        "loss": loss,
-                        "timestamp": time.time()
-                    })
-                    return {"status": "dry_run_complete", "loss": loss}
-            
-            # Run actual training
+                dry_run_result = self._handle_dry_run(train_data, scaffold_provider, dry_run_params)
+                if dry_run_result:
+                    return dry_run_result
+
+            # Run training
             start_time = time.time()
-            training_results = self.trainer.run_training_cycle(
-                train_data=train_data,
-                validation_data=valid_data,
-                scaffold_provider=scaffold_provider,
-                max_epochs=epochs,
-                early_stopping_patience=self.training_config.get("max_patience", 3)
-            )
-            
-            # Update weights and log completion
-            self.trainer.last_weight = self.trainer.get_life_curve_weight()
-            self.logger.record({
-                "event": "training_cycle_complete",
-                "duration": time.time() - start_time,
-                "last_weight": self.trainer.last_weight,
-                "training_history": training_results.get("training_history", []),
-                "best_val_loss": training_results.get("best_val_loss", float("inf")),
-                "final_epoch": training_results.get("final_epoch", 0),
-                "early_stopped": training_results.get("early_stopped", False),
-                "timestamp": time.time()
-            })
-            
-            return training_results
-            
+            training_results = self._execute_training(train_data, valid_data, scaffold_provider, epochs)
+
+            # Process results
+            return self._process_training_results(training_results, start_time)
+
         except Exception as e:
             self.logger.record({
                 "error": f"Training cycle failed: {str(e)}",
                 "timestamp": time.time()
             })
             raise
-            
+
     def run_sleep_training(self, log_entries: List[Dict[str, Any]]) -> None:
         """Run sleep training on dream-generated content."""
         try:
