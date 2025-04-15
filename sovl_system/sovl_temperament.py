@@ -6,10 +6,12 @@ from dataclasses import dataclass
 import traceback
 from threading import RLock
 from sovl_utils import synchronized, safe_divide, float_lt
-from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_state import SOVLState
 from sovl_curiosity import CuriosityManager
+
+# Assuming the new Logger is imported
+from sovl_logger import Logger, LoggerConfig
 
 @dataclass
 class TemperamentConfig:
@@ -128,7 +130,8 @@ class TemperamentSystem:
         self._logger.record({
             "event": "temperament_system_initialized",
             "state_version": self.STATE_VERSION,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "conversation_id": str(uuid.uuid4())  # Ensure conversation_id
         })
 
     @property
@@ -194,15 +197,17 @@ class TemperamentSystem:
                 self._logger.record({
                     "event": "temperament_adjusted",
                     "message": f"Temperament params updated: {updates}",
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "conversation_id": str(uuid.uuid4())
                 })
 
         except Exception as e:
-            self._logger.record({
-                "error": f"Temperament adjustment failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self._logger.log_error(
+                error_msg=f"Temperament adjustment failed: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc(),
+                conversation_id=str(uuid.uuid4())
+            )
             raise
 
     def _validate_and_collect_updates(self, *params: Optional[float]) -> Dict[str, float]:
@@ -234,7 +239,8 @@ class TemperamentSystem:
         self._logger.record({
             "event": "temperament_adjusted",
             "updates": updates,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "conversation_id": str(uuid.uuid4())
         })
 
     @synchronized("_lock")
@@ -268,18 +274,22 @@ class TemperamentSystem:
                 "event": "temperament_updated",
                 "message": f"Temperament score: {self._score:.3f} ({self.mood_label}, "
                            f"lifecycle: {lifecycle_stage:.2f}), confidence feedback: {avg_confidence:.2f}",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "conversation_id": str(uuid.uuid4()),
+                "mood": self.mood_label,
+                "confidence_score": confidence
             })
 
         except Exception as e:
-            self._logger.record({
-                "error": f"Temperament update failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "confidence": confidence,
-                "lifecycle_stage": lifecycle_stage,
-                "curiosity_pressure": curiosity_pressure
-            })
+            self._logger.log_error(
+                error_msg=f"Temperament update failed: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc(),
+                conversation_id=str(uuid.uuid4()),
+                confidence_score=confidence,
+                lifecycle_stage=lifecycle_stage,
+                curiosity_pressure=curiosity_pressure
+            )
             raise
 
     def _update_confidence(self, confidence: float) -> None:
@@ -356,11 +366,12 @@ class TemperamentSystem:
         self._logger.record({
             "event": "temperament_updated",
             "score": self._score,
-            "mood_label": self.mood_label,
-            "confidence": confidence,
+            "mood": self.mood_label,
+            "confidence_score": confidence,
             "avg_confidence": avg_confidence,
             "lifecycle_stage": lifecycle_stage,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "conversation_id": str(uuid.uuid4())
         })
 
     @synchronized("_lock")
@@ -406,17 +417,19 @@ class TemperamentSystem:
                 "avg_confidence": avg_confidence,
                 "lifecycle_stage": lifecycle_stage,
                 "curiosity_pressure": curiosity_pressure,
-                "new_score": self._score,
-                "mood_label": self.mood_label,
-                "timestamp": time.time()
+                "score": self._score,
+                "mood": self.mood_label,
+                "timestamp": time.time(),
+                "conversation_id": str(uuid.uuid4())
             })
             
         except Exception as e:
-            self._logger.record({
-                "error": f"Temperament computation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self._logger.log_error(
+                error_msg=f"Temperament computation failed: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc(),
+                conversation_id=str(uuid.uuid4())
+            )
             raise
 
     @classmethod
@@ -475,15 +488,15 @@ class TemperamentSystem:
             self._logger.record({
                 "event": "temperament_updated",
                 "score": self.score,
-                "mood_label": self.mood_label,
+                "mood": self.mood_label,
                 "timestamp": time.time(),
                 "conversation_id": state.conversation_id
             })
         except Exception as e:
-            self._logger.record({
-                "error": f"Failed to update temperament: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc(),
-                "conversation_id": state.conversation_id
-            })
+            self._logger.log_error(
+                error_msg=f"Failed to update temperament: {str(e)}",
+                error_type=type(e).__name__,
+                stack_trace=traceback.format_exc(),
+                conversation_id=state.conversation_id
+            )
             raise
