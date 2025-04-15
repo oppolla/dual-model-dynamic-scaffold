@@ -1,6 +1,7 @@
 import time
 from typing import Any, Dict, List, Optional
 from collections import deque
+import traceback
 
 import torch
 from torch import nn
@@ -78,7 +79,11 @@ class Curiosity:
     def _log_error(self, message: str) -> None:
         """Log error if logger is available."""
         if self.logger:
-            self.logger.record({"error": message, "timestamp": time.time()})
+            self.logger.log_error(
+                error_msg=message,
+                error_type="curiosity_error",
+                stack_trace=traceback.format_exc()
+            )
 
 
 class CuriosityPressure:
@@ -142,7 +147,11 @@ class CuriosityCallbacks:
     def _log_error(self, message: str) -> None:
         """Log error if logger is available."""
         if self.logger:
-            self.logger.record({"error": message, "timestamp": time.time()})
+            self.logger.log_error(
+                error_msg=message,
+                error_type="curiosity_error",
+                stack_trace=traceback.format_exc()
+            )
 
 
 class CuriosityManager:
@@ -417,13 +426,18 @@ class CuriosityManager:
             "state_hash": state_hash
         }
         self.metrics.append(metric)
-        self._log_metrics_update(metric)
+        self._log_event("metrics_update", metric)
         self.callbacks.trigger_callback("metrics_updated", **metric)
 
     def _log_metrics_update(self, metric: Dict) -> None:
         """Log metrics update event."""
         if self.logger:
-            self.logger.record({"event": "metrics_updated", **metric})
+            self.logger.record_event(
+                event_type="curiosity_metrics_update",
+                message="Curiosity metrics updated",
+                level="info",
+                additional_info=metric
+            )
 
     def get_metrics(self, limit: Optional[int] = None) -> List[Dict]:
         """Get metrics with optional limit."""
@@ -545,11 +559,12 @@ class CuriosityManager:
 
         self.config.update(updates)
         if updates and self.logger:
-            self.logger.record({
-                "event": "tune_curiosity",
-                "params": updates,
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="curiosity_tune",
+                message="Curiosity parameters tuned",
+                level="info",
+                additional_info={"params": updates}
+            )
 
     def get_pressure(self) -> float:
         """Get current pressure value."""
@@ -614,17 +629,21 @@ class CuriosityManager:
     def _log_warning(self, message: str) -> None:
         """Log warning if logger is available."""
         if self.logger:
-            self.logger.record({"warning": message, "timestamp": time.time()})
-
-    def _log_error(self, message: str) -> None:
-        """Log error if logger is available."""
-        if self.logger:
-            self.logger.record({"error": message, "timestamp": time.time()})
+            self.logger.record_event(
+                event_type="curiosity_warning",
+                message=message,
+                level="warning"
+            )
 
     def _log_event(self, event: str, data: Dict) -> None:
         """Log event with additional data."""
         if self.logger:
-            self.logger.record({"event": event, "timestamp": time.time(), **data})
+            self.logger.record_event(
+                event_type=f"curiosity_{event}",
+                message=f"Curiosity event: {event}",
+                level="info",
+                additional_info=data
+            )
 
     def _update_state_novelty(self, state: Any, score: float) -> None:
         """Update state novelty scores if available."""

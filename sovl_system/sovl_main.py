@@ -47,16 +47,17 @@ def calculate_confidence_score(logits, generated_ids) -> float:
 
 class SystemContext:
     """Holds shared resources like logger, device, and config manager."""
-    def __init__(self, config_manager: ConfigManager):
+    def __init__(self, config_path: str):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.logging_manager = LoggingManager(config_manager)
+        self.logging_manager = LoggingManager(config_path)
         self.logger, self.error_logger = self.logging_manager.setup_logging()
-        self.config_manager = config_manager
-        self.logger.record({
-            "event": "system_context_initialized",
-            "timestamp": time.time(),
-            "conversation_id": "init"
-        })
+        self.config_manager = ConfigManager(config_path)
+        self.logger.record_event(
+            event_type="system_initialization",
+            message="System context initialized",
+            level="info",
+            additional_info={"device": str(self.device)}
+        )
 
 class ConfigHandler:
     """Manages configuration validation and access."""
@@ -199,21 +200,25 @@ class ErrorManager:
         )
 
     def handle_generation_error(self, error: Exception, prompt: str) -> str:
-        self.context.logger.record({
-            "error": f"Generation failed: {str(error)}",
-            "prompt": prompt,
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id
-        })
+        self.context.logger.log_error(
+            error_msg=f"Generation failed: {str(error)}",
+            error_type="generation_error",
+            stack_trace=traceback.format_exc(),
+            conversation_id=self.state_tracker.state.conversation_id,
+            state_hash=self.state_tracker.state.get_state_hash(),
+            additional_info={"prompt": prompt}
+        )
         return self.error_handler.handle_generation_error(error, prompt)
 
     def handle_curiosity_error(self, error: Exception, context: str) -> Optional[str]:
-        self.context.logger.record({
-            "error": f"Curiosity error: {str(error)}",
-            "context": context,
-            "timestamp": time.time(),
-            "conversation_id": self.state_tracker.state.conversation_id
-        })
+        self.context.logger.log_error(
+            error_msg=f"Curiosity error: {str(error)}",
+            error_type="curiosity_error",
+            stack_trace=traceback.format_exc(),
+            conversation_id=self.state_tracker.state.conversation_id,
+            state_hash=self.state_tracker.state.get_state_hash(),
+            additional_info={"context": context}
+        )
         return self.error_handler.handle_curiosity_error(error, context)
 
 class MemoryMonitor:
@@ -622,59 +627,75 @@ class ResponseGenerator:
             raise
 
 class SOVLSystem:
-    """Orchestrates the SOVL system components."""
-    def __init__(self, config_manager: ConfigManager):
-        self.context = SystemContext(config_manager)
-        self.config_handler = ConfigHandler(self.context)
-        if not self.config_handler.validate():
-            raise ValueError("Configuration validation failed")
-        self.state_tracker = StateTracker(self.context, self.config_handler)
-        self.model_loader = ModelLoader(self.context, self.config_handler)
-        self.model_loader.inject_cross_attention()
+    """Main system class for SOVL."""
+    def __init__(self, config_path: str):
+        self.config_path = config_path
+        self.context = SystemContext(config_path)
+        self.state_tracker = StateTracker(self.context)
         self.error_manager = ErrorManager(self.context, self.state_tracker)
-        self.memory_monitor = MemoryMonitor(self.context)
-        self.temperament_adjuster = TemperamentAdjuster(self.context, self.state_tracker)
-        self.curiosity_engine = CuriosityEngine(
-            self.context, self.model_loader, self.state_tracker, self.error_manager
+        self.temperament_system = TemperamentSystem.create_from_config(
+            self.context.config_manager,
+            self.context.logger,
+            self.context.device
         )
-        self.training_manager = TrainingManager(
-            self.context, self.config_handler, self.model_loader, self.state_tracker, self.error_manager
+        
+        self.context.logger.record_event(
+            event_type="system_initialization",
+            message="SOVL system initialized",
+            level="info",
+            additional_info={
+                "config_path": config_path,
+                "device": str(self.context.device)
+            }
         )
-        self.response_generator = ResponseGenerator(
-            self.context, self.model_loader, self.state_tracker, self.error_manager
-        )
-        # Set dependencies that require initialized components
-        self.response_generator.generation_manager.temperament = self.temperament_adjuster.temperament_system
-        self.response_generator.generation_manager.curiosity_manager = self.curiosity_engine.curiosity_manager
-        self.training_manager.tuner.curiosity_manager = self.curiosity_engine.curiosity_manager
-        # Load training data
-        self._load_training_data()
-        # Post-initialization
-        self.last_question_time = time.time()
-        self.last_weight = None
 
-    def _load_training_data(self):
+    def _update_temperament(self) -> None:
         try:
-            self.train_data, self.valid_data = load_training_data(
-                self.context.config_manager, self.context.logger
+            self.temperament_system.update_from_state(
+                self.state_tracker.state,
+                self.context.curiosity_manager
+            )
+            self.context.logger.record_event(
+                event_type="temperament_update",
+                message="Temperament updated successfully",
+                level="info",
+                additional_info={
+                    "temperament_score": self.state_tracker.state.temperament_score,
+                    "mood_label": self.state_tracker.state.mood_label
+                }
             )
         except Exception as e:
-            self.context.logger.record({
-                "error": f"Failed to load training data: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state_tracker.state.conversation_id,
-                "stack_trace": traceback.format_exc()
-            })
-            self.train_data = []
-            self.valid_data = []
+            self.context.logger.log_error(
+                error_msg=f"Failed to update temperament: {str(e)}",
+                error_type="temperament_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=self.state_tracker.state.conversation_id,
+                state_hash=self.state_tracker.state.get_state_hash()
+            )
+
+    def generate_response(self, prompt: str) -> str:
+        try:
+            response = self.context.model_manager.generate(prompt)
+            self.context.logger.record_event(
+                event_type="response_generation",
+                message="Response generated successfully",
+                level="info",
+                additional_info={
+                    "prompt_length": len(prompt),
+                    "response_length": len(response)
+                }
+            )
+            return response
+        except Exception as e:
+            return self.error_manager.handle_generation_error(e, prompt)
 
     def generate(self, prompt: str, max_new_tokens: int = 50, 
                  scaffold_weight: Optional[float] = None, **kwargs) -> str:
-        return self.response_generator.generate(prompt, max_new_tokens, scaffold_weight, **kwargs)
+        return self.generate_response(prompt)
 
     def train_step(self, batch: List[dict], dry_run: bool = False, 
                    dry_run_params: Optional[Dict[str, Any]] = None) -> Optional[float]:
-        return self.training_manager.train_step(batch, dry_run, dry_run_params)
+        return self.cycle_trainer.train_step(batch, dry_run, dry_run_params)
 
     def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
                           epochs: Optional[int] = None, batch_size: Optional[int] = None):
@@ -702,7 +723,7 @@ class SOVLSystem:
         self.training_manager.sleep_trainer.handle_sleep_train_complete(batch_size, data_exposure)
 
     def update_temperament(self):
-        self.temperament_adjuster.update_temperament(self.curiosity_engine.curiosity_manager)
+        self._update_temperament()
 
     def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
         return self.memory_monitor.check_memory_health(model_size, trainer)
