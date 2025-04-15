@@ -12,6 +12,8 @@ from collections import deque
 from torch.optim.lr_scheduler import get_linear_schedule_with_warmup
 from transformers import AutoModelForCausalLM
 import traceback
+from sovl_scaffold import ScaffoldProvider
+from sovl_error import ErrorManager
 
 @dataclass
 class TrainingConfig:
@@ -218,153 +220,95 @@ class LifecycleManager:
                     self.data_exposure += exposure_gain
 
 class DreamManager:
-    """Handles dreaming functionality and memory integration."""
-    def __init__(self, config: TrainingConfig, model: torch.nn.Module, tokenizer: Any, device: torch.device, state: Optional[Any], logger: Callable):
-        self.config = config
-        self.model = model
-        self.tokenizer = tokenizer
-        self.device = device
-        self.state = state
-        self.logger = logger
-        self.dream_memory = DreamMemory(
-            DreamMemoryConfig(
-                max_memories=100,
-                novelty_boost=config.dream_novelty_boost,
-                base_weight=config.dream_memory_weight,
-                decay_rate=config.dream_memory_decay,
-                prune_threshold=config.dream_prune_threshold,
-                noise_scale=config.dream_noise_scale,
-                melancholy_noise=config.temp_melancholy_noise
-            ),
-            device
-        )
-
-    def should_dream(self) -> bool:
-        """Determine if dreaming should occur."""
-        if not self.state or not self.config.dream_temperament_on:
+    """Manages dream generation and memory."""
+    
+    def __init__(self, state_manager: StateManager, error_manager: ErrorManager):
+        self.state_manager = state_manager
+        self.error_manager = error_manager
+        self.logger = logging.getLogger(__name__)
+        
+    def _check_memory_usage(self, tensor: torch.Tensor) -> bool:
+        """Check if adding a tensor would exceed memory limits."""
+        state = self.state_manager.get_current_state()
+        memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)  # Convert to MB
+        return state.total_dream_memory_mb + memory_size <= state.config.max_dream_memory_mb
+        
+    def _add_to_memory(self, dream_entry: Dict[str, Any]) -> bool:
+        """Add dream to memory if within limits."""
+        try:
+            state = self.state_manager.get_current_state()
+            tensor = dream_entry["tensor"]
+            
+            if not self._check_memory_usage(tensor):
+                self.logger.warning("Memory limit would be exceeded - pruning old memories")
+                self._maintain_memory()
+                
+                # Check again after pruning
+                if not self._check_memory_usage(tensor):
+                    return False
+                    
+            memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)
+            state.total_dream_memory_mb += memory_size
+            state.dream_memory.append(dream_entry)
+            return True
+            
+        except Exception as e:
+            self.error_manager.handle_memory_error(e, {"operation": "add_to_memory"})
             return False
-        swing_dream = (
-            len(self.state.confidence_history) >= self.config.confidence_history_maxlen and
-            torch.var(torch.tensor(list(self.state.confidence_history))).item() > self.config.dream_swing_var
-        )
-        lifecycle_dream = (
-            abs(self.state.temperament_score - self.state.last_temperament_score) > self.config.dream_lifecycle_delta
-        )
-        history_dream = (
-            len(self.state.temperament_history) >= self.config.temperament_history_maxlen and
-            abs(torch.tensor(list(self.state.temperament_history)).mean().item() - self.state.temperament_history[0]) > 0.3
-        )
-        should_dream = swing_dream or lifecycle_dream or history_dream
-        self.logger({
-            "event": "dream_check",
-            "swing_dream": swing_dream,
-            "lifecycle_dream": lifecycle_dream,
-            "history_dream": history_dream,
-            "should_dream": should_dream,
-            "timestamp": time.time(),
-            "conversation_id": self.state.history.conversation_id if self.state and hasattr(self.state, "history") else str(uuid.uuid4())
-        })
-        return should_dream
-
-    def dream(self, log_entries: List[dict]) -> None:
-        """Execute a dream cycle."""
-        if not self.config.enable_dreaming or not log_entries:
-            return
-        dream_prompt = self._select_dream_prompt(log_entries)
-        hidden_state = self._process_dream_prompt(dream_prompt)
-        is_novel, similarity = self._check_novelty(dream_prompt, hidden_state)
-        self.dream_memory.add_memory(
-            prompt=dream_prompt,
-            hidden_state=hidden_state,
-            is_novel=is_novel,
-            temperament=getattr(self.state, "temperament_score", 0.0)
-        )
-        self.logger({
-            "event": "dream_cycle",
-            "prompt": dream_prompt,
-            "memory_count": len(self.dream_memory),
-            "top_weight": self.dream_memory.get_memories()[0]["weight"] if self.dream_memory.get_memories() else 0,
-            "timestamp": time.time(),
-            "conversation_id": str(uuid.uuid4())
-        })
-
-    def _select_dream_prompt(self, log_entries: List[dict]) -> str:
-        """Select prompt for dreaming."""
-        if not self.config.enable_prompt_driven_dreams:
-            return random.choice(log_entries)["prompt"]
-        reference_prompt = self.state.history.messages[-1]["prompt"] if self.state and self.state.history.messages else random.choice(log_entries)["prompt"]
-        return self._select_by_similarity(reference_prompt, log_entries)
-
-    def _select_by_similarity(self, reference: str, log_entries: List[dict]) -> str:
-        """Select prompt with temperature-adjusted sampling."""
-        valid_entries = [e for e in log_entries if "prompt" in e]
-        if not valid_entries:
-            raise ValueError("No valid prompts found")
-        
-        similarities = []
-        for entry in valid_entries:
-            inputs = self.tokenizer(
-                [reference, entry["prompt"]],
-                padding=True,
-                truncation=True,
-                max_length=self.config.max_seq_length,
-                return_tensors="pt"
-            ).to(self.device)
-            with torch.no_grad():
-                hidden = self.model(**inputs).hidden_states[-1].mean(dim=1)
-                sim = F.cosine_similarity(hidden[0], hidden[1]).item()
-            similarities.append(sim)
-        
-        recency_weights = [i/len(valid_entries) for i in range(len(valid_entries))]
-        combined = [
-            (self.config.dream_prompt_weight * sim) + ((1 - self.config.dream_prompt_weight) * recency)
-            for sim, recency in zip(similarities, recency_weights)
-        ]
-        scaled_weights = torch.softmax(torch.tensor(combined) / 0.5, dim=0).tolist()
-        return random.choices([e["prompt"] for e in valid_entries], weights=scaled_weights, k=1)[0]
-
-    def _process_dream_prompt(self, prompt: str) -> torch.Tensor:
-        """Process prompt through model."""
-        with torch.no_grad():
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                max_length=self.config.max_seq_length,
-                truncation=True
-            ).to(self.device)
-            return self.model(**inputs).hidden_states[-1].mean(dim=1)
-
-    def _check_novelty(self, prompt: str, hidden_state: torch.Tensor) -> Tuple[bool, float]:
-        """Check prompt novelty."""
-        if prompt not in getattr(self.state, "seen_prompts", set()) or len(self.dream_memory) == 0:
-            return True, 0.0
-        similarities = [
-            F.cosine_similarity(hidden_state.flatten(), m['vector'].to(self.device).flatten(), dim=0).item()
-            for m in self.dream_memory.memory
-        ]
-        max_similarity = max(similarities) if similarities else 0.0
-        return max_similarity < 0.7, max_similarity
-
-    def get_memory_stats(self) -> Dict[str, Any]:
-        """Get dream memory statistics."""
-        with self.dream_memory.lock:
-            memories = list(self.dream_memory.memory)
-            weights = [m['weight'] for m in memories]
-            timestamps = [m['timestamp'] for m in memories]
-            return {
-                'status': 'active' if memories else 'empty',
-                'count': len(memories),
-                'average_weight': sum(weights) / len(weights) if weights else 0.0,
-                'max_weight': max(weights) if weights else 0.0,
-                'min_weight': min(weights) if weights else 0.0,
-                'oldest': min(timestamps) if timestamps else None,
-                'newest': max(timestamps) if timestamps else None,
-                'config': {
-                    'max_memories': self.dream_memory.memory.maxlen,
-                    'decay_rate': self.dream_memory.config.decay_rate,
-                    'prune_threshold': self.dream_memory.config.prune_threshold
-                }
+            
+    def _maintain_memory(self):
+        """Maintain dream memory within limits."""
+        try:
+            state = self.state_manager.get_current_state()
+            while state.total_dream_memory_mb > state.config.max_dream_memory_mb and state.dream_memory:
+                removed = state.dream_memory.popleft()
+                tensor = removed["tensor"]
+                memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)
+                state.total_dream_memory_mb -= memory_size
+                
+        except Exception as e:
+            self.error_manager.handle_memory_error(e, {"operation": "maintain_memory"})
+            
+    def dream(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """Generate a dream from a prompt."""
+        try:
+            state = self.state_manager.get_current_state()
+            
+            # Check if prompt has been seen
+            if prompt in state.seen_prompts:
+                return None
+                
+            # Maintain memory before generating new dream
+            self._maintain_memory()
+            
+            # Generate dream tensor (placeholder for actual implementation)
+            dream_tensor = torch.randn(512)  # Example size
+            
+            dream_entry = {
+                "prompt": prompt,
+                "tensor": dream_tensor,
+                "timestamp": time.time()
             }
+            
+            if self._add_to_memory(dream_entry):
+                state.seen_prompts.add(prompt)
+                return dream_entry
+                
+            return None
+            
+        except Exception as e:
+            self.error_manager.handle_memory_error(e, {"operation": "dream", "prompt": prompt})
+            return None
+            
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get memory statistics."""
+        try:
+            state = self.state_manager.get_current_state()
+            return state.get_dream_memory_stats()
+            
+        except Exception as e:
+            self.error_manager.handle_memory_error(e, {"operation": "get_memory_stats"})
+            return {}
 
 class TrainingManager:
     """Manages core training operations."""
@@ -716,139 +660,30 @@ class TrainingWorkflowManager:
 class TrainingCycleManager:
     """Manages the orchestration of training cycles, including sleep training."""
     
-    def __init__(self, trainer: 'SOVLTrainer', config_manager: ConfigManager, logger: Logger):
-        self.trainer = trainer
-        self.config_manager = config_manager
+    def __init__(
+        self,
+        config: SOVLConfig,
+        logger: Logger,
+        device: torch.device,
+        state_manager: StateManager,
+        curiosity_manager: CuriosityManager
+    ):
+        self.config = config
         self.logger = logger
-        self.training_config = config_manager.get_section("training_config")
-        self.controls_config = config_manager.get_section("controls_config")
+        self.device = device
+        self.state_manager = state_manager
+        self.curiosity_manager = curiosity_manager
         
-    def _validate_data(
-        self, train_data: List[Dict[str, Any]], valid_data: List[Dict[str, Any]], batch_size: int
-    ) -> Dict[str, Any]:
-        """Validate training and validation data sufficiency.
-
-        Args:
-            train_data: List of training data dictionaries.
-            valid_data: List of validation data dictionaries.
-            batch_size: Size of each training batch.
-
-        Returns:
-            Dict indicating validation status; contains 'status' key with 'insufficient_data'
-            if validation fails, else None.
-        """
-        if len(train_data) < batch_size or not valid_data:
-            self.logger.record({
-                "warning": "Insufficient data for training",
-                "train_data_size": len(train_data),
-                "valid_data_size": len(valid_data),
-                "batch_size": batch_size,
-                "timestamp": time.time()
-            })
-            return {"status": "insufficient_data"}
-        return {}
-
-    def _log_cycle_start(
-        self, epochs: int, batch_size: int, influence_weight: float
-    ) -> None:
-        """Log the start of a training cycle.
-
-        Args:
-            epochs: Number of training epochs.
-            batch_size: Size of each training batch.
-            influence_weight: Lifecycle influence weight for the cycle.
-        """
-        self.logger.record({
-            "event": "training_cycle_start",
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "data_exposure": self.trainer.data_exposure,
-            "scaffold_influence": influence_weight,
-            "timestamp": time.time()
-        })
-
-    def _handle_dry_run(
-        self,
-        train_data: List[Dict[str, Any]],
-        scaffold_provider: Optional[Callable],
-        dry_run_params: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Handle dry run execution if configured.
-
-        Args:
-            train_data: List of training data dictionaries.
-            scaffold_provider: Optional provider for scaffold context.
-            dry_run_params: Parameters for dry run configuration.
-
-        Returns:
-            Dict containing dry run results, including status and loss.
-        """
-        if dry_run_params.get("skip_training", True):
-            dry_batch = train_data[:dry_run_params.get("max_samples", 2)]
-            loss, metrics = self.trainer.train_step_with_scaffold(
-                batch=dry_batch,
-                scaffold_provider=scaffold_provider,
-                dry_run=True,
-                dry_run_params=dry_run_params
-            )
-            self.logger.record({
-                "event": "dry_run_training_complete",
-                "loss": loss,
-                "timestamp": time.time()
-            })
-            return {"status": "dry_run_complete", "loss": loss}
-        return {}
-
-    def _execute_training(
-        self,
-        train_data: List[Dict[str, Any]],
-        valid_data: List[Dict[str, Any]],
-        scaffold_provider: Optional[Callable],
-        epochs: int
-    ) -> Dict[str, Any]:
-        """Execute the core training loop.
-
-        Args:
-            train_data: List of training data dictionaries.
-            valid_data: List of validation data dictionaries.
-            scaffold_provider: Optional provider for scaffold context.
-            epochs: Number of training epochs.
-
-        Returns:
-            Dict containing training results, including history, best validation loss,
-            final epoch, and early stopping status.
-        """
-        return self.trainer.run_training_cycle(
-            train_data=train_data,
-            validation_data=valid_data,
-            scaffold_provider=scaffold_provider,
-            max_epochs=epochs,
-            early_stopping_patience=self.training_config.get("max_patience", 3)
+        # Initialize trainer with current state
+        self.trainer = SOVLTrainer(
+            config=config,
+            state=state_manager.get_state(),
+            curiosity_manager=curiosity_manager,
+            error_manager=ErrorManager(),
+            device=device,
+            logger=logger
         )
-
-    def _process_training_results(self, training_results: Dict[str, Any], start_time: float) -> Dict[str, Any]:
-        """Process training results and update trainer state.
-
-        Args:
-            training_results: Dict containing training outcomes.
-            start_time: Timestamp when training started.
-
-        Returns:
-            Updated training results dict.
-        """
-        self.trainer.last_weight = self.trainer.get_life_curve_weight()
-        self.logger.record({
-            "event": "training_cycle_complete",
-            "duration": time.time() - start_time,
-            "last_weight": self.trainer.last_weight,
-            "training_history": training_results.get("training_history", []),
-            "best_val_loss": training_results.get("best_val_loss", float("inf")),
-            "final_epoch": training_results.get("final_epoch", 0),
-            "early_stopped": training_results.get("early_stopped", False),
-            "timestamp": time.time()
-        })
-        return training_results
-
+        
     def run_training_cycle(
         self,
         train_data: List[Dict[str, Any]],
@@ -873,49 +708,39 @@ class TrainingCycleManager:
             Exception: If training fails due to unexpected errors.
         """
         try:
-            epochs = epochs or self.training_config.get("train_epochs", 3)
-            batch_size = batch_size or self.training_config.get("batch_size", 1)
-
-            # Validate data
-            validation_result = self._validate_data(train_data, valid_data, batch_size)
-            if validation_result:
-                return validation_result
-
-            # Get lifecycle weight
-            influence_weight = (
-                self.trainer.get_life_curve_weight()
-                if self.controls_config.get("enable_lifecycle_weighting", True)
-                else self.trainer.last_weight
+            # Get current state
+            state = self.state_manager.get_state()
+            
+            # Update trainer state if needed
+            if self.trainer.state != state:
+                self.trainer.state = state
+                self.trainer.curiosity_manager.set_state(state)
+            
+            # Run training cycle through trainer
+            results = self.trainer.run_training_cycle(
+                train_data=train_data,
+                validation_data=valid_data,
+                scaffold_provider=scaffold_provider,
+                max_epochs=epochs or self.config.max_epochs,
+                batch_size=batch_size or self.config.batch_size
             )
-
-            # Log cycle start
-            self._log_cycle_start(epochs, batch_size, influence_weight)
-
-            # Handle dry run
-            if self.training_config.get("dry_run", False):
-                dry_run_params = self.training_config.get("dry_run_params", {})
-                dry_run_result = self._handle_dry_run(train_data, scaffold_provider, dry_run_params)
-                if dry_run_result:
-                    return dry_run_result
-
-            # Run training
-            start_time = time.time()
-            training_results = self._execute_training(train_data, valid_data, scaffold_provider, epochs)
-
-            # Process results
-            return self._process_training_results(training_results, start_time)
-
+            
+            # Save updated state
+            self.state_manager.save_state()
+            
+            return results
+            
         except Exception as e:
             self.logger.record({
                 "error": f"Training cycle failed: {str(e)}",
                 "timestamp": time.time()
             })
             raise
-
+            
     def run_sleep_training(self, log_entries: List[Dict[str, Any]]) -> None:
         """Run sleep training on dream-generated content."""
         try:
-            if not self.controls_config.get("enable_sleep_training", True):
+            if not self.config.enable_sleep_training:
                 self.logger.record({
                     "event": "sleep_training_skipped",
                     "reason": "Sleep training disabled",
@@ -928,15 +753,26 @@ class TrainingCycleManager:
                 "timestamp": time.time()
             })
             
-            # Run sleep training
+            # Get current state
+            state = self.state_manager.get_state()
+            
+            # Update trainer state if needed
+            if self.trainer.state != state:
+                self.trainer.state = state
+                self.trainer.curiosity_manager.set_state(state)
+            
+            # Run sleep training through trainer
             self.trainer.sleep_train(log_entries)
             self.trainer.last_trained = time.time()
             self.trainer.last_weight = self.trainer.get_life_curve_weight()
             
             # Update temperament if enabled
-            if self.controls_config.get("enable_temperament", True):
+            if self.config.enable_temperament:
                 self.trainer._update_temperament()
                 self.trainer.last_temperament_score = self.trainer.temperament_system.score
+                
+            # Save updated state
+            self.state_manager.save_state()
                 
             self.logger.record({
                 "event": "sleep_training_complete",
@@ -957,8 +793,10 @@ class SOVLTrainer:
         self,
         config: TrainingConfig,
         state: SOVLState,
-        logger: Logger,
-        curiosity_manager: Optional[Any] = None
+        curiosity_manager: CuriosityManager,
+        error_manager: ErrorManager,
+        device: torch.device,
+        logger: Logger
     ):
         """
         Initialize trainer.
@@ -966,14 +804,48 @@ class SOVLTrainer:
         Args:
             config: Training configuration
             state: System state
+            curiosity_manager: Required curiosity manager instance
+            error_manager: Required error manager instance
+            device: Device to use for training
             logger: Logger instance
-            curiosity_manager: Optional curiosity manager instance
         """
+        # Validate state
+        if not isinstance(state, SOVLState):
+            raise ValueError("state must be an instance of SOVLState")
+            
+        # Validate curiosity manager
+        if not isinstance(curiosity_manager, CuriosityManager):
+            raise ValueError("curiosity_manager must be an instance of CuriosityManager")
+            
+        # Validate error manager
+        if not isinstance(error_manager, ErrorManager):
+            raise ValueError("error_manager must be an instance of ErrorManager")
+            
+        # Validate device
+        if not isinstance(device, torch.device):
+            raise ValueError("device must be an instance of torch.device")
+            
         self.config = config
         self.state = state
         self.logger = logger
         self.curiosity_manager = curiosity_manager
+        self.error_manager = error_manager
+        self.device = device
+        
+        # Validate state synchronization
+        if not hasattr(self.curiosity_manager, 'state') or self.curiosity_manager.state != state:
+            self.curiosity_manager.set_state(state)
+            
+        # Initialize model and components
         self._initialize_model()
+        self._initialize_components()
+        
+        # Log initialization
+        self._log_event("trainer_initialized", {
+            "state_hash": self.state.state_hash,
+            "conversation_id": self.state.history.conversation_id,
+            "device": str(self.device)
+        })
         
     def _initialize_model(self) -> None:
         """Initialize model and optimizer."""
@@ -985,6 +857,9 @@ class SOVLTrainer:
                 device_map="auto"
             )
             
+            # Move model to specified device
+            self.model = self.model.to(self.device)
+            
             # Initialize optimizer
             self.optimizer = torch.optim.AdamW(
                 self.model.parameters(),
@@ -995,6 +870,35 @@ class SOVLTrainer:
             self.logger.error(f"Error initializing model: {str(e)}")
             raise
             
+    def _initialize_components(self) -> None:
+        """Initialize training components."""
+        try:
+            # Initialize dream manager
+            self.dream_manager = DreamManager(
+                state_manager=self.state_manager,
+                error_manager=self.error_manager
+            )
+            
+            # Initialize lifecycle manager
+            self.lifecycle_manager = LifecycleManager(
+                config=self.state.config,
+                model=self.model,
+                state=self.state
+            )
+            
+            # Initialize training workflow manager
+            self.workflow_manager = TrainingWorkflowManager(
+                trainer=self,
+                event_handler=TrainingEventHandler(
+                    logger=self.logger,
+                    state=self.state
+                )
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error initializing components: {str(e)}")
+            raise
+
     def train_step_with_scaffold(
         self,
         batch: List[Dict[str, Any]],
@@ -1004,13 +908,24 @@ class SOVLTrainer:
     ) -> Tuple[float, Dict[str, Any]]:
         """Execute a single training step with scaffold support."""
         try:
-            # Prepare batch
+            # Prepare batch and move to device
             prepared_batch = self._prepare_batch(batch)
+            prepared_batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                            for k, v in prepared_batch.items()}
             
             # Get scaffold context if available
             scaffold_context = None
             if scaffold_provider:
-                scaffold_context = scaffold_provider(prepared_batch)
+                try:
+                    scaffold_context = scaffold_provider(prepared_batch)
+                    if scaffold_context is not None:
+                        scaffold_context = scaffold_context.to(self.device)
+                except Exception as e:
+                    self.error_manager.handle_scaffold_error(e, {
+                        "batch_size": len(batch),
+                        "step": self.global_step
+                    })
+                    raise
             
             # Forward pass
             outputs = self._forward_pass(prepared_batch, scaffold_context)
@@ -1033,11 +948,11 @@ class SOVLTrainer:
             return loss.item(), metrics
             
         except Exception as e:
-            self.logger.record({
-                "error": f"Training step failed: {str(e)}",
-                "stack_trace": traceback.format_exc()
+            return self.error_manager.handle_training_error(e, {
+                "step": self.global_step,
+                "batch_size": len(batch),
+                "dry_run": dry_run
             })
-            raise
             
     def _update_curiosity(self, metrics: Dict[str, Any]) -> None:
         """Update curiosity metrics if curiosity manager is available."""
@@ -1054,39 +969,79 @@ class SOVLTrainer:
                 state_hash=self.state.get_state_hash()
             )
         except Exception as e:
-            self.logger.record({
-                "error": f"Curiosity update failed: {str(e)}",
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_curiosity_error(e, {
+                "metrics": metrics,
+                "conversation_id": self.state.conversation_id
             })
             
     def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Prepare batch for training."""
-        # ... existing batch preparation code ...
-        
+        try:
+            # ... existing batch preparation code ...
+            pass
+        except Exception as e:
+            self.error_manager.handle_training_error(e, {
+                "step": "batch_preparation",
+                "batch_size": len(batch)
+            })
+            raise
+            
     def _forward_pass(
         self,
         batch: Dict[str, torch.Tensor],
         scaffold_context: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Execute forward pass."""
-        # ... existing forward pass code ...
-        
+        try:
+            # ... existing forward pass code ...
+            pass
+        except Exception as e:
+            self.error_manager.handle_training_error(e, {
+                "step": "forward_pass",
+                "batch_size": len(batch)
+            })
+            raise
+            
     def _calculate_loss(
         self,
         outputs: torch.Tensor,
         batch: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
         """Calculate loss."""
-        # ... existing loss calculation code ...
-        
+        try:
+            # ... existing loss calculation code ...
+            pass
+        except Exception as e:
+            self.error_manager.handle_training_error(e, {
+                "step": "loss_calculation",
+                "batch_size": len(batch)
+            })
+            raise
+            
     def _optimizer_step(self) -> None:
         """Execute optimizer step."""
-        # ... existing optimizer step code ...
-        
+        try:
+            # ... existing optimizer step code ...
+            pass
+        except Exception as e:
+            self.error_manager.handle_training_error(e, {
+                "step": "optimizer_step",
+                "global_step": self.global_step
+            })
+            raise
+            
     def _update_metrics(
         self,
         outputs: torch.Tensor,
         loss: torch.Tensor
     ) -> Dict[str, Any]:
         """Update training metrics."""
-        # ... existing metrics update code ...
+        try:
+            # ... existing metrics update code ...
+            pass
+        except Exception as e:
+            self.error_manager.handle_training_error(e, {
+                "step": "metrics_update",
+                "global_step": self.global_step
+            })
+            raise

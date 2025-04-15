@@ -13,6 +13,7 @@ from sovl_utils import NumericalGuard, safe_divide, safe_compare
 import json
 import os
 import threading
+import collections
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -35,6 +36,7 @@ class ConversationConfig:
 @dataclass
 class SOVLConfig:
     """Configuration for SOVL state parameters."""
+    # Core configuration
     dream_memory_maxlen: int
     temperament_history_maxlen: int
     confidence_history_maxlen: int
@@ -46,6 +48,120 @@ class SOVLConfig:
     temperament_decay_rate: float
     scaffold_unk_id: int
     lora_capacity: int
+    max_dream_memory_mb: float = 512.0  # Default to 512MB max dream memory
+    
+    # Temperament configuration
+    temperament_melancholy_noise: float = 0.1
+    temperament_influence: float = 0.3
+    temperament_base_temperature: float = 0.7
+    temperament_swing_threshold: float = 0.2
+    temperament_stability_threshold: float = 0.1
+    
+    # Training configuration
+    learning_rate: float = 2e-5
+    grad_accum_steps: int = 4
+    weight_decay: float = 0.01
+    warmup_steps: int = 0
+    total_steps: int = 100000
+    max_grad_norm: float = 1.0
+    use_amp: bool = True
+    max_patience: int = 2
+    batch_size: int = 2
+    max_epochs: int = 3
+    validate_every_n_steps: int = 100
+    checkpoint_interval: int = 1000
+    checkpoint_path: str = "checkpoints/sovl_trainer"
+    scheduler_type: str = "linear"
+    cosine_min_lr: float = 1e-6
+    warmup_ratio: float = 0.1
+    dropout_rate: float = 0.1
+    max_seq_length: int = 512
+    metrics_to_track: List[str] = None
+    
+    # Lifecycle configuration
+    enable_gestation: bool = True
+    enable_sleep_training: bool = True
+    enable_lifecycle_weighting: bool = True
+    lifecycle_capacity_factor: float = 0.01
+    lifecycle_curve: str = "sigmoid_linear"
+    sleep_conf_threshold: float = 0.7
+    sleep_log_min: int = 10
+    exposure_gain_eager: int = 3
+    exposure_gain_default: int = 2
+    
+    # Dream configuration
+    dream_memory_weight: float = 0.1
+    enable_dreaming: bool = True
+    repetition_n: int = 3
+    sigmoid_scale: float = 0.5
+    sigmoid_shift: float = 5.0
+    dream_noise_scale: float = 0.05
+    dream_prompt_weight: float = 0.5
+    dream_novelty_boost: float = 0.03
+    dream_memory_decay: float = 0.95
+    dream_prune_threshold: float = 0.1
+    temp_melancholy_noise: float = 0.02
+    enable_prompt_driven_dreams: bool = True
+    dream_swing_var: float = 0.1
+    dream_lifecycle_delta: float = 0.1
+    dream_temperament_on: bool = True
+    
+    # Memory configuration
+    memory_threshold: float = 0.85
+    memory_decay_rate: float = 0.95
+    use_scaffold_memory: bool = True
+    use_token_map_memory: bool = True
+    scaffold_weight: float = 1.0
+    
+    # Curiosity configuration
+    weight_ignorance: float = 0.3
+    weight_novelty: float = 0.7
+    metrics_maxlen: int = 100
+    novelty_threshold_spontaneous: float = 0.7
+    novelty_threshold_curious: float = 0.5
+    curiosity_decay_rate: float = 0.95
+    curiosity_queue_maxlen: int = 10
+    curiosity_question_timeout: float = 3600.0
+    
+    def __post_init__(self):
+        if self.metrics_to_track is None:
+            self.metrics_to_track = ["loss", "accuracy", "confidence"]
+        self._validate()
+    
+    def _validate(self):
+        """Validate configuration parameters."""
+        assert self.learning_rate > 0, "Learning rate must be positive"
+        assert self.grad_accum_steps >= 1, "Gradient accumulation steps must be at least 1"
+        assert self.max_grad_norm > 0, "Max gradient norm must be positive"
+        assert self.scheduler_type in ["linear", "cosine", "constant"], "Invalid scheduler type"
+        assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "Invalid lifecycle curve"
+        assert self.repetition_n >= 2, "Repetition check length must be at least 2"
+        assert self.sigmoid_scale > 0, "Sigmoid scale must be positive"
+        assert self.sigmoid_shift >= 0, "Sigmoid shift must be non-negative"
+        assert self.dream_noise_scale >= 0, "Dream noise scale must be non-negative"
+        assert 0 <= self.dream_prompt_weight <= 1, "Dream prompt weight must be in [0, 1]"
+        assert self.dream_novelty_boost >= 0, "Dream novelty boost must be non-negative"
+        assert 0 <= self.dream_memory_decay <= 1, "Dream memory decay must be in [0, 1]"
+        assert 0 <= self.dream_prune_threshold <= 1, "Dream prune threshold must be in [0, 1]"
+        assert self.dream_swing_var >= 0, "Dream swing variance must be non-negative"
+        assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
+        assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
+        assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
+        assert 0 <= self.weight_ignorance <= 1, "Weight ignorance must be in [0, 1]"
+        assert 0 <= self.weight_novelty <= 1, "Weight novelty must be in [0, 1]"
+        assert self.metrics_maxlen > 0, "Metrics maxlen must be positive"
+        assert 0 <= self.novelty_threshold_spontaneous <= 1, "Novelty threshold spontaneous must be in [0, 1]"
+        assert 0 <= self.novelty_threshold_curious <= 1, "Novelty threshold curious must be in [0, 1]"
+        assert 0 <= self.curiosity_decay_rate <= 1, "Curiosity decay rate must be in [0, 1]"
+        assert self.curiosity_queue_maxlen > 0, "Curiosity queue maxlen must be positive"
+        assert self.curiosity_question_timeout > 0, "Curiosity question timeout must be positive"
+        assert self.max_dream_memory_mb > 0, "Max dream memory MB must be positive"
+        # Add temperament validation
+        assert 0 <= self.temperament_melancholy_noise <= 1, "Temperament melancholy noise must be in [0, 1]"
+        assert 0 <= self.temperament_influence <= 1, "Temperament influence must be in [0, 1]"
+        assert 0 <= self.temperament_base_temperature <= 2, "Temperament base temperature must be in [0, 2]"
+        assert 0 <= self.temperament_swing_threshold <= 1, "Temperament swing threshold must be in [0, 1]"
+        assert 0 <= self.temperament_stability_threshold <= 1, "Temperament stability threshold must be in [0, 1]"
 
 @dataclass
 class TrainingState:
@@ -488,261 +604,113 @@ class ConversationHistory:
         return history
 
 class SOVLState(StateBase):
-    """Manages the overall state of the SOVL system."""
+    """Manages the state of the SOVL system."""
+    
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
-        """Initialize SOVL state with configuration and device."""
         super().__init__(config_manager, logger)
         self.device = device
         self.lock = threading.Lock()
         self._initialize_state()
-        self._log_event(
-            "state_initialized",
-            message="SOVL state initialized",
-            level="info",
-            state_hash=self.state_hash(),
-            conversation_id=self.history.conversation_id
-        )
-
+        
     def _initialize_state(self) -> None:
-        """Initialize all state components with proper validation."""
-        with self.lock:
-            self.dream_memory_maxlen = self.config_manager.get("controls_config.dream_memory_maxlen", 100)
-            self.dream_memory = deque(maxlen=self.dream_memory_maxlen)
-            self.confidence_history = deque(
-                maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 1000)
-            )
-            self.sleep_confidence_sum = 0.0
-            self.sleep_confidence_count = 0
-            self.gestation_state = "normal"
-            self.token_map = {}
-            self.history = ConversationHistory(
-                maxlen=self.config_manager.get("controls_config.conversation_history_maxlen", 10)
-            )
-            self.curiosity = CuriosityState(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                device=self.device
-            )
-            self.last_prompt_embedding = None
-
-    def state_hash(self) -> str:
-        """Generate a hash of the current state."""
-        with self.lock:
-            state_dict = {
-                "token_map_size": len(self.token_map),
-                "dream_memory_len": len(self.dream_memory),
-                "confidence_history_len": len(self.confidence_history),
-                "conversation_id": self.history.conversation_id,
-                "curiosity_pressure": self.curiosity.pressure
-            }
-            return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
-
-    def update_token_map(self, token_map: Dict[int, Dict[str, Any]]) -> None:
-        """Update the token map with validation."""
+        """Initialize state components."""
+        self.seen_prompts = set()
+        self.temperament_score = 0.0
+        self.last_temperament_score = 0.0
+        self.confidence_history = deque(maxlen=self.config_manager.get("confidence_history_maxlen"))
+        self.temperament_history = deque(maxlen=self.config_manager.get("temperament_history_maxlen"))
+        self.dream_memory = deque(maxlen=self.config_manager.get("dream_memory_maxlen"))
+        self.total_dream_memory_mb = 0.0
+        self.history = ConversationHistory(
+            maxlen=self.config_manager.get("max_messages"),
+            conversation_id=str(uuid.uuid4())
+        )
+        
+    def add_dream_memory(self, tensor: torch.Tensor, weight: float, metadata: Dict) -> None:
+        """Add a dream memory with device validation."""
         with self.lock:
             try:
-                for base_id, mapping in token_map.items():
-                    if not isinstance(base_id, int):
-                        raise ValueError(f"Invalid base_id type: {type(base_id)}")
-                    if not isinstance(mapping, dict):
-                        raise ValueError(f"Invalid mapping type for base_id {base_id}")
-                    if 'ids' not in mapping or 'weight' not in mapping:
-                        raise ValueError(f"Missing required fields in mapping for base_id {base_id}")
-                    if not isinstance(mapping['ids'], list):
-                        raise ValueError(f"Invalid ids type for base_id {base_id}")
-                    if not isinstance(mapping['weight'], (int, float)):
-                        raise ValueError(f"Invalid weight type for base_id {base_id}")
-                self.token_map = token_map
-                self._log_event(
-                    "token_map_updated",
-                    message="Token map updated",
-                    level="info",
-                    token_map_size=len(token_map),
-                    state_hash=self.state_hash()
-                )
+                # Validate and move tensor to correct device
+                tensor = self._validate_tensor_device(tensor)
+                
+                # Calculate memory size
+                memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)  # Convert to MB
+                
+                # Check memory limits
+                if self.total_dream_memory_mb + memory_size > self.config_manager.get("max_dream_memory_mb"):
+                    self._log_warning("Memory limit exceeded, pruning old memories")
+                    self._prune_dream_memory()
+                    
+                # Add to memory
+                self.dream_memory.append({
+                    "tensor": tensor,
+                    "weight": weight,
+                    "metadata": metadata,
+                    "timestamp": time.time()
+                })
+                self.total_dream_memory_mb += memory_size
+                
             except Exception as e:
-                self._log_error(f"Failed to update token map: {str(e)}")
+                self._log_error(f"Failed to add dream memory: {str(e)}")
                 raise
-
-    def get_token_map(self) -> Dict[int, Dict[str, Any]]:
-        """Get a copy of the current token map."""
+                
+    def _validate_tensor_device(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Validate and move tensor to correct device."""
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError("Input must be a torch.Tensor")
+            
+        if tensor.device != self.device:
+            self._log_warning(f"Moving tensor from {tensor.device} to {self.device}")
+            tensor = tensor.to(self.device)
+            
+        return tensor
+        
+    def _prune_dream_memory(self) -> None:
+        """Prune old memories to maintain memory limits."""
+        while self.total_dream_memory_mb > self.config_manager.get("max_dream_memory_mb") and self.dream_memory:
+            removed = self.dream_memory.popleft()
+            memory_size = removed["tensor"].element_size() * removed["tensor"].nelement() / (1024 * 1024)
+            self.total_dream_memory_mb -= memory_size
+            
+    def get_dream_memory_stats(self) -> Dict[str, Any]:
+        """Get dream memory statistics with device validation."""
         with self.lock:
-            return dict(self.token_map)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert state to dictionary for serialization."""
-        with self.lock:
-            dream_memory_serialized = [
-                {
-                    "tensor": entry["tensor"].cpu().numpy().tolist(),
-                    "weight": entry["weight"],
-                    "metadata": entry["metadata"]
+            try:
+                stats = {
+                    "count": len(self.dream_memory),
+                    "total_memory_mb": self.total_dream_memory_mb,
+                    "max_memory_mb": self.config_manager.get("max_dream_memory_mb"),
+                    "average_weight": 0.0,
+                    "oldest_timestamp": None,
+                    "newest_timestamp": None
                 }
-                for entry in self.dream_memory
-            ]
-            return {
-                "dream_memory": dream_memory_serialized,
-                "dream_memory_maxlen": self.dream_memory_maxlen,
-                "confidence_history": list(self.confidence_history),
-                "sleep_confidence_sum": self.sleep_confidence_sum,
-                "sleep_confidence_count": self.sleep_confidence_count,
-                "gestation_state": self.gestation_state,
-                "token_map": self.token_map,
-                "history": self.history.to_dict(),
-                "curiosity": self.curiosity.to_dict(),
-                "last_prompt_embedding": (
-                    self.last_prompt_embedding.cpu().numpy().tolist()
-                    if self.last_prompt_embedding is not None else None
-                ),
-                "state_hash": self.state_hash()
-            }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any], config_manager: ConfigManager, logger: Logger, device: torch.device) -> 'SOVLState':
-        """Create state instance from dictionary."""
-        state = cls(config_manager, logger, device)
-        with state.lock:
-            if "dream_memory" in data:
-                state.dream_memory = deque(maxlen=data.get("dream_memory_maxlen", 100))
-                for entry in data["dream_memory"]:
-                    state.dream_memory.append({
-                        "tensor": torch.tensor(entry["tensor"], device=device, dtype=torch.float),
-                        "weight": entry["weight"],
-                        "metadata": entry.get("metadata", {"timestamp": time.time()})
-                    })
-            state.confidence_history = deque(
-                data.get("confidence_history", []),
-                maxlen=data.get("confidence_history_maxlen", 1000)
-            )
-            state.sleep_confidence_sum = data.get("sleep_confidence_sum", 0.0)
-            state.sleep_confidence_count = data.get("sleep_confidence_count", 0)
-            state.gestation_state = data.get("gestation_state", "normal")
-            state.token_map = data.get("token_map", {})
-            if "history" in data:
-                state.history = ConversationHistory.from_dict(
-                    data["history"],
-                    maxlen=config_manager.get("controls_config.conversation_history_maxlen", 10)
-                )
-            if "curiosity" in data:
-                state.curiosity.from_dict(data["curiosity"])
-            if "last_prompt_embedding" in data and data["last_prompt_embedding"] is not None:
-                state.last_prompt_embedding = torch.tensor(data["last_prompt_embedding"], device=device, dtype=torch.float)
-            state._validate_state()
-        return state
-
-    def _validate_state(self) -> None:
-        """Validate state components and initialize missing fields."""
+                
+                if self.dream_memory:
+                    weights = [m["weight"] for m in self.dream_memory]
+                    timestamps = [m["timestamp"] for m in self.dream_memory]
+                    stats["average_weight"] = sum(weights) / len(weights)
+                    stats["oldest_timestamp"] = min(timestamps)
+                    stats["newest_timestamp"] = max(timestamps)
+                    
+                return stats
+                
+            except Exception as e:
+                self._log_error(f"Failed to get dream memory stats: {str(e)}")
+                return {}
+                
+    def validate_dream_memory(self) -> bool:
+        """Validate dream memory tensors are on correct device."""
         with self.lock:
-            if not hasattr(self, 'dream_memory'):
-                self.dream_memory = deque(maxlen=self.dream_memory_maxlen)
-                self._log_event(
-                    "state_validation",
-                    message="Dream memory initialized",
-                    level="info",
-                    field="dream_memory",
-                    action="initialized"
-                )
-            if not hasattr(self, 'confidence_history'):
-                self.confidence_history = deque(maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 1000))
-                self._log_event(
-                    "state_validation",
-                    message="Confidence history initialized",
-                    level="info",
-                    field="confidence_history",
-                    action="initialized"
-                )
-            if not hasattr(self, 'sleep_confidence_sum'):
-                self.sleep_confidence_sum = 0.0
-                self._log_event(
-                    "state_validation",
-                    message="Sleep confidence sum initialized",
-                    level="info",
-                    field="sleep_confidence_sum",
-                    action="initialized"
-                )
-            if not hasattr(self, 'sleep_confidence_count'):
-                self.sleep_confidence_count = 0
-                self._log_event(
-                    "state_validation",
-                    message="Sleep confidence count initialized",
-                    level="info",
-                    field="sleep_confidence_count",
-                    action="initialized"
-                )
-            if not hasattr(self, 'gestation_state'):
-                self.gestation_state = "normal"
-                self._log_event(
-                    "state_validation",
-                    message="Gestation state initialized",
-                    level="info",
-                    field="gestation_state",
-                    action="initialized"
-                )
-            if not hasattr(self, 'token_map'):
-                self.token_map = {}
-                self._log_event(
-                    "state_validation",
-                    message="Token map initialized",
-                    level="info",
-                    field="token_map",
-                    action="initialized"
-                )
-            if not hasattr(self, 'history'):
-                self.history = ConversationHistory(
-                    maxlen=self.config_manager.get("controls_config.conversation_history_maxlen", 10)
-                )
-                self._log_event(
-                    "state_validation",
-                    message="Conversation history initialized",
-                    level="info",
-                    field="history",
-                    action="initialized"
-                )
-            if not hasattr(self, 'curiosity'):
-                self.curiosity = CuriosityState(
-                    config_manager=self.config_manager,
-                    logger=self.logger,
-                    device=self.device
-                )
-                self._log_event(
-                    "state_validation",
-                    message="Curiosity state initialized",
-                    level="info",
-                    field="curiosity",
-                    action="initialized"
-                )
-            else:
-                required_curiosity_attrs = [
-                    'unanswered_questions', 'last_question_time', 'pressure',
-                    'novelty_scores', 'question_count'
-                ]
-                missing_attrs = [attr for attr in required_curiosity_attrs if not hasattr(self.curiosity, attr)]
-                if missing_attrs:
-                    self._log_event(
-                        "state_validation",
-                        message="Curiosity state reinitialized due to missing attributes",
-                        level="warning",
-                        field="curiosity",
-                        action="reinitialized",
-                        missing_attrs=missing_attrs
-                    )
-                    self.curiosity = CuriosityState(
-                        config_manager=self.config_manager,
-                        logger=self.logger,
-                        device=self.device
-                    )
-                if not (0 <= self.curiosity.pressure <= 1):
-                    old_pressure = self.curiosity.pressure
-                    self.curiosity.pressure = max(0, min(1, self.curiosity.pressure))
-                    self._log_event(
-                        "state_validation",
-                        message="Curiosity pressure clamped",
-                        level="warning",
-                        field="curiosity.pressure",
-                        action="clamped",
-                        old_value=old_pressure,
-                        new_value=self.curiosity.pressure
-                    )
+            try:
+                for memory in self.dream_memory:
+                    if not isinstance(memory["tensor"], torch.Tensor):
+                        return False
+                    if memory["tensor"].device != self.device:
+                        memory["tensor"] = memory["tensor"].to(self.device)
+                return True
+            except Exception as e:
+                self._log_error(f"Failed to validate dream memory: {str(e)}")
+                return False
 
 class StateManager:
     """Manages state initialization and persistence for the SOVL system."""
@@ -754,53 +722,114 @@ class StateManager:
         self.lock = Lock()
 
     def initialize_state(self) -> SOVLState:
-        """Initialize a new SOVLState instance with default values."""
+        """Initialize a new SOVL state with configuration."""
         try:
-            with self.lock:
-                dream_memory_maxlen = self.config_manager.get("controls_config.dream_memory_maxlen", 10)
-                temperament_history_maxlen = self.config_manager.get("controls_config.temperament_history_maxlen", 5)
-                confidence_history_maxlen = self.config_manager.get("controls_config.confidence_history_maxlen", 5)
-                hidden_size = self.config_manager.get("core_config.hidden_size", 768)
-                max_seen_prompts = self.config_manager.get("controls_config.max_seen_prompts", 1000)
-                quantization_mode = self.config_manager.get("core_config.quantization", "fp16")
-                sleep_max_steps = self.config_manager.get("training_config.sleep_max_steps", 100)
-                prompt_timeout = self.config_manager.get("controls_config.prompt_timeout", 86400.0)
-                temperament_decay_rate = self.config_manager.get("controls_config.temperament_decay_rate", 0.95)
-                scaffold_unk_id = self.config_manager.get("controls_config.scaffold_unk_id", 0)
-                lora_capacity = self.config_manager.get("training_config.lora_capacity", 0)
-                sovl_config = SOVLConfig(
-                    dream_memory_maxlen=dream_memory_maxlen,
-                    temperament_history_maxlen=temperament_history_maxlen,
-                    confidence_history_maxlen=confidence_history_maxlen,
-                    hidden_size=hidden_size,
-                    max_seen_prompts=max_seen_prompts,
-                    quantization_mode=quantization_mode,
-                    sleep_max_steps=sleep_max_steps,
-                    prompt_timeout=prompt_timeout,
-                    temperament_decay_rate=temperament_decay_rate,
-                    scaffold_unk_id=scaffold_unk_id,
-                    lora_capacity=lora_capacity
-                )
-                self.state = SOVLState(
-                    config_manager=self.config_manager,
-                    logger=self.logger,
-                    device=self.device
-                )
-                self.logger.record({
-                    "event": "state_initialized",
-                    "message": "State manager initialized new state",
-                    "level": "info",
-                    "timestamp": time.time(),
-                    "state_hash": self.state.state_hash()
-                })
-                return self.state
+            sovl_config = SOVLConfig(
+                # Core configuration
+                dream_memory_maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10),
+                temperament_history_maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5),
+                confidence_history_maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 5),
+                hidden_size=self.config_manager.get("core_config.hidden_size", 768),
+                max_seen_prompts=self.config_manager.get("controls_config.max_seen_prompts", 1000),
+                quantization_mode=self.config_manager.get("core_config.quantization", "fp16"),
+                sleep_max_steps=self.config_manager.get("training_config.sleep_max_steps", 100),
+                prompt_timeout=self.config_manager.get("controls_config.prompt_timeout", 86400.0),
+                temperament_decay_rate=self.config_manager.get("controls_config.temperament_decay_rate", 0.95),
+                scaffold_unk_id=self.config_manager.get("controls_config.scaffold_unk_id", 0),
+                lora_capacity=self.config_manager.get("training_config.lora_capacity", 0),
+                
+                # Temperament configuration
+                temperament_melancholy_noise=self.config_manager.get("controls_config.temp_melancholy_noise", 0.1),
+                temperament_influence=self.config_manager.get("controls_config.temperament_influence", 0.3),
+                temperament_base_temperature=self.config_manager.get("controls_config.temperament_base_temperature", 0.7),
+                temperament_swing_threshold=self.config_manager.get("controls_config.temperament_swing_threshold", 0.2),
+                temperament_stability_threshold=self.config_manager.get("controls_config.temperament_stability_threshold", 0.1),
+                
+                # Training configuration
+                learning_rate=self.config_manager.get("training_config.learning_rate", 2e-5),
+                grad_accum_steps=self.config_manager.get("training_config.grad_accum_steps", 4),
+                weight_decay=self.config_manager.get("training_config.weight_decay", 0.01),
+                warmup_steps=self.config_manager.get("training_config.warmup_steps", 0),
+                total_steps=self.config_manager.get("training_config.total_steps", 100000),
+                max_grad_norm=self.config_manager.get("training_config.max_grad_norm", 1.0),
+                use_amp=self.config_manager.get("training_config.use_amp", True),
+                max_patience=self.config_manager.get("training_config.max_patience", 2),
+                batch_size=self.config_manager.get("training_config.batch_size", 2),
+                max_epochs=self.config_manager.get("training_config.max_epochs", 3),
+                validate_every_n_steps=self.config_manager.get("training_config.validate_every_n_steps", 100),
+                checkpoint_interval=self.config_manager.get("training_config.checkpoint_interval", 1000),
+                checkpoint_path=self.config_manager.get("training_config.checkpoint_path", "checkpoints/sovl_trainer"),
+                scheduler_type=self.config_manager.get("training_config.scheduler_type", "linear"),
+                cosine_min_lr=self.config_manager.get("training_config.cosine_min_lr", 1e-6),
+                warmup_ratio=self.config_manager.get("training_config.warmup_ratio", 0.1),
+                dropout_rate=self.config_manager.get("training_config.dropout_rate", 0.1),
+                max_seq_length=self.config_manager.get("training_config.max_seq_length", 512),
+                metrics_to_track=self.config_manager.get("training_config.metrics_to_track", ["loss", "accuracy", "confidence"]),
+                
+                # Lifecycle configuration
+                enable_gestation=self.config_manager.get("lifecycle_config.enable_gestation", True),
+                enable_sleep_training=self.config_manager.get("lifecycle_config.enable_sleep_training", True),
+                enable_lifecycle_weighting=self.config_manager.get("lifecycle_config.enable_lifecycle_weighting", True),
+                lifecycle_capacity_factor=self.config_manager.get("lifecycle_config.lifecycle_capacity_factor", 0.01),
+                lifecycle_curve=self.config_manager.get("lifecycle_config.lifecycle_curve", "sigmoid_linear"),
+                sleep_conf_threshold=self.config_manager.get("lifecycle_config.sleep_conf_threshold", 0.7),
+                sleep_log_min=self.config_manager.get("lifecycle_config.sleep_log_min", 10),
+                exposure_gain_eager=self.config_manager.get("lifecycle_config.exposure_gain_eager", 3),
+                exposure_gain_default=self.config_manager.get("lifecycle_config.exposure_gain_default", 2),
+                
+                # Dream configuration
+                dream_memory_weight=self.config_manager.get("dream_config.dream_memory_weight", 0.1),
+                enable_dreaming=self.config_manager.get("dream_config.enable_dreaming", True),
+                repetition_n=self.config_manager.get("dream_config.repetition_n", 3),
+                sigmoid_scale=self.config_manager.get("dream_config.sigmoid_scale", 0.5),
+                sigmoid_shift=self.config_manager.get("dream_config.sigmoid_shift", 5.0),
+                dream_noise_scale=self.config_manager.get("dream_config.dream_noise_scale", 0.05),
+                dream_prompt_weight=self.config_manager.get("dream_config.dream_prompt_weight", 0.5),
+                dream_novelty_boost=self.config_manager.get("dream_config.dream_novelty_boost", 0.03),
+                dream_memory_decay=self.config_manager.get("dream_config.dream_memory_decay", 0.95),
+                dream_prune_threshold=self.config_manager.get("dream_config.dream_prune_threshold", 0.1),
+                temp_melancholy_noise=self.config_manager.get("dream_config.temp_melancholy_noise", 0.02),
+                enable_prompt_driven_dreams=self.config_manager.get("dream_config.enable_prompt_driven_dreams", True),
+                dream_swing_var=self.config_manager.get("dream_config.dream_swing_var", 0.1),
+                dream_lifecycle_delta=self.config_manager.get("dream_config.dream_lifecycle_delta", 0.1),
+                dream_temperament_on=self.config_manager.get("dream_config.dream_temperament_on", True),
+                
+                # Memory configuration
+                memory_threshold=self.config_manager.get("memory_config.memory_threshold", 0.85),
+                memory_decay_rate=self.config_manager.get("memory_config.memory_decay_rate", 0.95),
+                use_scaffold_memory=self.config_manager.get("memory_config.use_scaffold_memory", True),
+                use_token_map_memory=self.config_manager.get("memory_config.use_token_map_memory", True),
+                scaffold_weight=self.config_manager.get("memory_config.scaffold_weight", 1.0),
+                
+                # Curiosity configuration
+                weight_ignorance=self.config_manager.get("curiosity_config.weight_ignorance", 0.3),
+                weight_novelty=self.config_manager.get("curiosity_config.weight_novelty", 0.7),
+                metrics_maxlen=self.config_manager.get("curiosity_config.metrics_maxlen", 100),
+                novelty_threshold_spontaneous=self.config_manager.get("curiosity_config.novelty_threshold_spontaneous", 0.7),
+                novelty_threshold_curious=self.config_manager.get("curiosity_config.novelty_threshold_curious", 0.5),
+                curiosity_decay_rate=self.config_manager.get("curiosity_config.curiosity_decay_rate", 0.95),
+                curiosity_queue_maxlen=self.config_manager.get("curiosity_config.curiosity_queue_maxlen", 10),
+                curiosity_question_timeout=self.config_manager.get("curiosity_config.curiosity_question_timeout", 3600.0)
+            )
+            
+            state = SOVLState(self.config_manager, self.logger, self.device)
+            state.config = sovl_config
+            self._log_event(
+                "state_initialized",
+                message="SOVL state initialized",
+                level="info",
+                state_hash=state.state_hash(),
+                conversation_id=state.history.conversation_id
+            )
+            return state
+            
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to initialize state: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            raise StateError(f"State initialization failed: {str(e)}")
+            self._log_error(
+                "state_initialization_failed",
+                message=f"Failed to initialize state: {str(e)}",
+                stack_trace=traceback.format_exc()
+            )
+            raise
 
     def load_state(self, state_path: Optional[str] = None) -> SOVLState:
         """Load state from file or initialize new state if not found."""

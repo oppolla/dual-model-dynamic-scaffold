@@ -298,6 +298,27 @@ class Logger:
         """Write a validated log entry (alias for write)."""
         self.write(entry)
 
+    def record_event(self, event_type: str, message: str, additional_info: Dict = None) -> None:
+        """
+        Record an event with standardized structure.
+        
+        Args:
+            event_type: Type of event being logged
+            message: Description of the event
+            additional_info: Optional additional information to include
+        """
+        entry = {
+            "event": event_type,
+            "message": message,
+            "timestamp": time.time(),
+            "conversation_id": str(uuid.uuid4())
+        }
+        
+        if additional_info:
+            entry.update(additional_info)
+            
+        self.record(entry)
+
     def write(self, entry: Dict) -> None:
         """
         Write a validated log entry.

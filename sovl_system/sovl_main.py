@@ -1004,7 +1004,7 @@ class TemperamentAdjuster:
             raise
 
 class CuriosityEngine:
-    """Manages curiosity-driven question generation and exploration."""
+    """Manages curiosity-driven exploration and learning."""
     
     def __init__(
         self,
@@ -1017,18 +1017,67 @@ class CuriosityEngine:
         self.model_loader = model_loader
         self.state_tracker = state_tracker
         self.error_manager = error_manager
-        self.curiosity_manager = None
-        self._initialize_curiosity_manager()
+        self.logger = context.logger
         
+        # Initialize components
+        self._initialize_curiosity_manager()
+        self._initialize_training_cycle_manager()
+        
+    def _initialize_training_cycle_manager(self) -> None:
+        """Initialize training cycle manager."""
+        try:
+            self.cycle_manager = TrainingCycleManager(
+                config=self.context.config_manager.get_section("sovl_config"),
+                logger=self.logger,
+                device=self.context.device,
+                state_manager=self.state_tracker,
+                curiosity_manager=self.curiosity_manager
+            )
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, "cycle_manager_init")
+            raise
+            
+    def run_training_cycle(
+        self,
+        train_data: Optional[List] = None,
+        valid_data: Optional[List] = None,
+        epochs: Optional[int] = None,
+        batch_size: Optional[int] = None
+    ) -> None:
+        """Run a training cycle with the current state."""
+        try:
+            # Get current state
+            state = self.state_tracker.get_state()
+            
+            # Run training cycle through cycle manager
+            results = self.cycle_manager.run_training_cycle(
+                train_data=train_data,
+                valid_data=valid_data,
+                epochs=epochs,
+                batch_size=batch_size
+            )
+            
+            # Log training completion
+            self._log_event("training_complete", {
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "results": results
+            })
+            
+        except Exception as e:
+            self.error_manager.handle_training_error(e, batch_size or 1)
+            raise
+
     def _initialize_curiosity_manager(self) -> None:
         """Initialize the curiosity manager with proper error handling."""
         try:
-            self.curiosity_manager = CuriosityManager(
+            curiosity_manager = CuriosityManager(
                 config_manager=self.context.config_manager,
                 logger=self.context.logger,
                 device=self.context.device
             )
             self.context.logger.info("Curiosity manager initialized successfully")
+            self.curiosity_manager = curiosity_manager
         except Exception as e:
             self.context.logger.log_error(
                 error_msg=f"Failed to initialize curiosity manager: {str(e)}",
@@ -1040,204 +1089,12 @@ class CuriosityEngine:
                 config_path=self.context.config_path,
                 stack_trace=traceback.format_exc()
             )
-            
-    def generate_question(self, context_str: str = "", spontaneous: bool = False) -> Optional[str]:
-        """Generate a curiosity-driven question with conversation history validation."""
-        try:
-            # Get current state with lock
-            with self.state_tracker.state.lock:
-                state = self.state_tracker.get_state()
-                
-                # Validate conversation history
-                if not state.conversation_history:
-                    self.context.logger.record_event(
-                        event_type="conversation_error",
-                        message="No conversation history available",
-                        level="error",
-                        additional_info={
-                            "state_hash": state.state_hash(),
-                            "context": context_str
-                        }
-                    )
-                    return None
-                
-                # Check conversation ID consistency
-                current_id = state.conversation_history.conversation_id
-                if current_id != self._last_conversation_id:
-                    self.context.logger.record_event(
-                        event_type="conversation_mismatch",
-                        message="Conversation ID mismatch detected",
-                        level="warning",
-                        additional_info={
-                            "current_id": current_id,
-                            "last_id": self._last_conversation_id,
-                            "state_hash": state.state_hash()
-                        }
-                    )
-                    self._last_conversation_id = current_id
-                
-                # Generate question using validated state
-                question = self.curiosity_manager.generate_question(
-                    context_str=context_str,
-                    spontaneous=spontaneous
-                )
-                
-                # Log question generation
-                if question:
-                    self.context.logger.record_event(
-                        event_type="curiosity_question",
-                        message="Generated curiosity question",
-                        level="info",
-                        additional_info={
-                            "question": question,
-                            "conversation_id": current_id,
-                            "spontaneous": spontaneous,
-                            "state_hash": state.state_hash()
-                        }
-                    )
-                
-                return question
-                
-        except Exception as e:
-            self.context.logger.record_event(
-                event_type="curiosity_error",
-                message=f"Failed to generate question: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e)
-                }
-            )
-            raise
-        except Exception as e:
-            self.context.logger.record_event(
-                event_type="data_error",
-                message="Failed to load training data",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise ValueError(f"Failed to load training data: {str(e)}")
 
-    def run_training_cycle(self, train_data: Optional[List] = None, valid_data: Optional[List] = None, 
-                          epochs: Optional[int] = None, batch_size: Optional[int] = None):
-        """
-        Run a training cycle with the provided or default data.
-
-        Args:
-            train_data: Optional training data to use instead of default
-            valid_data: Optional validation data to use instead of default
-            epochs: Optional number of epochs to train for
-            batch_size: Optional batch size for training
-
-        Raises:
-            ValueError: If no training data is available
-        """
-        # Use provided data or fall back to initialized data
-        train_data = train_data or self.train_data
-        valid_data = valid_data or self.valid_data
-
-        # Validate data presence
-        if not train_data:
-            self.context.logger.record_event(
-                event_type="training_error",
-                message="No training data available for training cycle",
-                level="error",
-                additional_info={
-                    "using_provided_data": train_data is not self.train_data,
-                    "valid_data_available": bool(valid_data)
-                }
-            )
-            raise ValueError("No training data available for training cycle")
-
-        # Log training cycle start
-        self.context.logger.record_event(
-            event_type="training_cycle_start",
-            message="Starting training cycle",
+    def _log_event(self, event: str, data: Optional[Dict] = None) -> None:
+        """Log an event with standardized fields."""
+        self.logger.record_event(
+            event_type=f"curiosity_{event}",
+            message=f"Curiosity event: {event}",
             level="info",
-            additional_info={
-                "train_samples": len(train_data),
-                "valid_samples": len(valid_data),
-                "epochs": epochs,
-                "batch_size": batch_size
-            }
-        )
-
-        # Execute pre-training hooks with full context
-        self.plugin_manager.execute_hook("on_training_step", {
-            "batch_size": len(train_data),
-            "dry_run": False,
-            "train_samples": len(train_data),
-            "valid_samples": len(valid_data),
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "state": self.state_tracker.state.to_dict()
-        })
-        
-        try:
-            # Run the training cycle
-            self.cycle_trainer.run_training_cycle(
-                train_data=train_data,
-                valid_data=valid_data,
-                epochs=epochs,
-                batch_size=batch_size
-            )
-            
-            # Execute post-training hooks with full context
-            self.plugin_manager.execute_hook("on_training_step_complete", {
-                "batch_size": len(train_data),
-                "result": "success",
-                "train_samples": len(train_data),
-                "valid_samples": len(valid_data),
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "state": self.state_tracker.state.to_dict()
-            })
-            
-        except Exception as e:
-            # Execute error hook if training fails
-            self.plugin_manager.execute_hook("on_training_error", {
-                "error": str(e),
-                "stack_trace": traceback.format_exc(),
-                "train_samples": len(train_data),
-                "valid_samples": len(valid_data),
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "state": self.state_tracker.state.to_dict()
-            })
-            
-            # Log training error
-            self.context.logger.record_event(
-                event_type="training_error",
-                message="Training cycle failed",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise
-
-    def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float):
-        """Handle completion of a training cycle."""
-        self.state_tracker.update_data_exposure(data_exposure)
-        
-        # Execute training complete hook
-        self.plugin_manager.execute_hook("on_training_complete", {
-            "epoch": epoch,
-            "avg_loss": avg_loss,
-            "data_exposure": data_exposure,
-            "state": self.state_tracker.state.to_dict()
-        })
-        
-        self.context.logger.record_event(
-            event_type="training_complete",
-            message="Training cycle completed",
-            level="info",
-            additional_info={
-                "epoch": epoch,
-                "avg_loss": avg_loss,
-                "data_exposure": data_exposure
-            }
+            additional_info=data
         )

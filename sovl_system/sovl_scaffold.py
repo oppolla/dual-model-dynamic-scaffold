@@ -13,6 +13,7 @@ import math
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
+from sovl_errors import ErrorManager
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
@@ -1055,13 +1056,13 @@ class InsufficientDataError(Exception):
     """Exception raised when there is insufficient data for scaffold operations."""
     pass
 
-class ScaffoldManager:
-    """Manages scaffold-related operations and state."""
+class ScaffoldProvider:
+    """Provides a clean interface for scaffold functionality in training."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger, 
                  base_tokenizer=None, scaffold_tokenizer=None):
         """
-        Initialize ScaffoldManager with optional tokenizers.
+        Initialize ScaffoldProvider.
         
         Args:
             config_manager: Configuration manager instance
@@ -1069,40 +1070,138 @@ class ScaffoldManager:
             base_tokenizer: Optional base model tokenizer
             scaffold_tokenizer: Optional scaffold model tokenizer
         """
+        self.manager = ScaffoldManager(
+            config_manager=config_manager,
+            logger=logger,
+            base_tokenizer=base_tokenizer,
+            scaffold_tokenizer=scaffold_tokenizer
+        )
+        self.logger = logger
+    
+    def get_scaffold_context(
+        self, 
+        scaffold_inputs: Dict[str, torch.Tensor],
+        scaffold_model: nn.Module
+    ) -> torch.Tensor:
+        """
+        Get scaffold context from inputs.
+        
+        Args:
+            scaffold_inputs: Dictionary containing scaffold model inputs
+            scaffold_model: The scaffold model to use for inference
+            
+        Returns:
+            torch.Tensor: Hidden states from the scaffold model
+        """
+        try:
+            return self.manager.get_scaffold_context(scaffold_inputs, scaffold_model)
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_error",
+                message="Failed to get scaffold context",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+    
+    def validate_scaffold_config(self) -> bool:
+        """Validate scaffold configuration."""
+        try:
+            return self.manager.validate_scaffold_config()
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_error",
+                message="Failed to validate scaffold config",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+    
+    def initialize_scaffold_state(self, model_name: str, device: str) -> bool:
+        """Initialize scaffold state."""
+        try:
+            return self.manager.initialize_scaffold_state(model_name, device)
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_error",
+                message="Failed to initialize scaffold state",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+    
+    def verify_scaffold_compatibility(self, base_config) -> bool:
+        """Verify scaffold compatibility with base model."""
+        try:
+            return self.manager.verify_scaffold_compatibility(base_config)
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_error",
+                message="Failed to verify scaffold compatibility",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+    
+    def get_scaffold_stats(self) -> Dict:
+        """Get scaffold statistics."""
+        try:
+            return self.manager.get_scaffold_stats()
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_error",
+                message="Failed to get scaffold stats",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+    
+    def reset_scaffold_state(self):
+        """Reset scaffold state."""
+        try:
+            self.manager.reset_scaffold_state()
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_error",
+                message="Failed to reset scaffold state",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+
+class ScaffoldManager:
+    """Manages scaffold-related operations and state."""
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        error_manager: ErrorManager,
+        base_tokenizer=None,
+        scaffold_tokenizer=None
+    ):
         self.config_manager = config_manager
         self.logger = logger
+        self.error_manager = error_manager
         self.base_tokenizer = base_tokenizer
         self.scaffold_tokenizer = scaffold_tokenizer
-        self.token_map = None
-        self.scaffold_hidden_states = None
-        self.scaffold_config = None
-        self.validation_cache = {}
-        self.lock = Lock()
-        self._initialized = False
-        self._hidden_size = None
-        self._device = None
+        self.token_mapper = None
+        self.scaffold_state = None
         
-        # Initialize token map if tokenizers are provided
-        if base_tokenizer and scaffold_tokenizer:
-            try:
-                self.token_map = self.build_token_map(base_tokenizer, scaffold_tokenizer)
-                self._initialized = True
-                
-                self.logger.record({
-                    "event": "scaffold_manager_initialized",
-                    "token_map_size": len(self.token_map),
-                    "timestamp": time.time()
-                })
-            except Exception as e:
-                self.logger.record({
-                    "error": f"Failed to initialize token map: {str(e)}",
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
-                })
-                raise
-
     def validate_scaffold_config(self) -> bool:
-        """Validate scaffold-specific configuration settings."""
+        """Validate scaffold configuration."""
         try:
             required_keys = [
                 "core_config.scaffold_model_name",
@@ -1160,15 +1259,13 @@ class ScaffoldManager:
             return True
 
         except Exception as e:
-            self.logger.record({
-                "error": f"Scaffold config validation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "config_validation"
             })
             return False
-
+            
     def initialize_scaffold_state(self, model_name: str, device: str) -> bool:
-        """Initialize scaffold model state and configuration."""
+        """Initialize scaffold state."""
         try:
             from transformers import AutoConfig
             self.scaffold_config = AutoConfig.from_pretrained(model_name)
@@ -1185,7 +1282,7 @@ class ScaffoldManager:
                 self._device = device
 
                 # Initialize scaffold hidden states with zeros
-                self.scaffold_hidden_states = torch.zeros(
+                self.scaffold_state = torch.zeros(
                     (1, self.scaffold_config.max_position_embeddings, self._hidden_size),
                     device=self._device
                 )
@@ -1202,16 +1299,15 @@ class ScaffoldManager:
 
             return True
         except Exception as e:
-            self.logger.record({
-                "error": f"Scaffold state initialization failed: {str(e)}",
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "state_initialization",
                 "model_name": model_name,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+                "device": device
             })
             return False
 
     def verify_scaffold_compatibility(self, base_config) -> bool:
-        """Verify compatibility between base and scaffold models."""
+        """Verify scaffold compatibility with base model."""
         try:
             if not self.scaffold_config:
                 raise ValueError("Scaffold config not initialized")
@@ -1236,41 +1332,38 @@ class ScaffoldManager:
 
             return True
         except Exception as e:
-            self.logger.record({
-                "error": f"Scaffold compatibility check failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "compatibility_verification",
+                "base_config": base_config
             })
             return False
 
     def get_scaffold_stats(self) -> Dict:
-        """Get current statistics about scaffold state."""
+        """Get scaffold statistics."""
         try:
             with self.lock:
                 stats = {
                     "hidden_size": getattr(self, "_hidden_size", None),
                     "num_heads": getattr(self, "num_heads", None),
                     "num_layers": getattr(self, "num_layers", None),
-                    "token_map_size": len(self.token_map) if self.token_map else 0,
-                    "has_hidden_states": self.scaffold_hidden_states is not None,
+                    "token_map_size": len(self.token_mapper) if self.token_mapper else 0,
+                    "has_hidden_states": self.scaffold_state is not None,
                     "config_valid": self.validation_cache.get("config_valid", False),
                     "device": str(self._device) if hasattr(self, "_device") else None,
                     "timestamp": time.time()
                 }
                 return stats
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to get scaffold stats: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "stats_retrieval"
             })
             return {}
 
     def reset_scaffold_state(self):
-        """Reset all scaffold-related state."""
+        """Reset scaffold state."""
         with self.lock:
-            self.token_map = None
-            self.scaffold_hidden_states = None
+            self.token_mapper = None
+            self.scaffold_state = None
             self.validation_cache.clear()
             self.logger.record({
                 "event": "scaffold_state_reset",
@@ -1278,9 +1371,9 @@ class ScaffoldManager:
             })
 
     def build_token_map(self, base_tokenizer, scaffold_tokenizer):
-        """Build mapping between base and scaffold tokenizers."""
+        """Build token mapping between base and scaffold models."""
         try:
-            token_map = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
+            token_mapper = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
             
             # Map regular tokens
             for base_token, base_id in base_tokenizer.get_vocab().items():
@@ -1291,7 +1384,7 @@ class ScaffoldManager:
                     max_length=3,
                     truncation=True
                 ) or [scaffold_tokenizer.unk_token_id]
-                token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
+                token_mapper[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
             
             # Map special tokens
             special_token_map = {
@@ -1302,93 +1395,80 @@ class ScaffoldManager:
             
             # Update token map with special tokens
             for base_id, scaffold_id in special_token_map.items():
-                token_map[base_id] = {'ids': [scaffold_id], 'weight': 1.0}
+                token_mapper[base_id] = {'ids': [scaffold_id], 'weight': 1.0}
             
             # Validate token map
-            if not token_map:
+            if not token_mapper:
                 raise ValueError("Token map is empty")
                 
             self.logger.record({
                 "event": "token_map_built",
-                "map_size": len(token_map),
+                "map_size": len(token_mapper),
                 "special_tokens": len(special_token_map),
                 "timestamp": time.time()
             })
             
-            return token_map
+            return token_mapper
             
         except Exception as e:
-            self.logger.record({
-                "error": f"Token map building failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "token_map_building"
             })
             raise
 
     def validate_token_map(self) -> bool:
-        """Validate the token map for completeness and correctness."""
+        """Validate token mapping."""
         try:
-            if not self.token_map:
+            if not self.token_mapper:
                 return False
                 
             # Check for required special tokens
             required_tokens = ['pad_token_id', 'eos_token_id', 'unk_token_id']
             for token in required_tokens:
                 if not any(t['ids'][0] == getattr(self.scaffold_tokenizer, token) 
-                          for t in self.token_map.values()):
+                          for t in self.token_mapper.values()):
                     return False
                     
             # Check for non-empty mappings
-            if not all(t['ids'] for t in self.token_map.values()):
+            if not all(t['ids'] for t in self.token_mapper.values()):
                 return False
                 
             return True
             
         except Exception as e:
-            self.logger.record({
-                "error": f"Token map validation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "token_map_validation"
             })
             return False
 
     @contextlib.contextmanager
     def scaffold_context(self, hidden_states):
-        """Context manager for scaffold hidden states."""
+        """Context manager for scaffold operations."""
         try:
             if not self._initialized:
                 raise RuntimeError("ScaffoldManager not initialized")
                 
-            prev_states = self.scaffold_hidden_states
-            self.scaffold_hidden_states = hidden_states
+            prev_states = self.scaffold_state
+            self.scaffold_state = hidden_states
             yield
-        finally:
-            self.scaffold_hidden_states = prev_states
+        except Exception as e:
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "scaffold_context",
+                "hidden_states_shape": hidden_states.shape
+            })
+            raise
 
     def get_scaffold_hidden_states(
         self, 
         scaffold_inputs: Dict[str, torch.Tensor],
         scaffold_model: nn.Module
     ) -> torch.Tensor:
-        """
-        Get hidden states from scaffold model.
-        
-        Args:
-            scaffold_inputs: Dictionary containing scaffold model inputs
-            scaffold_model: The scaffold model to use for inference
-            
-        Returns:
-            torch.Tensor: Hidden states from the scaffold model
-            
-        Raises:
-            RuntimeError: If scaffold manager is not initialized
-            ValueError: If scaffold hidden states are not initialized or inputs are invalid
-        """
+        """Get scaffold hidden states."""
         try:
             if not self._initialized:
                 raise RuntimeError("ScaffoldManager not initialized")
                 
-            if self.scaffold_hidden_states is None:
+            if self.scaffold_state is None:
                 raise ValueError("Scaffold hidden states not initialized")
                 
             if not isinstance(scaffold_inputs, dict):
@@ -1408,15 +1488,14 @@ class ScaffoldManager:
                     if hasattr(scaffold_outputs, 'hidden_states')
                     else scaffold_outputs.base_model_output.hidden_states[-1]
                 )
-                self.scaffold_hidden_states = hidden_states.detach()
+                self.scaffold_state = hidden_states.detach()
                 
-            return self.scaffold_hidden_states
+            return self.scaffold_state
             
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to get scaffold hidden states: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "hidden_states_retrieval",
+                "inputs_shape": {k: v.shape for k, v in scaffold_inputs.items()}
             })
             raise
 
@@ -1425,20 +1504,7 @@ class ScaffoldManager:
         scaffold_inputs: Dict[str, torch.Tensor],
         scaffold_model: nn.Module
     ) -> torch.Tensor:
-        """
-        Get scaffold context from inputs.
-        
-        Args:
-            scaffold_inputs: Dictionary containing scaffold model inputs
-            scaffold_model: The scaffold model to use for inference
-            
-        Returns:
-            torch.Tensor: Hidden states from the scaffold model
-            
-        Raises:
-            RuntimeError: If scaffold manager is not initialized
-            ValueError: If scaffold inputs are invalid
-        """
+        """Get scaffold context."""
         try:
             if not self._initialized:
                 raise RuntimeError("ScaffoldManager not initialized")
@@ -1453,12 +1519,11 @@ class ScaffoldManager:
             with self.scaffold_context(
                 self.get_scaffold_hidden_states(scaffold_inputs, scaffold_model)
             ):
-                return self.scaffold_hidden_states
+                return self.scaffold_state
                 
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to get scaffold context: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
+            self.error_manager.handle_scaffold_error(e, {
+                "operation": "context_retrieval",
+                "inputs_shape": {k: v.shape for k, v in scaffold_inputs.items()}
             })
             raise
