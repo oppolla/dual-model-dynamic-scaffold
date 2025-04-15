@@ -1,9 +1,21 @@
 import time
 import traceback
-from typing import Optional, Dict, Any, TYPE_CHECKING
+from typing import Optional, Dict, Any, TYPE_CHECKING, List
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import random
+import json
+import os
+from threading import Lock
 from sovl_config import ConfigManager
 from sovl_cli import run_cli
 from sovl_logger import Logger
+from sovl_state import SOVLState
+from sovl_error import ErrorHandler
+from sovl_utils import calculate_confidence, detect_repetitions
+from sovl_plugin import PluginManager
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
@@ -38,7 +50,15 @@ class SOVLOrchestrator:
 
         try:
             self.config_manager = ConfigManager(config_path, self.logger)
-            self.system: Optional['SOVLSystem'] = None
+            self.state = SOVLState()
+            self.error_handler = ErrorHandler(self.logger)
+            self.plugin_manager = PluginManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                state=self.state
+            )
+            self._system: Optional['SOVLSystem'] = None
+            self._lock = Lock()
             self._log_event("orchestrator_init_success")
         except Exception as e:
             self._log_error("Orchestrator initialization failed", e)
@@ -84,12 +104,23 @@ class SOVLOrchestrator:
         except Exception as e:
             print(f"Failed to log error: {str(e)}")
 
+    def set_system(self, system: 'SOVLSystem') -> None:
+        """Set the SOVL system reference."""
+        with self._lock:
+            self._system = system
+            self.plugin_manager.set_system(system)
+
+    def get_system(self) -> Optional['SOVLSystem']:
+        """Get the SOVL system reference."""
+        with self._lock:
+            return self._system
+
     def initialize_system(self) -> None:
         """Initialize the SOVL system with the current configuration."""
         try:
-            if self.system is None:
+            if self._system is None:
                 from sovl_main import SOVLSystem  # Import here to break circular dependency
-                self.system = SOVLSystem(self.config_manager.config_path)
+                self._system = SOVLSystem(self.config_manager.config_path)
                 self._log_event("system_initialized")
         except Exception as e:
             self._log_error("System initialization failed", e)
@@ -99,7 +130,7 @@ class SOVLOrchestrator:
         """Run the SOVL system in the appropriate mode."""
         try:
             self.initialize_system()
-            if self.system is None:
+            if self._system is None:
                 raise RuntimeError("System not initialized")
             
             # Run in CLI mode by default
@@ -112,9 +143,9 @@ class SOVLOrchestrator:
     def shutdown(self) -> None:
         """Shutdown the system and save state."""
         try:
-            if self.system is not None:
+            if self._system is not None:
                 # Save final state
-                self.system.state_tracker.state.save_state()
+                self._system.state_tracker.state.save_state()
                 self._log_event("system_shutdown")
         except Exception as e:
             self._log_error("System shutdown failed", e)

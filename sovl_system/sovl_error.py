@@ -5,7 +5,6 @@ from collections import defaultdict, deque
 from threading import Lock
 from sovl_logger import Logger
 from sovl_state import SOVLState
-from sovl_config import ConfigManager
 
 class ErrorHandler:
     """Handles error logging, recovery, and monitoring for the SOVL system."""
@@ -20,7 +19,7 @@ class ErrorHandler:
 
     def __init__(
         self,
-        config_manager: ConfigManager,
+        config: Dict[str, Any],
         logger: Logger,
         error_log_file: str = "sovl_errors.jsonl",
         max_error_log_size_mb: int = 10,
@@ -31,21 +30,17 @@ class ErrorHandler:
         Initialize the error handler with configuration and logging dependencies.
 
         Args:
-            config_manager: ConfigManager instance for accessing error handling settings.
-            logger: Logger instance for recording errors and warnings.
-            error_log_file: File path for dedicated error logs.
-            max_error_log_size_mb: Maximum size for error log file before rotation.
-            compress_old: Whether to compress rotated log files.
-            state: Optional SOVLState instance for context-aware error handling.
+            config: Dictionary containing error handling configuration
+            logger: Logger instance for recording errors and warnings
+            error_log_file: File path for dedicated error logs
+            max_error_log_size_mb: Maximum size for error log file before rotation
+            compress_old: Whether to compress rotated log files
+            state: Optional state instance for context-aware error handling
         """
-        self.config_manager = config_manager
+        self.config = {**self._DEFAULT_CONFIG, **config}
         self.logger = logger
         self.state = state
-        self.error_logger = Logger(
-            log_file=error_log_file,
-            max_size_mb=max_error_log_size_mb,
-            compress_old=compress_old,
-        )
+        self.error_logger = logger  # Use the same logger instance
         self.lock = Lock()
         self.error_counts = defaultdict(int)
         self.error_history = defaultdict(lambda: deque(maxlen=self._get_max_history_per_error()))
@@ -55,22 +50,13 @@ class ErrorHandler:
 
     def _get_max_history_per_error(self) -> int:
         """Get the maximum number of error instances to keep in history."""
-        return self.config_manager.get(
-            "error_handling.max_history_per_error",
-            self._DEFAULT_CONFIG["error_handling.max_history_per_error"]
-        )
+        return self.config["error_handling.max_history_per_error"]
 
     def _load_severity_thresholds(self) -> Dict[str, int]:
         """Load severity thresholds from configuration."""
         return {
-            "critical": self.config_manager.get(
-                "error_handling.critical_threshold",
-                self._DEFAULT_CONFIG["error_handling.critical_threshold"]
-            ),
-            "warning": self.config_manager.get(
-                "error_handling.warning_threshold",
-                self._DEFAULT_CONFIG["error_handling.warning_threshold"]
-            )
+            "critical": self.config["error_handling.critical_threshold"],
+            "warning": self.config["error_handling.warning_threshold"]
         }
 
     def _initialize_recovery_strategies(self) -> Dict[str, Callable]:

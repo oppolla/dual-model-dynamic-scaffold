@@ -19,7 +19,7 @@ from sovl_io import load_training_data, validate_quantization_mode, Insufficient
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer
 from sovl_config import ConfigManager
-from sovl_scaffold import CrossAttentionInjector, ScaffoldManager
+from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer
 from sovl_processor import LogitsProcessor
 from sovl_utils import (
     calculate_confidence,
@@ -36,6 +36,11 @@ from sovl_logging import LoggingManager
 import logging
 from sovl_training_cycle import TrainingCycleManager
 from sovl_plugin import PluginManager
+
+# Remove sovl_conductor import and use TYPE_CHECKING for type hints
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from sovl_conductor import SOVLOrchestrator
 
 def calculate_confidence_score(logits, generated_ids) -> float:
     """Calculate confidence score for generated tokens."""
@@ -837,6 +842,16 @@ class SOVLSystem:
                 error_type="cleanup_error",
                 stack_trace=traceback.format_exc()
             )
+
+    def set_orchestrator(self, orchestrator: 'SOVLOrchestrator') -> None:
+        """Set the orchestrator reference."""
+        with self._lock:
+            self._orchestrator = orchestrator
+
+    def get_orchestrator(self) -> Optional['SOVLOrchestrator']:
+        """Get the orchestrator reference."""
+        with self._lock:
+            return self._orchestrator
 
 if __name__ == "__main__":
     from sovl_conductor import SOVLOrchestrator
