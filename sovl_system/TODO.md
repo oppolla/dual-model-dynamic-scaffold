@@ -10,3 +10,4 @@
 - sovl_config - DONE
 - sovl_io - DONE
 - sovl_temperament - DONE
+- sovl_generation - DONE
