@@ -9,8 +9,6 @@ from threading import RLock
 from sovl_utils import synchronized, safe_divide, float_lt
 from sovl_config import ConfigManager
 from sovl_state import SOVLState
-
-# Assuming the new Logger is imported
 from sovl_logger import Logger, LoggerConfig
 
 @dataclass
