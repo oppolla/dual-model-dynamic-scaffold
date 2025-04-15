@@ -493,6 +493,37 @@ class SOVLOrchestrator:
         except Exception as e:
             print(f"Resource cleanup failed: {str(e)}")
 
+    def _validate_configs(self):
+        """Validate all configurations."""
+        try:
+            # Get validated configs from ConfigHandler
+            self.curiosity_config = self.config_handler.curiosity_config
+            self.controls_config = self.config_handler.controls_config
+            
+            # Log final configuration state
+            self.context.logger.record_event(
+                event_type="config_validation",
+                message="Using validated configurations from ConfigHandler",
+                level="info",
+                additional_info={
+                    "curiosity_config": self.curiosity_config,
+                    "controls_config": {k: v for k, v in self.controls_config.items() 
+                                     if k.startswith(("curiosity_", "enable_curiosity"))}
+                }
+            )
+            
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="config_validation_error",
+                message="Failed to get validated configurations",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+
 # Main block
 if __name__ == "__main__":
     orchestrator = SOVLOrchestrator()

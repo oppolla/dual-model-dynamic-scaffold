@@ -454,9 +454,9 @@ class SOVLState(StateBase):
         self.lora_capacity: int = self._config.lora_capacity
 
         # Behavioral state
-        self.temperament_score: float = 0.0
-        self.last_temperament_score: float = 0.0
+        self.temperament_score: float = 0.5  # Default neutral score
         self.temperament_history: Deque[float] = deque(maxlen=self._config.temperament_history_maxlen)
+        self.temperament_history.append(self.temperament_score)
         self.confidence_history: Deque[float] = deque(maxlen=self._config.confidence_history_maxlen)
         self.sleep_confidence_sum: float = 0.0
         self.sleep_confidence_count: int = 0
@@ -469,8 +469,19 @@ class SOVLState(StateBase):
         self.sleep_total_loss: float = 0.0
         self.sleep_steps: int = 0
 
-        # Curiosity state
-        self.curiosity = CuriosityState(config_manager, logger, device)
+        # Initialize curiosity state with validation
+        try:
+            self.curiosity = CuriosityState(config_manager, logger, device)
+            self._validate_curiosity_state()
+            self._log_event(
+                "curiosity_state_initialized",
+                pressure=self.curiosity.pressure,
+                unanswered_count=len(self.curiosity.unanswered_questions),
+                novelty_scores_count=len(self.curiosity.novelty_scores)
+            )
+        except Exception as e:
+            self._log_error("Failed to initialize curiosity state", error=str(e))
+            raise StateError(f"Curiosity state initialization failed: {str(e)}")
 
         self._update_state_hash()
         self._log_event(
@@ -642,72 +653,40 @@ class SOVLState(StateBase):
             prompt, _ = self.seen_prompts.popleft()
             self._log_event("seen_prompt_pruned", prompt=prompt)
 
-    def update_temperament(self, new_temperament: Dict[str, float]) -> None:
+    def update_temperament(self, new_score: float) -> None:
         """
-        Update temperament state with proper synchronization.
+        Update the temperament score with validation and logging.
         
         Args:
-            new_temperament: New temperament values
+            new_score: New temperament score (must be between 0.0 and 1.0)
         """
+        if not isinstance(new_score, (int, float)):
+            raise ValueError(f"Temperament score must be numeric, got {type(new_score)}")
+            
+        if not 0.0 <= new_score <= 1.0:
+            raise ValueError(f"Temperament score must be between 0.0 and 1.0, got {new_score}")
+            
         with self.lock:
-            # Validate new temperament
-            if not all(0.0 <= v <= 1.0 for v in new_temperament.values()):
-                raise StateError("Invalid temperament values: must be between 0.0 and 1.0")
-                
-            # Update state
-            self.temperament_score = new_temperament.copy()
-            self.temperament_history.append(self.temperament_score.copy())
-            self._update_temperament_score()
+            self.temperament_score = float(new_score)
+            self.temperament_history.append(self.temperament_score)
             self.state_hash = self._compute_state_hash()
-            
-            # Log update
-            self.logger.record_event(
-                event_type="state_temperament_updated",
-                message="Temperament state updated",
-                level="info",
-                additional_info={
-                    "new_temperament": new_temperament,
-                    "temperament_score": self.temperament_score,
-                    "conversation_id": self.history.conversation_id,
-                    "state_hash": self.state_hash
-                }
-            )
-            
-    def _update_temperament_score(self) -> None:
-        """Update the temperament score based on current state."""
-        with self.lock:
-            # Calculate weighted average of temperament traits
-            weights = {
-                "curiosity": 0.4,
-                "confidence": 0.3,
-                "stability": 0.2,
-                "adaptability": 0.1
-            }
-            
-            score = sum(
-                self.temperament_score[trait] * weight
-                for trait, weight in weights.items()
-            )
-            
-            # Normalize to [-1.0, 1.0] range
-            self.temperament_score = (score * 2.0) - 1.0
-            
-    @property
-    def temperament_score(self) -> float:
-        """Get the current temperament score."""
-        with self.lock:
-            return self.temperament_score
             
     def _compute_state_hash(self) -> str:
         """Compute a hash of the current state."""
+        state_data = {
+            "temperament_score": self.temperament_score,
+            "confidence_history": list(self.confidence_history),
+            "data_exposure": self.data_exposure,
+            "lora_capacity": self.lora_capacity,
+            "conversation_id": self.history.conversation_id
+        }
+        return hashlib.sha256(json.dumps(state_data, sort_keys=True).encode()).hexdigest()
+        
+    @property
+    def current_temperament(self) -> float:
+        """Get the current temperament score with thread safety."""
         with self.lock:
-            state_data = {
-                "temperament": self.temperament_score,
-                "conversation_id": self.history.conversation_id
-            }
-            return hashlib.sha256(
-                json.dumps(state_data, sort_keys=True).encode()
-            ).hexdigest()
+            return self.temperament_score
 
     def update_confidence(self, confidence: float):
         """Update confidence history."""
@@ -794,7 +773,6 @@ class SOVLState(StateBase):
                         "patience": self.patience,
                         "lora_capacity": self.lora_capacity,
                         "temperament_score": self.temperament_score,
-                        "last_temperament_score": self.last_temperament_score,
                         "temperament_history": list(self.temperament_history),
                         "confidence_history": list(self.confidence_history),
                         "sleep_confidence_sum": self.sleep_confidence_sum,
@@ -915,7 +893,6 @@ class SOVLState(StateBase):
 
                     # Behavioral state
                     self.temperament_score = float(data.get("temperament_score", 0.0))
-                    self.last_temperament_score = float(data.get("last_temperament_score", 0.0))
                     self.temperament_history = deque(
                         [float(x) for x in data.get("temperament_history", [])],
                         maxlen=self._config.temperament_history_maxlen
@@ -955,6 +932,38 @@ class SOVLState(StateBase):
                 if attempt == max_retries - 1:
                     raise StateError(f"State loading failed after {max_retries} attempts: {str(e)}")
                 time.sleep(0.1)
+
+    def _validate_curiosity_state(self) -> None:
+        """Validate the curiosity state attributes and data structures."""
+        if not hasattr(self, 'curiosity') or self.curiosity is None:
+            raise StateError("Curiosity state not initialized")
+            
+        required_attributes = [
+            'unanswered_questions',
+            'last_question_time',
+            'pressure',
+            'novelty_scores',
+            'question_count'
+        ]
+        
+        missing_attributes = [attr for attr in required_attributes 
+                            if not hasattr(self.curiosity, attr)]
+        if missing_attributes:
+            raise StateError(f"Missing required curiosity state attributes: {missing_attributes}")
+            
+        # Validate data structures
+        if not isinstance(self.curiosity.unanswered_questions, deque):
+            raise StateError("Curiosity unanswered_questions must be a deque")
+            
+        if not isinstance(self.curiosity.novelty_scores, deque):
+            raise StateError("Curiosity novelty_scores must be a deque")
+            
+        # Validate values
+        if not isinstance(self.curiosity.pressure, (int, float)):
+            raise StateError("Curiosity pressure must be numeric")
+            
+        if not isinstance(self.curiosity.question_count, int):
+            raise StateError("Curiosity question_count must be an integer")
 
 class StateManager:
     """Manages state initialization and persistence for the SOVL system."""

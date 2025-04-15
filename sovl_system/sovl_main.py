@@ -228,23 +228,23 @@ class ConfigHandler:
     def _validate_curiosity_configs(self):
         """Validate and synchronize curiosity-related configurations."""
         try:
-            # Define required keys and their default values
+            # Define required keys, default values, and validation ranges
             required_keys = {
-                "queue_maxlen": 10,
-                "weight_ignorance": 0.7,
-                "weight_novelty": 0.3,
-                "metrics_maxlen": 1000,
-                "novelty_threshold_spontaneous": 0.9,
-                "novelty_threshold_response": 0.8,
-                "pressure_threshold": 0.7,
-                "pressure_drop": 0.3,
-                "silence_threshold": 20.0,
-                "question_cooldown": 60.0,
-                "max_new_tokens": 8,
-                "base_temperature": 1.1,
-                "temperament_influence": 0.4,
-                "top_k": 30,
-                "enable_curiosity": True
+                "queue_maxlen": (10, (1, 50)),
+                "weight_ignorance": (0.7, (0.0, 1.0)),
+                "weight_novelty": (0.3, (0.0, 1.0)),
+                "metrics_maxlen": (1000, (100, 10000)),
+                "novelty_threshold_spontaneous": (0.9, (0.5, 1.0)),
+                "novelty_threshold_response": (0.8, (0.5, 1.0)),
+                "pressure_threshold": (0.7, (0.5, 0.9)),
+                "pressure_drop": (0.3, (0.1, 0.5)),
+                "silence_threshold": (20.0, (5.0, 60.0)),
+                "question_cooldown": (60.0, (30.0, 120.0)),
+                "max_new_tokens": (8, (5, 12)),
+                "base_temperature": (1.1, (0.5, 1.5)),
+                "temperament_influence": (0.4, (0.1, 0.6)),
+                "top_k": (30, (10, 50)),
+                "enable_curiosity": (True, None)
             }
             
             # Check for missing keys in curiosity_config
@@ -256,12 +256,35 @@ class ConfigHandler:
                     level="warning",
                     additional_info={
                         "missing_keys": missing_keys,
-                        "default_values": {k: required_keys[k] for k in missing_keys}
+                        "default_values": {k: required_keys[k][0] for k in missing_keys}
                     }
                 )
                 # Add missing keys with default values
                 for key in missing_keys:
-                    self.curiosity_config[key] = required_keys[key]
+                    self.curiosity_config[key] = required_keys[key][0]
+            
+            # Validate value ranges
+            invalid_values = []
+            for key, (default, valid_range) in required_keys.items():
+                if valid_range is None:  # Skip validation for boolean values
+                    continue
+                value = self.curiosity_config[key]
+                if not (valid_range[0] <= value <= valid_range[1]):
+                    invalid_values.append({
+                        "key": key,
+                        "value": value,
+                        "valid_range": valid_range
+                    })
+                    # Reset to default value
+                    self.curiosity_config[key] = default
+            
+            if invalid_values:
+                self.context.logger.record_event(
+                    event_type="config_validation",
+                    message="Invalid values in curiosity_config",
+                    level="warning",
+                    additional_info={"invalid_values": invalid_values}
+                )
             
             # Check for mismatches between curiosity_config and controls_config
             controls_mapping = {
@@ -292,6 +315,8 @@ class ConfigHandler:
                             "controls_value": self.controls_config[controls_key],
                             "curiosity_value": self.curiosity_config[curiosity_key]
                         })
+                        # Align controls_config with curiosity_config
+                        self.controls_config[controls_key] = self.curiosity_config[curiosity_key]
             
             if mismatches:
                 self.context.logger.record_event(
@@ -300,9 +325,18 @@ class ConfigHandler:
                     level="warning",
                     additional_info={"mismatches": mismatches}
                 )
-                # Align controls_config with curiosity_config
-                for mismatch in mismatches:
-                    self.controls_config[mismatch["controls_key"]] = self.curiosity_config[mismatch["curiosity_key"]]
+            
+            # Log final configuration state
+            self.context.logger.record_event(
+                event_type="config_validation",
+                message="Curiosity configuration validation complete",
+                level="info",
+                additional_info={
+                    "curiosity_config": self.curiosity_config,
+                    "controls_config": {k: v for k, v in self.controls_config.items() 
+                                     if k.startswith(("curiosity_", "enable_curiosity"))}
+                }
+            )
             
         except Exception as e:
             self.context.logger.record_event(
@@ -813,129 +847,151 @@ class TemperamentAdjuster:
             
             # Get curiosity pressure if manager is provided
             curiosity_pressure = None
-            if curiosity_manager:
-                try:
-                    curiosity_pressure = curiosity_manager.pressure_mgr.value
-                    self.context.logger.record_event(
-                        event_type="temperament_curiosity_pressure",
-                        message="Retrieved curiosity pressure",
-                        level="info",
-                        additional_info={
-                            "pressure": curiosity_pressure,
-                            "conversation_id": state.conversation_id,
-                            "state_hash": state.state_hash
-                        }
-                    )
-                except Exception as e:
+            if curiosity_manager is not None:
+                curiosity_pressure = curiosity_manager.get_pressure()
+                if not (0.0 <= curiosity_pressure <= 1.0):
                     self.context.logger.record_event(
                         event_type="temperament_warning",
-                        message="Failed to get curiosity pressure",
-                        level="warning",
-                        additional_info={
-                            "error": str(e),
-                            "conversation_id": state.conversation_id,
-                            "state_hash": state.state_hash
-                        }
+                        message=f"Invalid curiosity pressure: {curiosity_pressure}",
+                        level="warning"
                     )
+                    curiosity_pressure = None
             
-            # Update temperament with pressure
-            self.temperament_system.update_from_state(
-                state=state,
-                curiosity_pressure=curiosity_pressure
-            )
+            # Calculate lifecycle stage
+            lifecycle_stage = state.data_exposure / state.lora_capacity if state.lora_capacity > 0 else 0.0
             
+            # Update temperament with proper synchronization
+            with state.lock:
+                self.temperament_system.update_temperament(
+                    confidence=state.confidence_history[-1] if state.confidence_history else 0.5,
+                    lifecycle_stage=lifecycle_stage,
+                    curiosity_pressure=curiosity_pressure
+                )
+                
+                # Update state with new temperament
+                state.temperament_score = self.temperament_system.score
+                state.temperament_history.append(state.temperament_score)
+                
+                # Log the update
+                self.context.logger.record_event(
+                    event_type="temperament_updated",
+                    message=f"Temperament updated: score={state.temperament_score:.3f}, mood={self.temperament_system.mood_label}",
+                    level="info",
+                    additional_info={
+                        "score": state.temperament_score,
+                        "mood": self.temperament_system.mood_label,
+                        "curiosity_pressure": curiosity_pressure,
+                        "lifecycle_stage": lifecycle_stage,
+                        "confidence": state.confidence_history[-1] if state.confidence_history else 0.5
+                    }
+                )
+                
         except Exception as e:
             self.context.logger.record_event(
                 event_type="temperament_error",
-                message="Temperament update failed",
+                message=f"Failed to update temperament: {str(e)}",
                 level="error",
                 additional_info={
                     "error": str(e),
-                    "stack_trace": traceback.format_exc(),
-                    "conversation_id": state.conversation_id,
-                    "state_hash": state.state_hash
+                    "stack_trace": traceback.format_exc()
                 }
             )
             raise
 
 class CuriosityEngine:
-    """Generates curiosity-driven questions."""
-    def __init__(self, context: SystemContext, model_loader: ModelLoader, 
-                 state_tracker: StateTracker, error_manager: ErrorManager):
+    """Manages curiosity-driven question generation and exploration."""
+    
+    def __init__(
+        self,
+        context: SystemContext,
+        model_loader: ModelLoader,
+        state_tracker: StateTracker,
+        error_manager: ErrorManager
+    ):
         self.context = context
         self.model_loader = model_loader
         self.state_tracker = state_tracker
         self.error_manager = error_manager
+        self.curiosity_manager = None
+        self._initialize_curiosity_manager()
         
-        # Check if curiosity is enabled
-        self.enable_curiosity = self.context.config_manager.get("curiosity_config.enable_curiosity", True)
-        
-        # Initialize curiosity manager if enabled
-        if self.enable_curiosity:
-            self.curiosity_manager = CuriosityManager(
-                config=self.context.config_manager.get_section("curiosity_config"),
-                logger=context.logger,
-                device=context.device,
-                state=state_tracker.state
-            )
-            self.context.logger.record_event(
-                event_type="curiosity_initialized",
-                message="Curiosity manager initialized successfully",
-                level="info",
-                additional_info={
-                    "config": {
-                        "weight_ignorance": self.context.config_manager.get("curiosity_config.weight_ignorance", 0.7),
-                        "weight_novelty": self.context.config_manager.get("curiosity_config.weight_novelty", 0.3),
-                        "base_temperature": self.context.config_manager.get("curiosity_config.base_temperature", 1.1)
-                    }
-                }
-            )
-        else:
-            self.curiosity_manager = None
-            self.context.logger.record_event(
-                event_type="curiosity_disabled",
-                message="Curiosity is disabled in configuration",
-                level="info",
-                additional_info={
-                    "reason": "enable_curiosity is False in curiosity_config"
-                }
-            )
-
-    def generate_question(self, context_str: str = "", spontaneous: bool = False) -> Optional[str]:
-        """Generate a curiosity-driven question if enabled."""
-        if not self.enable_curiosity or not self.curiosity_manager:
-            self.context.logger.record_event(
-                event_type="curiosity_skipped",
-                message="Question generation skipped - curiosity is disabled",
-                level="info",
-                additional_info={
-                    "context": context_str,
-                    "spontaneous": spontaneous
-                }
-            )
-            return None
-
+    def _initialize_curiosity_manager(self) -> None:
+        """Initialize the curiosity manager with proper error handling."""
         try:
-            question = self.curiosity_manager.generate_question(
-                context=context_str,
-                spontaneous=spontaneous,
-                model=self.model_loader.base_model,
-                tokenizer=self.model_loader.base_tokenizer
+            self.curiosity_manager = CuriosityManager(
+                config_manager=self.context.config_manager,
+                logger=self.context.logger,
+                device=self.context.device
             )
-            if question:
-                self.context.logger.record_event(
-                    event_type="question_generated",
-                    message="Curiosity question generated successfully",
-                    level="info",
+            self.context.logger.info("Curiosity manager initialized successfully")
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to initialize curiosity manager: {str(e)}",
+                error_type="initialization_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise SystemInitializationError(
+                message="Failed to initialize curiosity manager",
+                config_path=self.context.config_path,
+                stack_trace=traceback.format_exc()
+            )
+            
+    def generate_question(self, context_str: str = "", spontaneous: bool = False) -> Optional[str]:
+        """
+        Generate a curiosity-driven question with proper error handling.
+        
+        Args:
+            context_str: Context string for question generation
+            spontaneous: Whether the question is spontaneous
+            
+        Returns:
+            Generated question or None if generation fails
+        """
+        try:
+            # Get current state
+            state = self.state_tracker.get_state()
+            
+            # Generate question with proper error handling
+            try:
+                question = self.curiosity_manager.generate_question(
+                    state=state,
+                    tokenizer=self.model_loader.base_tokenizer,
+                    model=self.model_loader.base_model,
+                    prompt=context_str,
+                    spontaneous=spontaneous
+                )
+                
+                if question:
+                    self.context.logger.info(f"Generated curiosity question: {question}")
+                    return question
+                    
+                return None
+                
+            except Exception as e:
+                # Log the error with full context
+                self.context.logger.log_error(
+                    error_msg=f"Curiosity question generation failed: {str(e)}",
+                    error_type="curiosity_error",
+                    stack_trace=traceback.format_exc(),
                     additional_info={
-                        "question": question,
+                        "context": context_str,
                         "spontaneous": spontaneous,
-                        "context_length": len(context_str)
+                        "conversation_id": state.conversation_id,
+                        "state_hash": state.state_hash
                     }
                 )
-            return question
+                
+                # Handle the error through ErrorManager
+                return self.error_manager.handle_curiosity_error(e, context_str)
+                
         except Exception as e:
-            return self.error_manager.handle_curiosity_error(e, "question_generation")
+            # Log any unexpected errors
+            self.context.logger.log_error(
+                error_msg=f"Unexpected error in generate_question: {str(e)}",
+                error_type="unexpected_error",
+                stack_trace=traceback.format_exc()
+            )
+            return None
 
 class CycleTrainer:
     """Manages regular training cycles."""

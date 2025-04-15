@@ -2,6 +2,7 @@ import time
 from typing import Any, Dict, List, Optional, Deque, Tuple
 from collections import deque
 import traceback
+import json
 
 import torch
 from torch import nn
@@ -163,37 +164,163 @@ class CuriosityManager:
     
     def __init__(
         self,
-        config: Dict[str, Any],
-        logger: Any,
-        device: torch.device = torch.device("cpu")
+        config_manager: ConfigManager,
+        logger: Logger,
+        device: torch.device
     ):
-        """
-        Initialize curiosity manager.
-        
-        Args:
-            config: Configuration dictionary
-            logger: Logger instance
-            device: Device for tensor operations
-        """
-        self.config = config
+        self.config_manager = config_manager
         self.logger = logger
         self.device = device
+        self.state = None  # Will be set by SOVLState
+        self.pressure = 0.0
+        self.last_update = time.time()
+        self.conversation_id = None
+        self.state_hash = None
         self.pressure_mgr = CuriosityPressure()
-        self.last_update: float = time.time()
-        self.metrics: Deque[Dict[str, Any]] = deque(maxlen=config.get("metrics_maxlen", 1000))
+        self.metrics: Deque[Dict[str, Any]] = deque(maxlen=config_manager.config.get("metrics_maxlen", 1000))
         self._initialize_components()
         
+        # Log device initialization
+        self._log_event(
+            "device_initialized",
+            device=str(self.device),
+            device_type=self.device.type
+        )
+
     def _initialize_components(self) -> None:
         """Initialize curiosity components."""
         self.curiosity = Curiosity(
-            weight_ignorance=self.config.get("weight_ignorance", 0.7),
-            weight_novelty=self.config.get("weight_novelty", 0.3),
-            metrics_maxlen=self.config.get("metrics_maxlen", 1000),
+            weight_ignorance=self.config_manager.config.get("weight_ignorance", 0.7),
+            weight_novelty=self.config_manager.config.get("weight_novelty", 0.3),
+            metrics_maxlen=self.config_manager.config.get("metrics_maxlen", 1000),
             logger=self.logger
         )
         self.callbacks = CuriosityCallbacks(logger=self.logger)
         self.last_question_time: float = time.time()
         
+    def set_state(self, state: SOVLState) -> None:
+        """Set the SOVLState reference and validate synchronization."""
+        if not isinstance(state, SOVLState):
+            raise ValueError("State must be an instance of SOVLState")
+            
+        self.state = state
+        self.conversation_id = state.history.conversation_id
+        self.state_hash = state.state_hash
+        
+        # Validate state synchronization
+        self._validate_state_sync()
+        self._log_event(
+            "state_sync_initialized",
+            conversation_id=self.conversation_id,
+            state_hash=self.state_hash,
+            pressure=self.pressure
+        )
+
+    def _validate_state_sync(self) -> None:
+        """Validate synchronization between CuriosityManager and SOVLState."""
+        if self.state is None:
+            raise StateError("SOVLState not set")
+            
+        if not hasattr(self.state, 'curiosity'):
+            raise StateError("SOVLState missing curiosity attribute")
+            
+        # Validate pressure synchronization
+        if abs(self.pressure - self.state.curiosity.pressure) > 0.01:
+            self._log_warning(
+                "pressure_mismatch",
+                manager_pressure=self.pressure,
+                state_pressure=self.state.curiosity.pressure
+            )
+            # Align pressures
+            self.pressure = self.state.curiosity.pressure
+
+    def update_pressure(self, new_pressure: float) -> None:
+        """Update curiosity pressure and ensure state synchronization."""
+        try:
+            # Validate pressure value
+            if not isinstance(new_pressure, (int, float)):
+                raise ValueError("Pressure must be numeric")
+            if not 0.0 <= new_pressure <= 1.0:
+                raise ValueError("Pressure must be between 0.0 and 1.0")
+
+            # Update local pressure
+            self.pressure = new_pressure
+            self.last_update = time.time()
+
+            # Update state if available
+            if self.state is not None:
+                self.state.curiosity.pressure = new_pressure
+                self.state_hash = self.state.state_hash
+                self._log_event(
+                    "pressure_updated",
+                    pressure=new_pressure,
+                    conversation_id=self.conversation_id,
+                    state_hash=self.state_hash
+                )
+            else:
+                self._log_warning(
+                    "pressure_update_no_state",
+                    pressure=new_pressure
+                )
+
+        except Exception as e:
+            self._log_error(
+                "pressure_update_failed",
+                error=str(e),
+                pressure=new_pressure
+            )
+            raise
+
+    def _log_event(self, event_type: str, **kwargs) -> None:
+        """Log an event with standardized metadata."""
+        try:
+            metadata = {
+                "event_type": event_type,
+                "timestamp": time.time(),
+                "device": str(self.device),
+                "conversation_id": self.conversation_id,
+                "state_hash": self.state_hash,
+                **kwargs
+            }
+            self.logger.info(f"Curiosity event: {json.dumps(metadata)}")
+        except Exception as e:
+            self._log_error(f"Failed to log event: {str(e)}", event_type=event_type, **kwargs)
+
+    def _log_warning(self, event_type: str, **kwargs) -> None:
+        """Log a warning with standardized metadata."""
+        try:
+            metadata = {
+                "event_type": event_type,
+                "timestamp": time.time(),
+                "device": str(self.device),
+                "conversation_id": self.conversation_id,
+                "state_hash": self.state_hash,
+                **kwargs
+            }
+            self.logger.warning(f"Curiosity warning: {json.dumps(metadata)}")
+        except Exception as e:
+            self.logger.error(f"Failed to log curiosity warning: {str(e)}")
+
+    def _log_error(self, message: str, error_type: str = "curiosity_error", **kwargs) -> None:
+        """Log an error with standardized metadata."""
+        try:
+            self.logger.log_error(
+                error_msg=message,
+                error_type=error_type,
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "device": str(self.device),
+                    "conversation_id": self.conversation_id,
+                    "state_hash": self.state_hash,
+                    **kwargs
+                }
+            )
+        except Exception as e:
+            # Fallback logging if primary logging fails
+            print(f"Failed to log error: {str(e)}")
+            print(f"Original error: {message}")
+            print(f"Stack trace: {traceback.format_exc()}")
+
     def update_metrics(
         self,
         question: Optional[str] = None,
@@ -236,12 +363,31 @@ class CuriosityManager:
             
     def _log_metrics_update(self, metric: Dict[str, Any]) -> None:
         """Log metrics update event."""
-        if self.logger:
-            self.logger.record({
-                "event": "curiosity_metrics_update",
-                "metric": metric,
-                "timestamp": time.time()
-            })
+        try:
+            self.logger.record_event(
+                event_type="curiosity_metrics_update",
+                message="Curiosity metrics updated",
+                level="info",
+                additional_info={
+                    "metric": metric,
+                    "timestamp": time.time(),
+                    "conversation_id": self.conversation_id,
+                    "state_hash": self.state_hash,
+                    "device": str(self.device)
+                }
+            )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="logging_failure",
+                message=f"Failed to log metrics update: {str(e)}",
+                level="warning",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc(),
+                    "conversation_id": self.conversation_id,
+                    "state_hash": self.state_hash
+                }
+            )
             
     def get_metrics(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -261,62 +407,6 @@ class CuriosityManager:
         self.metrics.clear()
         self.callbacks.trigger_callback("metrics_cleared")
         
-    def update_pressure(
-        self,
-        temperament_score: float,
-        confidence: float,
-        silence_duration: float,
-        state: Any
-    ) -> None:
-        """
-        Update curiosity pressure based on system state and sync with CuriosityState.
-        
-        Args:
-            temperament_score: Current temperament score
-            confidence: Current confidence score
-            silence_duration: Time since last interaction
-            state: Current system state
-        """
-        try:
-            # Update pressure using CuriosityPressure
-            self.pressure_mgr.update(
-                temperament=temperament_score,
-                confidence=confidence,
-                silence=silence_duration,
-                silence_threshold=self.config.get("silence_threshold", 20.0)
-            )
-            
-            # Sync pressure with CuriosityState
-            if hasattr(state, 'curiosity'):
-                # Get current pressure from CuriosityPressure
-                current_pressure = self.pressure_mgr.value
-                
-                # Log pressure values for comparison
-                self._log_event("pressure_update", {
-                    "curiosity_pressure": current_pressure,
-                    "state_pressure": state.curiosity.pressure,
-                    "temperament": temperament_score,
-                    "confidence": confidence,
-                    "silence_duration": silence_duration,
-                    "conversation_id": getattr(state, 'history', {}).get('conversation_id', None),
-                    "state_hash": getattr(state, 'state_hash', None)
-                })
-                
-                # Update state's curiosity pressure
-                state.curiosity.pressure = current_pressure
-                
-                # Log warning if pressures diverge significantly
-                if abs(current_pressure - state.curiosity.pressure) > 0.1:
-                    self._log_warning(
-                        f"Pressure divergence detected: "
-                        f"CuriosityPressure={current_pressure:.3f}, "
-                        f"CuriosityState={state.curiosity.pressure:.3f}"
-                    )
-            
-        except Exception as e:
-            self._log_error(f"Failed to update pressure: {str(e)}")
-            raise
-
     def should_erupt(self, state: Any) -> bool:
         """
         Check if curiosity pressure exceeds threshold.
@@ -333,7 +423,7 @@ class CuriosityManager:
                 
             # Use state's curiosity pressure for consistency
             pressure = state.curiosity.pressure
-            threshold = self.config.get("pressure_threshold", 0.7)
+            threshold = self.config_manager.config.get("pressure_threshold", 0.7)
             
             self._log_event("eruption_check", {
                 "pressure": pressure,
@@ -376,54 +466,80 @@ class CuriosityManager:
             raise
 
     def _validate_device(self, tensor: torch.Tensor, name: str) -> torch.Tensor:
-        """Validate and move tensor to correct device."""
-        if tensor.device != self.device:
-            self.logger.record_event(
-                event_type="device_mismatch",
-                message=f"Moving {name} from {tensor.device} to {self.device}",
-                level="warning",
-                additional_info={
-                    "tensor_name": name,
-                    "source_device": str(tensor.device),
-                    "target_device": str(self.device)
-                }
+        """Validate and move tensor to correct device with enhanced logging."""
+        try:
+            if tensor.device != self.device:
+                self._log_warning(
+                    "device_mismatch",
+                    tensor_name=name,
+                    source_device=str(tensor.device),
+                    target_device=str(self.device),
+                    tensor_shape=list(tensor.shape),
+                    tensor_dtype=str(tensor.dtype)
+                )
+                tensor = tensor.to(self.device)
+            return tensor
+        except Exception as e:
+            self._log_error(
+                "device_validation_failed",
+                error=str(e),
+                tensor_name=name,
+                tensor_shape=list(tensor.shape) if isinstance(tensor, torch.Tensor) else None,
+                tensor_dtype=str(tensor.dtype) if isinstance(tensor, torch.Tensor) else None
             )
-            return tensor.to(self.device)
-        return tensor
+            raise
         
     def _get_valid_memory_embeddings(self, state: Any) -> List[torch.Tensor]:
-        """Extract valid memory embeddings from state with device validation."""
+        """Extract valid memory embeddings from state with enhanced device validation."""
         memory_embeddings = []
-        hidden_size = self.config["default_hidden_size"]
+        hidden_size = self.config_manager.config["default_hidden_size"]
+        
         if not hasattr(state, 'dream_memory') or not state.dream_memory:
             return memory_embeddings
 
         try:
-            for entry in state.dream_memory:
+            for i, entry in enumerate(state.dream_memory):
                 tensor = entry["tensor"]
                 if tensor.shape[-1] == hidden_size:
                     # Validate and move tensor to correct device
-                    tensor = self._validate_device(tensor, "dream_memory_tensor")
+                    tensor = self._validate_device(tensor, f"dream_memory_tensor_{i}")
                     memory_embeddings.append(tensor)
                 else:
                     self._log_warning(
-                        f"Dream memory tensor shape {tensor.shape} mismatches hidden_size {hidden_size}"
+                        "invalid_memory_tensor_shape",
+                        tensor_index=i,
+                        tensor_shape=list(tensor.shape),
+                        expected_hidden_size=hidden_size
                     )
         except Exception as e:
-            self._log_error(f"Invalid dream memory format: {str(e)}")
+            self._log_error(
+                "memory_embedding_extraction_failed",
+                error=str(e),
+                memory_length=len(state.dream_memory) if hasattr(state, 'dream_memory') else 0
+            )
         return memory_embeddings
 
     def _generate_query_embedding(
         self, state: Any, tokenizer: Any, model: Any, query: Optional[str]
     ) -> Optional[torch.Tensor]:
-        """Generate query embedding from input query or state with device validation."""
-        if not (query and tokenizer and model):
-            if hasattr(state, 'last_prompt_embedding') and state.last_prompt_embedding is not None:
-                # Validate and move last prompt embedding to correct device
-                return self._validate_device(state.last_prompt_embedding, "last_prompt_embedding")
-            return torch.zeros(self.config["default_hidden_size"], device=self.device)
-
+        """Generate query embedding with device validation."""
         try:
+            # Validate model device
+            if model is not None:
+                model_device = next(model.parameters()).device
+                if model_device != self.device:
+                    self._log_warning(
+                        "model_device_mismatch",
+                        model_device=str(model_device),
+                        target_device=str(self.device)
+                    )
+                    model.to(self.device)
+
+            if not (query and tokenizer and model):
+                if hasattr(state, 'last_prompt_embedding') and state.last_prompt_embedding is not None:
+                    return self._validate_device(state.last_prompt_embedding, "last_prompt_embedding")
+                return torch.zeros(self.config_manager.config["default_hidden_size"], device=self.device)
+
             inputs = tokenizer(
                 query,
                 return_tensors="pt",
@@ -440,11 +556,15 @@ class CuriosityManager:
                 )
                 if hidden_states is not None:
                     embedding = hidden_states[:, -1, :].squeeze()
-                    # Ensure embedding is on correct device
                     return self._validate_device(embedding, "query_embedding")
-                self._log_warning("Model output lacks hidden states")
+                self._log_warning("model_output_lacks_hidden_states")
         except Exception as e:
-            self._log_error(f"Failed to generate query embedding: {str(e)}")
+            self._log_error(
+                "query_embedding_generation_failed",
+                error=str(e),
+                query=query[:100] if query else None,
+                model_device=str(model.device) if model is not None else None
+            )
         return None
 
     def compute_curiosity(
@@ -454,8 +574,12 @@ class CuriosityManager:
         model: Any,
         query: Optional[str] = None
     ) -> float:
-        """Compute curiosity score for a query using state information."""
+        """Compute curiosity score with enhanced device validation."""
         try:
+            # Store state metadata for logging
+            self.conversation_id = getattr(state, 'conversation_id', None)
+            self.state_hash = getattr(state, 'state_hash', None)
+            
             # Validate state
             self._validate_state(state)
             
@@ -464,13 +588,13 @@ class CuriosityManager:
             memory_embeddings = self._get_valid_memory_embeddings(state)
             
             # Log device information
-            self._log_event("curiosity_computation", {
-                "query_embedding_device": str(query_embedding.device) if query_embedding is not None else None,
-                "memory_embeddings_devices": [str(emb.device) for emb in memory_embeddings],
-                "target_device": str(self.device),
-                "conversation_id": getattr(state, 'history', {}).get('conversation_id', None),
-                "state_hash": getattr(state, 'state_hash', None)
-            })
+            self._log_event(
+                "curiosity_computation_started",
+                query_embedding_device=str(query_embedding.device) if query_embedding is not None else None,
+                memory_embeddings_devices=[str(emb.device) for emb in memory_embeddings],
+                target_device=str(self.device),
+                memory_embeddings_count=len(memory_embeddings)
+            )
 
             base_conf = self._get_base_confidence(state)
             scaf_conf = self._get_scaffold_confidence(state)
@@ -545,6 +669,10 @@ class CuriosityManager:
     ) -> Optional[str]:
         """Generate a curiosity-driven question if conditions are met."""
         try:
+            # Store state metadata for logging
+            self.conversation_id = getattr(state, 'conversation_id', None)
+            self.state_hash = getattr(state, 'state_hash', None)
+            
             # Validate state
             self._validate_state(state)
             
@@ -565,13 +693,11 @@ class CuriosityManager:
             return question
             
         except StateError as e:
-            error_msg = f"State validation failed: {str(e)}"
-            self._log_error(error_msg)
-            raise CuriosityError(error_msg) from e
+            self._log_error(f"State validation failed: {str(e)}", error_type="state_error")
+            return None
         except Exception as e:
-            error_msg = f"Question generation failed: {str(e)}"
-            self._log_error(error_msg)
-            raise CuriosityError(error_msg) from e
+            self._log_error(f"Question generation failed: {str(e)}")
+            return None
 
     def _can_generate_question(self, tokenizer: Any, model: Any) -> bool:
         """Check if question generation is possible."""
@@ -582,13 +708,13 @@ class CuriosityManager:
 
     def _check_cooldown(self, current_time: float) -> bool:
         """Check if question generation cooldown has elapsed."""
-        return (current_time - self.last_question_time) >= self.config["question_cooldown"]
+        return (current_time - self.last_question_time) >= self.config_manager.config["question_cooldown"]
 
     def _should_generate_question(self, curiosity_score: float, prompt: Optional[str], spontaneous: bool) -> bool:
         """Determine if a question should be generated."""
         threshold = (
-            self.config["novelty_threshold_spontaneous"] if spontaneous
-            else self.config["novelty_threshold_response"]
+            self.config_manager.config["novelty_threshold_spontaneous"] if spontaneous
+            else self.config_manager.config["novelty_threshold_response"]
         )
         return (
             (spontaneous and curiosity_score >= threshold) or
@@ -613,10 +739,10 @@ class CuriosityManager:
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=self.config["max_new_tokens"],
-                    temperature=max(0.1, self.config["base_temperature"] + 
-                                  self.config["temperament_influence"] * getattr(state, 'temperament_score', 0.5)),
-                    top_k=self.config["top_k"],
+                    max_new_tokens=self.config_manager.config["max_new_tokens"],
+                    temperature=max(0.1, self.config_manager.config["base_temperature"] + 
+                                  self.config_manager.config["temperament_influence"] * getattr(state, 'temperament_score', 0.5)),
+                    top_k=self.config_manager.config["top_k"],
                     do_sample=True,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id
@@ -680,53 +806,6 @@ class CuriosityManager:
         if hasattr(state, 'curiosity') and hasattr(state.curiosity, 'novelty_scores'):
             state.curiosity.novelty_scores.append(score)
 
-    def _log_warning(self, message: str) -> None:
-        """Log warning if logger is available."""
-        if self.logger:
-            self.logger.record_event(
-                event_type="curiosity_warning",
-                message=message,
-                level="warning"
-            )
-
-    def _log_event(self, event_type: str, additional_info: Optional[Dict[str, Any]] = None) -> None:
-        """Log an event with standardized metadata."""
-        try:
-            metadata = {
-                "event_type": event_type,
-                "timestamp": time.time(),
-                "device": str(self.device)
-            }
-            if additional_info:
-                metadata.update(additional_info)
-            
-            self.logger.record_event(
-                event_type=event_type,
-                message=f"Curiosity event: {event_type}",
-                level="info",
-                additional_info=metadata
-            )
-        except Exception as e:
-            print(f"Failed to log event: {str(e)}")
-
-    def _log_error(self, message: str) -> None:
-        """Log an error with standardized metadata and stack trace."""
-        try:
-            metadata = {
-                "device": str(self.device),
-                "stack_trace": traceback.format_exc(),
-                "error_type": "curiosity_error"
-            }
-            
-            self.logger.log_error(
-                error_msg=message,
-                error_type="curiosity_error",
-                stack_trace=traceback.format_exc(),
-                additional_info=metadata
-            )
-        except Exception as e:
-            print(f"Failed to log error: {str(e)}")
-
     def tune(
         self,
         enable: Optional[bool] = None,
@@ -788,7 +867,7 @@ class CuriosityManager:
             if "weight_novelty" in updates:
                 self.curiosity.weight_novelty = updates["weight_novelty"]
 
-            self.config.update(updates)
+            self.config_manager.config.update(updates)
             if updates:
                 self._log_event("curiosity_tune", {
                     "params": updates,
@@ -804,7 +883,7 @@ class CuriosityManager:
     ) -> Optional[str]:
         """Generate a curiosity-driven question."""
         try:
-            if not self.config.get("enable_curiosity", True):
+            if not self.config_manager.config.get("enable_curiosity", True):
                 return None
                 
             # Validate state and curiosity component
