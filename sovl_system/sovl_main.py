@@ -188,6 +188,109 @@ class ConfigHandler:
         self.cross_attn_config = context.config_manager.get_section("cross_attn_config")
         self.controls_config = context.config_manager.get_section("controls_config")
         self.lora_config = context.config_manager.get_section("lora_config")
+        
+        # Validate curiosity-related configurations
+        self._validate_curiosity_configs()
+
+    def _validate_curiosity_configs(self):
+        """Validate and synchronize curiosity-related configurations."""
+        try:
+            # Define required keys and their default values
+            required_keys = {
+                "queue_maxlen": 10,
+                "weight_ignorance": 0.7,
+                "weight_novelty": 0.3,
+                "metrics_maxlen": 1000,
+                "novelty_threshold_spontaneous": 0.9,
+                "novelty_threshold_response": 0.8,
+                "pressure_threshold": 0.7,
+                "pressure_drop": 0.3,
+                "silence_threshold": 20.0,
+                "question_cooldown": 60.0,
+                "max_new_tokens": 8,
+                "base_temperature": 1.1,
+                "temperament_influence": 0.4,
+                "top_k": 30
+            }
+            
+            # Check for missing keys in curiosity_config
+            missing_keys = [key for key in required_keys if key not in self.curiosity_config]
+            if missing_keys:
+                self.context.logger.record_event(
+                    event_type="config_validation",
+                    message="Missing keys in curiosity_config",
+                    level="warning",
+                    additional_info={
+                        "missing_keys": missing_keys,
+                        "default_values": {k: required_keys[k] for k in missing_keys}
+                    }
+                )
+                # Add missing keys with default values
+                for key in missing_keys:
+                    self.curiosity_config[key] = required_keys[key]
+            
+            # Check for mismatches between curiosity_config and controls_config
+            controls_mapping = {
+                "curiosity_queue_maxlen": "queue_maxlen",
+                "curiosity_weight_ignorance": "weight_ignorance",
+                "curiosity_weight_novelty": "weight_novelty",
+                "curiosity_metrics_maxlen": "metrics_maxlen",
+                "curiosity_novelty_threshold_spontaneous": "novelty_threshold_spontaneous",
+                "curiosity_novelty_threshold_response": "novelty_threshold_response",
+                "curiosity_pressure_threshold": "pressure_threshold",
+                "curiosity_pressure_drop": "pressure_drop",
+                "curiosity_silence_threshold": "silence_threshold",
+                "curiosity_question_cooldown": "question_cooldown",
+                "curiosity_max_new_tokens": "max_new_tokens",
+                "curiosity_base_temperature": "base_temperature",
+                "curiosity_temperament_influence": "temperament_influence",
+                "curiosity_top_k": "top_k"
+            }
+            
+            mismatches = []
+            for controls_key, curiosity_key in controls_mapping.items():
+                if controls_key in self.controls_config and curiosity_key in self.curiosity_config:
+                    if self.controls_config[controls_key] != self.curiosity_config[curiosity_key]:
+                        mismatches.append({
+                            "controls_key": controls_key,
+                            "curiosity_key": curiosity_key,
+                            "controls_value": self.controls_config[controls_key],
+                            "curiosity_value": self.curiosity_config[curiosity_key]
+                        })
+            
+            if mismatches:
+                self.context.logger.record_event(
+                    event_type="config_validation",
+                    message="Configuration mismatches between controls_config and curiosity_config",
+                    level="warning",
+                    additional_info={"mismatches": mismatches}
+                )
+                # Align controls_config with curiosity_config
+                for mismatch in mismatches:
+                    self.controls_config[mismatch["controls_key"]] = self.curiosity_config[mismatch["curiosity_key"]]
+            
+            # Log final configuration state
+            self.context.logger.record_event(
+                event_type="config_validation",
+                message="Curiosity configuration validation complete",
+                level="info",
+                additional_info={
+                    "curiosity_config": self.curiosity_config,
+                    "controls_config": {k: v for k, v in self.controls_config.items() if k.startswith("curiosity_")}
+                }
+            )
+            
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="config_validation_error",
+                message="Failed to validate curiosity configurations",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
 
     def validate(self, model_config: Any = None) -> bool:
         """
@@ -250,271 +353,47 @@ class ConfigHandler:
             raise
 
 class ModelLoader:
-    """Loads and manages models, tokenizers, and scaffold integration.
+    """Handles model loading and token mapping."""
     
-    Currently supports a single scaffold model, but designed to be extensible for multiple scaffolds.
-    The scaffolds list is maintained for future multi-scaffold support.
-    """
     def __init__(self, context: SystemContext, config_handler: ConfigHandler):
         self.context = context
         self.config_handler = config_handler
+        self.base_model = None
+        self.scaffold_model = None
+        self.base_tokenizer = None
+        self.scaffold_tokenizer = None
+        self.token_mapper = None
+        self._initialize_components()
         
-        # First validate basic configuration
-        self.config_handler.validate()
-        
-        # Initialize model manager and load base model
-        self.model_manager = ModelManager(
-            config_manager=context.config_manager,
-            logger=context.logger,
-            device=context.device
-        )
-        
-        # Load base model and move to device
-        self.base_model = self.model_manager.get_base_model()
-        self.base_model = self.base_model.to(self.context.device)
-        
-        # Now validate with model context
-        base_config = AutoConfig.from_pretrained(
-            self.config_handler.core_config.get("base_model_name", "gpt2")
-        )
-        self.config_handler.validate_with_model(base_config)
-        
-        # Initialize scaffold models
-        # Currently only supports a single scaffold, but structured for future multi-scaffold support
-        self.scaffolds = []
-        self.active_scaffold_index = 0  # Track the currently active scaffold
-        
-        # Load and initialize the primary scaffold
-        primary_scaffold = self.model_manager.get_scaffold_model()
-        primary_scaffold = primary_scaffold.to(self.context.device)
-        self.scaffolds.append(primary_scaffold)
-        
-        # Log scaffold initialization
-        self.context.logger.record_event(
-            event_type="scaffold_initialized",
-            message="Primary scaffold model initialized",
-            level="info",
-            additional_info={
-                "scaffold_count": len(self.scaffolds),
-                "active_scaffold_index": self.active_scaffold_index,
-                "scaffold_device": next(primary_scaffold.parameters()).device
-            }
-        )
-        
-        self.base_tokenizer = self.model_manager.get_base_tokenizer()
-        self.scaffold_tokenizer = self.model_manager.get_scaffold_tokenizer()
-        self.scaffold_unk_id = self.model_manager.get_scaffold_unk_id()
-        
-        # Initialize ScaffoldManager with tokenizers
-        self.scaffold_manager = ScaffoldManager(
-            config_manager=context.config_manager,
-            logger=context.logger,
-            base_tokenizer=self.base_tokenizer,
-            scaffold_tokenizer=self.scaffold_tokenizer
-        )
-        
-        # Initialize ScaffoldTokenMapper with logger
-        self.scaffold_token_mapper = ScaffoldTokenMapper(
-            base_tokenizer=self.base_tokenizer,
-            scaffold_tokenizer=self.scaffold_tokenizer,
-            logger=context.logger
-        )
-        
-        # Log successful initialization with device information
-        self.context.logger.record_event(
-            event_type="model_loader_initialized",
-            message="Model loader initialized successfully",
-            level="info",
-            additional_info={
-                "base_vocab_size": len(self.base_tokenizer),
-                "scaffold_vocab_size": len(self.scaffold_tokenizer),
-                "token_map_size": len(self.scaffold_token_mapper.token_map),
-                "base_model_device": next(self.base_model.parameters()).device,
-                "scaffold_model_device": next(self.scaffolds[self.active_scaffold_index].parameters()).device,
-                "target_device": str(self.context.device),
-                "scaffold_count": len(self.scaffolds)
-            }
-        )
-
-    def get_active_scaffold(self) -> torch.nn.Module:
-        """Get the currently active scaffold model.
-        
-        Returns:
-            torch.nn.Module: The active scaffold model
-            
-        Raises:
-            ValueError: If no scaffold models are available
-        """
-        if not self.scaffolds:
-            raise ValueError("No scaffold models available")
-        return self.scaffolds[self.active_scaffold_index]
-
-    def inject_cross_attention(self):
-        """Inject cross-attention layers into the base model."""
+    def _initialize_components(self) -> None:
+        """Initialize model components and token mapper."""
         try:
-            # Check if cross-attention is enabled
-            if not self.config_handler.controls_config.get("enable_cross_attention", True):
-                self.context.logger.record_event(
-                    event_type="cross_attention_skipped",
-                    message="Cross-attention injection disabled in controls_config",
-                    level="info",
-                    additional_info={
-                        "enable_cross_attention": False,
-                        "enable_dynamic_cross_attention": self.config_handler.controls_config.get("enable_dynamic_cross_attention", False)
-                    }
-                )
-                return
-
-            # Validate scaffold token mapper
-            if not self.scaffold_token_mapper:
-                raise ValueError("ScaffoldTokenMapper not initialized")
-                
-            # Get and validate token map
-            token_map = self.scaffold_token_mapper.get_token_map()
-            if not token_map:
-                self.context.logger.record_event(
-                    event_type="validation_error",
-                    message="Empty token map from ScaffoldTokenMapper",
-                    level="error",
-                    additional_info={
-                        "base_vocab_size": len(self.base_tokenizer),
-                        "scaffold_vocab_size": len(self.scaffold_tokenizer)
-                    }
-                )
-                raise ValueError("Empty token map from ScaffoldTokenMapper")
-
-            # Validate token map contents
-            if not all(isinstance(k, int) and isinstance(v, int) for k, v in token_map.items()):
-                self.context.logger.record_event(
-                    event_type="validation_error",
-                    message="Invalid token map: must contain integer key-value pairs",
-                    level="error",
-                    additional_info={
-                        "map_size": len(token_map),
-                        "invalid_entries": [
-                            (k, v) for k, v in token_map.items() 
-                            if not (isinstance(k, int) and isinstance(v, int))
-                        ]
-                    }
-                )
-                raise ValueError("Invalid token map: must contain integer key-value pairs")
-
-            # Validate special tokens in map
-            special_tokens = {
-                "pad_token": self.base_tokenizer.pad_token_id,
-                "bos_token": self.base_tokenizer.bos_token_id,
-                "eos_token": self.base_tokenizer.eos_token_id,
-                "unk_token": self.base_tokenizer.unk_token_id
-            }
-            missing_tokens = {
-                name: token_id for name, token_id in special_tokens.items()
-                if token_id is not None and token_id not in token_map
-            }
-            if missing_tokens:
-                self.context.logger.record_event(
-                    event_type="validation_error",
-                    message="Token map missing required special tokens",
-                    level="error",
-                    additional_info={
-                        "missing_tokens": missing_tokens,
-                        "map_size": len(token_map)
-                    }
-                )
-                raise ValueError(f"Token map missing required special tokens: {missing_tokens}")
-
-            # Ensure models are on the correct device
-            self.base_model = self.base_model.to(self.context.device)
-            active_scaffold = self.get_active_scaffold()
-            active_scaffold = active_scaffold.to(self.context.device)
+            # Load base model and tokenizer
+            self.base_model, self.base_tokenizer = self._load_base_model()
             
-            # Log device information
-            self.context.logger.record_event(
-                event_type="device_check",
-                message="Models moved to target device",
-                level="info",
-                additional_info={
-                    "base_model_device": next(self.base_model.parameters()).device,
-                    "scaffold_model_device": next(active_scaffold.parameters()).device,
-                    "target_device": str(self.context.device),
-                    "active_scaffold_index": self.active_scaffold_index
-                }
-            )
-            
-            # Create and configure injector
-            injector = CrossAttentionInjector(
-                config_manager=self.context.config_manager,
+            # Initialize token mapper
+            self.token_mapper = ScaffoldTokenMapper(
+                base_tokenizer=self.base_tokenizer,
+                scaffold_tokenizer=self.scaffold_tokenizer,
                 logger=self.context.logger
             )
             
-            # Perform injection
-            injector.inject_cross_attention(
-                model=self.base_model,
-                scaffold_model=active_scaffold,
-                core_config=self.config_handler.core_config,
-                cross_attn_config=self.config_handler.cross_attn_config,
-                lora_config=self.config_handler.lora_config,
-                token_map=token_map,
-                device=self.context.device
-            )
-            
-            # Log successful injection
+            # Log initialization
             self.context.logger.record_event(
-                event_type="cross_attention_injected",
-                message="Cross-attention layers injected successfully",
+                event_type="model_loader_initialized",
+                message="Model loader initialized successfully",
                 level="info",
                 additional_info={
-                    "token_map_size": len(token_map),
+                    "base_model_device": str(self.base_model.device),
+                    "scaffold_model_device": str(self.scaffold_model.device) if self.scaffold_model else None,
                     "base_vocab_size": len(self.base_tokenizer),
-                    "scaffold_vocab_size": len(self.scaffold_tokenizer),
-                    "device": str(self.context.device),
-                    "dynamic_enabled": self.config_handler.controls_config.get("enable_dynamic_cross_attention", False),
-                    "dynamic_enabled": self.config_handler.controls_config.get("enable_dynamic_cross_attention", False)
-                }
-            )
-            
-        except Exception as e:
-            self.context.logger.record_event(
-                event_type="injection_error",
-                message="Cross-attention injection failed",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc(),
-                    "base_model_device": next(self.base_model.parameters()).device if hasattr(self, 'base_model') else None,
-                    "scaffold_model_device": next(self.scaffolds[0].parameters()).device if hasattr(self, 'scaffolds') and self.scaffolds else None,
-                    "target_device": str(self.context.device)
-                }
-            )
-            raise
-
-class StateTracker:
-    """Centralizes state management and conversation history."""
-    def __init__(self, context: SystemContext, config_handler: ConfigHandler):
-        self.context = context
-        self.state_manager = StateManager(
-            config_manager=context.config_manager,
-            logger=context.logger,
-            device=context.device
-        )
-        self.state = None  # Initialize state as None, will be loaded when needed
-
-    def load_state(self):
-        """Load the current state from the state manager."""
-        try:
-            self.state = self.state_manager.load_state()
-            self.context.logger.record_event(
-                event_type="state_loaded",
-                message="State loaded successfully",
-                level="info",
-                additional_info={
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.get_state_hash()
+                    "scaffold_vocab_size": len(self.scaffold_tokenizer) if self.scaffold_tokenizer else None
                 }
             )
         except Exception as e:
             self.context.logger.record_event(
-                event_type="state_error",
-                message="Failed to load state",
+                event_type="model_loader_init_failed",
+                message="Failed to initialize model loader",
                 level="error",
                 additional_info={
                     "error": str(e),
@@ -522,6 +401,212 @@ class StateTracker:
                 }
             )
             raise
+
+    def sync_token_map(self, state: SOVLState) -> None:
+        """
+        Synchronize token maps between ScaffoldTokenMapper and SOVLState.
+        
+        Args:
+            state: Current SOVLState instance
+            
+        Raises:
+            ValueError: If token map validation fails
+        """
+        try:
+            # Validate state token map
+            self._validate_token_map(state.token_map)
+            
+            # Update token mapper with state's token map
+            self.token_mapper.update_token_map(state.token_map)
+            
+            # Log synchronization
+            self.context.logger.record_event(
+                event_type="token_map_synced",
+                message="Token maps synchronized successfully",
+                level="info",
+                additional_info={
+                    "token_map_size": len(state.token_map),
+                    "base_vocab_size": len(self.base_tokenizer),
+                    "scaffold_vocab_size": len(self.scaffold_tokenizer) if self.scaffold_tokenizer else None,
+                    "state_hash": state.state_hash
+                }
+            )
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="token_map_sync_failed",
+                message="Failed to synchronize token maps",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc(),
+                    "state_hash": state.state_hash
+                }
+            )
+            raise ValueError(f"Token map synchronization failed: {str(e)}")
+
+    def _validate_token_map(self, token_map: Dict[int, List[int]]) -> None:
+        """
+        Validate token map against tokenizer vocabularies.
+        
+        Args:
+            token_map: Token mapping dictionary to validate
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        try:
+            base_vocab_size = len(self.base_tokenizer)
+            scaffold_vocab_size = len(self.scaffold_tokenizer) if self.scaffold_tokenizer else None
+            
+            # Validate base token IDs
+            for base_id in token_map.keys():
+                if not 0 <= base_id < base_vocab_size:
+                    raise ValueError(f"Invalid base token ID {base_id} exceeds vocab size {base_vocab_size}")
+            
+            # Validate scaffold token IDs
+            if scaffold_vocab_size is not None:
+                for scaffold_ids in token_map.values():
+                    for scaffold_id in scaffold_ids:
+                        if not 0 <= scaffold_id < scaffold_vocab_size:
+                            raise ValueError(f"Invalid scaffold token ID {scaffold_id} exceeds vocab size {scaffold_vocab_size}")
+            
+            # Log validation
+            self.context.logger.record_event(
+                event_type="token_map_validated",
+                message="Token map validation successful",
+                level="info",
+                additional_info={
+                    "token_map_size": len(token_map),
+                    "base_vocab_size": base_vocab_size,
+                    "scaffold_vocab_size": scaffold_vocab_size
+                }
+            )
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="token_map_validation_failed",
+                message="Token map validation failed",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise ValueError(f"Token map validation failed: {str(e)}")
+
+    def inject_cross_attention(self) -> None:
+        """Inject cross-attention layers into the scaffold model."""
+        try:
+            # Ensure models are on correct device
+            self.base_model = self.base_model.to(self.context.device)
+            self.scaffold_model = self.scaffold_model.to(self.context.device)
+            
+            # Sync token maps before injection
+            if hasattr(self.context, 'state_tracker'):
+                self.sync_token_map(self.context.state_tracker.state)
+            
+            # Inject cross-attention layers
+            self._inject_cross_attention_layers()
+            
+            # Log successful injection
+            self.context.logger.record_event(
+                event_type="cross_attention_injected",
+                message="Cross-attention layers injected successfully",
+                level="info",
+                additional_info={
+                    "base_model_device": str(self.base_model.device),
+                    "scaffold_model_device": str(self.scaffold_model.device),
+                    "token_map_size": len(self.token_mapper.token_map) if self.token_mapper else None
+                }
+            )
+        except Exception as e:
+            self.context.logger.record_event(
+                event_type="cross_attention_injection_failed",
+                message="Failed to inject cross-attention layers",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+
+class StateTracker:
+    """Tracks and manages the system's state."""
+    
+    def __init__(self, context: SystemContext, config_handler: ConfigHandler):
+        """Initialize the state tracker with context and configuration."""
+        self.context = context
+        self.config_handler = config_handler
+        self.state_manager = StateManager(
+            config_manager=context.config_manager,
+            logger=context.logger,
+            device=context.device
+        )
+        # Auto-initialize state
+        self.state = self.state_manager.initialize_state()
+        self._log_event("state_tracker_initialized", {
+            "state_hash": self.state.state_hash,
+            "conversation_id": self.state.history.conversation_id
+        })
+        
+    def _log_event(self, event: str, data: Optional[Dict] = None) -> None:
+        """Log an event with standardized fields."""
+        self.context.logger.record_event(
+            event_type=f"state_{event}",
+            message=f"State event: {event}",
+            level="info",
+            additional_info=data
+        )
+        
+    def _log_error(self, message: str, error: Exception) -> None:
+        """Log an error with stack trace."""
+        self.context.logger.log_error(
+            error_msg=message,
+            error_type="state_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={"error": str(error)}
+        )
+        
+    def load_state(self) -> None:
+        """Load state from file or initialize new state if not found."""
+        try:
+            # Only load if state path exists, otherwise keep initialized state
+            state_path = self.config_handler.config_manager.get("state_config.state_path")
+            if state_path and os.path.exists(state_path):
+                self.state = self.state_manager.load_state(state_path)
+                self._log_event("state_loaded", {
+                    "state_path": state_path,
+                    "state_hash": self.state.state_hash,
+                    "conversation_id": self.state.history.conversation_id
+                })
+            else:
+                self._log_event("state_initialized", {
+                    "state_hash": self.state.state_hash,
+                    "conversation_id": self.state.history.conversation_id
+                })
+        except Exception as e:
+            self._log_error("State loading failed", e)
+            raise StateError(f"Failed to load state: {str(e)}")
+            
+    def save_state(self) -> None:
+        """Save current state to file."""
+        try:
+            state_path = self.config_handler.config_manager.get("state_config.state_path")
+            if state_path:
+                self.state_manager.save_state(state_path)
+                self._log_event("state_saved", {
+                    "state_path": state_path,
+                    "state_hash": self.state.state_hash
+                })
+        except Exception as e:
+            self._log_error("State saving failed", e)
+            raise StateError(f"Failed to save state: {str(e)}")
+            
+    def get_state(self) -> SOVLState:
+        """Get the current state instance."""
+        if self.state is None:
+            raise StateError("State not initialized")
+        return self.state
 
 class ErrorManager:
     """Handles errors and recovery across components."""

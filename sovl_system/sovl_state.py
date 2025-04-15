@@ -145,9 +145,10 @@ class StateBase:
 
 class CuriosityState(StateBase):
     """Manages curiosity-related state and question prioritization."""
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         super().__init__(config_manager, logger)
         self._config = self._load_curiosity_config()
+        self.device = device
         self.unanswered_questions: Deque[Tuple[str, float, Optional[torch.Tensor]]] = deque(maxlen=self._config.max_questions)
         self.last_question_time: float = 0.0
         self.pressure: float = 0.0
@@ -165,6 +166,28 @@ class CuriosityState(StateBase):
             question_timeout=_load_config(self.config_manager, "controls_config", "curiosity_question_timeout", 3600.0)
         )
 
+    def update_question_history(self, question: str, timestamp: float) -> None:
+        """Update question history and related state."""
+        try:
+            with self.lock:
+                self.last_question_time = timestamp
+                self.question_count += 1
+                
+                # Log question history update
+                self._log_event("question_history_updated", {
+                    "question": question,
+                    "timestamp": timestamp,
+                    "question_count": self.question_count,
+                    "queue_length": len(self.unanswered_questions)
+                })
+                
+                # Update pressure based on new question
+                self._update_pressure()
+                
+        except Exception as e:
+            self._log_error(f"Failed to update question history: {str(e)}")
+            raise StateError(f"Question history update failed: {str(e)}")
+            
     def add_question(self, question: str, score: float, context_vector: Optional[torch.Tensor] = None):
         """Add a new question with score and optional context vector."""
         try:
@@ -185,7 +208,8 @@ class CuriosityState(StateBase):
                         question=question,
                         score=score,
                         has_context_vector=context_vector is not None,
-                        question_count=self.question_count
+                        question_count=self.question_count,
+                        queue_length=len(self.unanswered_questions)
                     )
         except Exception as e:
             self._log_error(f"Failed to add question: {str(e)}", question=question, score=score)
@@ -205,12 +229,12 @@ class CuriosityState(StateBase):
             self._log_error("Question prioritization failed")
             raise StateError(f"Question prioritization failed: {str(e)}")
 
-    def prune_old_questions(self):
+    def prune_old_questions(self, timeout: float) -> None:
         """Remove questions older than timeout."""
         try:
             current_time = time.time()
             with self.lock:
-                while self.unanswered_questions and current_time - self.last_question_time > self._config.question_timeout:
+                while self.unanswered_questions and current_time - self.last_question_time > timeout:
                     question, _, _ = self.unanswered_questions.popleft()
                     self._log_event("old_question_pruned", question=question)
                 self._update_pressure()
@@ -221,25 +245,26 @@ class CuriosityState(StateBase):
     def _update_pressure(self):
         """Update curiosity pressure based on questions and novelty."""
         try:
-            with NumericalGuard():
-                base_pressure = safe_divide(
-                    len(self.unanswered_questions),
-                    max(1, self._config.max_questions),
-                    logger=self.logger
-                )
-                novelty_avg = safe_divide(
-                    sum(self.novelty_scores),
-                    max(1, len(self.novelty_scores)),
-                    logger=self.logger
-                ) if self.novelty_scores else 0.0
-                self.pressure = base_pressure * (1.0 + novelty_avg) * self._config.decay_rate
-                self.pressure = max(0.0, min(1.0, self.pressure))
-                self._log_event(
-                    "pressure_updated",
-                    pressure=self.pressure,
-                    unanswered_count=len(self.unanswered_questions),
-                    novelty_avg=novelty_avg
-                )
+            with self.lock:
+                with NumericalGuard():
+                    base_pressure = safe_divide(
+                        len(self.unanswered_questions),
+                        max(1, self._config.max_questions),
+                        logger=self.logger
+                    )
+                    novelty_avg = safe_divide(
+                        sum(self.novelty_scores),
+                        max(1, len(self.novelty_scores)),
+                        logger=self.logger
+                    ) if self.novelty_scores else 0.0
+                    self.pressure = base_pressure * (1.0 + novelty_avg) * self._config.decay_rate
+                    self.pressure = max(0.0, min(1.0, self.pressure))
+                    self._log_event(
+                        "pressure_updated",
+                        pressure=self.pressure,
+                        unanswered_count=len(self.unanswered_questions),
+                        novelty_avg=novelty_avg
+                    )
         except Exception as e:
             self._log_error("Pressure update failed")
             raise StateError(f"Pressure update failed: {str(e)}")
@@ -406,9 +431,10 @@ class ConversationHistory:
 
 class SOVLState(StateBase):
     """Manages the overall state of the SOVL system."""
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         super().__init__(config_manager, logger)
         self._config = self._load_sovl_config()
+        self.device = device
         self.state_version = "1.1"
         self.state_hash: Optional[str] = None
 
@@ -444,14 +470,16 @@ class SOVLState(StateBase):
         self.sleep_steps: int = 0
 
         # Curiosity state
-        self.curiosity = CuriosityState(config_manager, logger)
+        self.curiosity = CuriosityState(config_manager, logger, device)
 
         self._update_state_hash()
         self._log_event(
             "state_initialized",
             hidden_size=self._config.hidden_size,
             dream_memory_maxlen=self._config.dream_memory_maxlen,
-            state_hash=self.state_hash
+            state_hash=self.state_hash,
+            device=str(device),
+            conversation_id=self.history.conversation_id
         )
 
     def _load_sovl_config(self) -> SOVLConfig:
@@ -504,13 +532,18 @@ class SOVLState(StateBase):
         try:
             self._validate_tensor(tensor, self._config.hidden_size, "Tensor")
             weight = self._validate_number(weight, "Weight", min_value=0.0)
+            
+            # Ensure tensor is on the correct device
+            tensor = tensor.to(self.device)
+            
             with self.lock:
                 with NumericalGuard(dtype=torch.float16 if self._config.quantization_mode == "fp16" else torch.float32):
                     memory_entry = {
                         "tensor": tensor.to(dtype=torch.float16 if self._config.quantization_mode == "fp16" else torch.float32),
                         "weight": weight,
                         "source": source,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "device": str(tensor.device)
                     }
                     self.dream_memory.append(memory_entry)
                     self._update_state_hash()
@@ -520,37 +553,48 @@ class SOVLState(StateBase):
                         weight=weight,
                         source=source,
                         memory_length=len(self.dream_memory),
-                        state_hash=self.state_hash
+                        state_hash=self.state_hash,
+                        device=str(tensor.device)
                     )
         except Exception as e:
             self._log_error(
                 "Failed to append dream memory",
                 tensor_shape=list(tensor.shape) if isinstance(tensor, torch.Tensor) else None,
                 weight=weight,
-                source=source
+                source=source,
+                device=str(tensor.device) if isinstance(tensor, torch.Tensor) else None
             )
             raise StateError(f"Append dream memory failed: {str(e)}")
 
-    def get_weighted_memory(self, device: torch.device) -> Optional[torch.Tensor]:
+    def get_weighted_memory(self) -> Optional[torch.Tensor]:
         """Compute a weighted average of dream memory tensors."""
         try:
             with self.lock:
                 if not self.dream_memory:
                     return None
-                tensors = [entry["tensor"].to(device) for entry in self.dream_memory]
-                weights = torch.tensor([entry["weight"] for entry in self.dream_memory], device=device)
+                    
+                # Ensure all tensors are on the correct device
+                tensors = [entry["tensor"].to(self.device) for entry in self.dream_memory]
+                weights = torch.tensor([entry["weight"] for entry in self.dream_memory], device=self.device)
+                
                 with NumericalGuard():
                     weights = weights / (weights.sum() + 1e-8)
                     stacked = torch.stack(tensors)
                     weighted_avg = (stacked * weights.view(-1, *([1] * (stacked.dim() - 1)))).sum(dim=0)
+                    
                     self._log_event(
                         "weighted_memory_computed",
                         tensor_shape=list(weighted_avg.shape),
-                        memory_length=len(self.dream_memory)
+                        memory_length=len(self.dream_memory),
+                        device=str(weighted_avg.device)
                     )
                     return weighted_avg
         except Exception as e:
-            self._log_error("Weighted memory computation failed", memory_length=len(self.dream_memory))
+            self._log_error(
+                "Weighted memory computation failed",
+                memory_length=len(self.dream_memory),
+                device=str(self.device)
+            )
             return None
 
     def reset_conversation(self):
@@ -564,7 +608,9 @@ class SOVLState(StateBase):
                     "conversation_reset",
                     old_conversation_id=old_id,
                     new_conversation_id=self.history.conversation_id,
-                    state_hash=self.state_hash
+                    state_hash=self.state_hash,
+                    dream_memory_length=len(self.dream_memory),
+                    seen_prompts_count=len(self.seen_prompts)
                 )
         except Exception as e:
             self._log_error("Conversation reset failed")
@@ -645,6 +691,10 @@ class SOVLState(StateBase):
         """Set the last prompt embedding with validation."""
         try:
             self._validate_tensor(embedding, self._config.hidden_size, "Embedding")
+            
+            # Ensure embedding is on the correct device
+            embedding = embedding.to(self.device)
+            
             with self.lock:
                 with NumericalGuard():
                     self.last_prompt_embedding = embedding.to(
@@ -654,12 +704,14 @@ class SOVLState(StateBase):
                     self._log_event(
                         "last_prompt_embedding_set",
                         embedding_shape=list(embedding.shape),
-                        state_hash=self.state_hash
+                        state_hash=self.state_hash,
+                        device=str(embedding.device)
                     )
         except Exception as e:
             self._log_error(
                 "Failed to set last prompt embedding",
-                embedding_shape=list(embedding.shape) if isinstance(embedding, torch.Tensor) else None
+                embedding_shape=list(embedding.shape) if isinstance(embedding, torch.Tensor) else None,
+                device=str(embedding.device) if isinstance(embedding, torch.Tensor) else None
             )
             raise StateError(f"Set last prompt embedding failed: {str(e)}")
 
@@ -680,7 +732,8 @@ class SOVLState(StateBase):
                                 "tensor": entry["tensor"].cpu().numpy().tolist(),
                                 "weight": entry["weight"],
                                 "source": entry["source"],
-                                "timestamp": entry["timestamp"]
+                                "timestamp": entry["timestamp"],
+                                "device": entry["device"]
                             }
                             for entry in self.dream_memory
                         ],
@@ -729,14 +782,30 @@ class SOVLState(StateBase):
                 with self.lock:
                     version = data.get("version", "1.0")
                     if version != self.state_version:
-                        self._log_event("state_version_mismatch", expected=self.state_version, got=version)
+                        self._log_event("state_version_mismatch", {
+                            "expected": self.state_version,
+                            "got": version,
+                            "conversation_id": self.history.conversation_id
+                        })
 
                     # Conversation history
-                    self.history = ConversationHistory(self.config_manager, data.get("history", {}).get("conversation_id"))
+                    old_conversation_id = self.history.conversation_id
+                    self.history = ConversationHistory(
+                        self.config_manager,
+                        data.get("history", {}).get("conversation_id")
+                    )
                     self.history.messages = deque(
                         data.get("history", {}).get("messages", []),
                         maxlen=self._config.max_seen_prompts
                     )
+                    
+                    # Log conversation ID change if it occurred
+                    if old_conversation_id != self.history.conversation_id:
+                        self._log_event("conversation_id_changed", {
+                            "old_conversation_id": old_conversation_id,
+                            "new_conversation_id": self.history.conversation_id,
+                            "state_hash": self.state_hash
+                        })
 
                     # Dream memory
                     self.dream_memory = deque(maxlen=self._config.dream_memory_maxlen)
@@ -752,7 +821,8 @@ class SOVLState(StateBase):
                                     "tensor": tensor,
                                     "weight": float(entry["weight"]),
                                     "source": entry.get("source", "unknown"),
-                                    "timestamp": entry.get("timestamp", time.time())
+                                    "timestamp": entry.get("timestamp", time.time()),
+                                    "device": entry.get("device", str(device))
                                 })
                         except Exception as e:
                             self._log_event(
@@ -829,11 +899,15 @@ class SOVLState(StateBase):
                         state_version=version,
                         state_hash=self.state_hash,
                         dream_memory_length=len(self.dream_memory),
-                        seen_prompts_count=len(self.seen_prompts)
+                        seen_prompts_count=len(self.seen_prompts),
+                        conversation_id=self.history.conversation_id
                     )
                     break
             except Exception as e:
-                self._log_error(f"State loading failed on attempt {attempt + 1}", data_keys=list(data.keys()))
+                self._log_error(f"State loading failed on attempt {attempt + 1}", {
+                    "data_keys": list(data.keys()),
+                    "conversation_id": self.history.conversation_id
+                })
                 if attempt == max_retries - 1:
                     raise StateError(f"State loading failed after {max_retries} attempts: {str(e)}")
                 time.sleep(0.1)
@@ -884,7 +958,7 @@ class StateManager:
                 self.state = SOVLState(
                     config_manager=self.config_manager,
                     logger=self.logger,
-                    config=sovl_config
+                    device=self.device
                 )
                 
                 self.logger.record({
