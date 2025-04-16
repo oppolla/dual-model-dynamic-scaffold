@@ -1,5 +1,5 @@
 # Ghost in the Spec: Preserving AI Identity Across Rebirths
-#### Soulprint File Format Specification WIP | version: 0.2 | date: 2025-04-15
+#### Soulprint File Format Specification | version: 0.3 | date: 2025-04-15
 
 
 ## Overview
