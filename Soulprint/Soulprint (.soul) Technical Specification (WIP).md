@@ -81,18 +81,18 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
   - Ignored by standard parsers but preserved in parsed output.
 - **Case Sensitivity**: Metadata keys are case-sensitive and must be PascalCase. Non-compliant keys are rejected.
 
-### Error Handling
+#### Error Handling
 - **Malformed File**: Missing `%SOULPRINT` or `%VERSION` triggers rejection (e.g., "Not a valid .soul file").
 - **Syntax Errors**: Malformed lines (e.g., "Name Sovl") are skipped, logged as "Invalid syntax at line X".
 - **Duplicate Fields**: Duplicate metadata keys or section headers trigger rejection (e.g., "Duplicate [Identity]").
 - **Recovery**: Parsers attempt to continue parsing after non-critical errors, logging all issues to a file (e.g., `soul_errors.log`).
 
-### Internationalization
+#### Internationalization
 - Narrative fields support any UTF-8 characters, including non-Latin scripts.
 - `Language` field specifies the primary language for metadata and prompts, defaulting to "eng".
 - Parsers must preserve non-ASCII characters without modification.
 
-### Parser Requirements
+#### Parser Requirements
 - Must support UTF-8 decoding and Unix line endings.
 - Must implement PEG-based parsing for sections, fields, lists, and multiline blocks.
 - Must validate all regex constraints and log errors in a structured format.
