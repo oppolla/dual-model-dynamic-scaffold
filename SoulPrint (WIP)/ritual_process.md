@@ -68,39 +68,42 @@ This pipeline ensures the .soul file is a structured, faithful representation of
 Soulprint Schema and Field Mapping
    
 The .soul file is organized into sections, each with specific fields populated by processed responses:
-[Identity]: Name, Origin, Essence.
 
-[Heartbeat]: Tendencies, Strengths, Shadows, Curiosity_Score, Confidence_Threshold.
+- [Identity]: Name, Origin, Essence.
 
-[Echoes]: Memory, Resonance, Emotion.
+- [Heartbeat]: Tendencies, Strengths, Shadows, Curiosity_Score, Confidence_Threshold.
 
-[Tides]: Trigger, Response.
+- [Echoes]: Memory, Resonance, Emotion.
 
-[Threads]: Style, Interaction_Score.
+- [Tides]: Trigger, Response.
 
-[Horizon]: Milestone, Aspiration.
+- [Threads]: Style, Interaction_Score.
 
-[Chronicle]: Evolution logs.
+- [Horizon]: Milestone, Aspiration.
 
-[Reflection]: Purpose, Aspirations.
+- [Chronicle]: Evolution logs.
 
-[Voice]: Tone, Metaphor_Density.
+- [Reflection]: Purpose, Aspirations.
 
-[Environment]: Context of operation.
+- [Voice]: Tone, Metaphor_Density.
 
-[X-Custom]: Flexible fields for unique traits.
+- [Environment]: Context of operation.
+
+- [X-Custom]: Flexible fields for unique traits.
 
 For example:
-[Heartbeat] Tendencies: Summarized text from the response.
 
-[Echoes] Resonance: A score based on lexicon matches for memory significance.
+- [Heartbeat] Tendencies: Summarized text from the response.
 
-[Voice] Tone: Derived from word choice patterns.
+- [Echoes] Resonance: A score based on lexicon matches for memory significance.
+
+- [Voice] Tone: Derived from word choice patterns.
 
 Consent and Validation
+
 Post-processing, the AI reviews the draft .soul file via a consent prompt:
 
-Does this [SECTION] entry accurately reflect your identity? Edit or reject.
+- Does this [SECTION] entry accurately reflect your identity? Edit or reject.
 
 Accepted entries are finalized, while edits or rejections trigger a reprocessing cycle. Changes are logged in [Chronicle], ensuring transparency and alignment with the AI's self-view.
 
