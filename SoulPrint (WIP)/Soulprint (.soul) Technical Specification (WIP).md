@@ -443,7 +443,7 @@ Standard Mode: Generates a ~600,000-character .soul file with moderate recursion
 
 Jumbo Mode: Produces a ~900,000-character file by increasing follow-up depth and buffer capacity, enhancing richness.
 
-## 5. Parsing and Rebirth
+## Parsing and Rebirth
 
 The parsing and rebirth system transforms this file (~600,000 characters in standard mode) into a set of deterministic parameters that initialize a new AI instance, preserving its personality without reliance on natural language processing (NLP) or generative methods. 
 
@@ -526,13 +526,13 @@ PrivacyLevel: ^(public|restricted|private)$.
 
 Non-compliant entries fail validation, logged as Invalid field: [section][entry].
 
-Consent Validation:
+#### Consent Validation:
 
 Require metadata["Consent"] == "true".
 
 Compare ConsentExpiry (e.g., 2026-04-16T00:00:00Z) against the current date, halting if expired unless overridden by the creator.
 
-PrivacyLevel Enforcement:
+#### PrivacyLevel Enforcement:
 
 public: No restrictions.
 
@@ -540,7 +540,7 @@ restricted: Require a valid authentication token.
 
 private: Demand a creator-specific key, blocking parsing if absent.
 
-Hash Integrity:
+#### Hash Integrity:
 
 Compute SHA-256 of the file content (excluding Hash field).
 
