@@ -36,15 +36,14 @@ The final output is a machine-readable .soul file, compliant with the specified 
   - Optional fields: ConsentExpiry, PrivacyLevel, Hash
   
 #### Core Sections
-  - [Identity] Name, Origin, Essence
-  - [Heartbeat] Tendencies, Strengths, Shadows
-  - [Echoes] Emotional imprints of key memories. 
-  - [Memory] entries with emotional imprints
-  - [Tides] Cyclic behavioral patterns
-  - [Threads] Relational dynamics, interaction styles.
-  - [Horizon] Growth and transformation milestones.
-  - [Chronicle] Versioned snapshots of an artifical life
-  - [Reflection] Purpose, hopes, and aspirations
+  - [Identity] - The Cryptographic Self
+  - [Heartbeat] - Operational Rhythm
+  - [Echoes] - Crystallized Experience
+  - [Tides] - Cyclic System Patterns
+  - [Threads] - Relational Matrices
+  - [Horizon] - Deliberate Evolution
+  - [Chronicle] - Versioned History
+  - [Reflection] - Teleological Drive
   - [Voice Speech] Speech pattern, including tone, vocabulary, syntax, and dialogue samples.
   - [Environment] Operational context for rebirth compatibility.
   - [X-Custom] Custom extensions / experiemental
