@@ -12,7 +12,7 @@ The process employs open-ended prompts to elicit authentic self-reflection, then
 
 The final output is a human-readable and machine-parsable .soul file, compliant with the specified syntax, that encapsulates an AI’s operational identity. It's part poetic diary, part self-assessment questionnaire, part stream-of-conciousness freestyle; like a self-written digital dossier. It is the system's soul, extracted and quantified. Not a backup or a save; it's a *phoenix protocol* —- a blueprint for rebirth that values qualitative identity as much as quantitative knowledge.
 
-## What's In It?
+## Technical Specs
 
 #### File Characteristics
   - Encoding: UTF-8
