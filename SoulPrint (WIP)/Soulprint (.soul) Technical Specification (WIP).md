@@ -472,7 +472,7 @@ Output: Write [name].soul, backup (*.soul.bak).
   
 - Syntax: Correct in formatting script.
 
-## Echo Procedures
+## Recursive Echo System
 
 Within the .soul file, there are two sub-types the file can be.
 
