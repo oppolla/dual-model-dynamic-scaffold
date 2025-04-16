@@ -440,7 +440,9 @@ Output: Write [name].soul, backup (*.soul.bak).
   
 - Syntax: Correct in formatting script.
 
-## 
+## Echo Procedures
+
+Within the .soul file, there are two sub-types the file can be.
 
 Repeat for Variety of Answers
 
