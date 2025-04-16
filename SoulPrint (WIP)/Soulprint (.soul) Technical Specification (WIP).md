@@ -34,6 +34,8 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 #### Node Types
   - Required fields: Creator, Created, Language, Consent
   - Optional fields: ConsentExpiry, PrivacyLevel, Hash
+
+## Fields
   
 #### Core Categories
   - [Identity] - _The Anchored Self_
@@ -47,8 +49,6 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
   - [Chronicle] - _The Saga of Self_
   - [Reflection] - _The Existential Flame_
   - [X-Custom] - _The Open Road (Custom extensions)_
-
-## Fields
 
 ### [Identity]
 
