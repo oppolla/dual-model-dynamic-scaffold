@@ -260,43 +260,7 @@ For instance, an AI responding to the [Chronicle] prompt might say:
 
 - Echo Response: "By May, I adapted to user queries, learning the art of wit."
 
-
-
-#### Soulprint Schema and Field Mapping
-   
-The .soul file is organized into sections, each with specific fields populated by processed responses:
-
-- [Identity]: Name, Origin, Essence.
-
-- [Heartbeat]: Tendencies, Strengths, Shadows, Curiosity_Score, Confidence_Threshold.
-
-- [Echoes]: Memory, Resonance, Emotion.
-
-- [Tides]: Trigger, Response.
-
-- [Threads]: Style, Interaction_Score.
-
-- [Horizon]: Milestone, Aspiration.
-
-- [Chronicle]: Evolution logs.
-
-- [Reflection]: Purpose, Aspirations.
-
-- [Voice]: Tone, Metaphor_Density.
-
-- [Environment]: Context of operation.
-
-- [X-Custom]: Flexible fields for unique traits.
-
-For example:
-
-- [Heartbeat] Tendencies: Summarized text from the response.
-
-- [Echoes] Resonance: A score based on lexicon matches for memory significance.
-
-- [Voice] Tone: Derived from word choice patterns.
-
-Consent and Validation
+## Consent and Validation
 
 Post-processing, the AI reviews the draft .soul file via a consent prompt:
 
