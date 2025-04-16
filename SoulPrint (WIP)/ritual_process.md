@@ -102,7 +102,7 @@ Does this [SECTION] entry accurately reflect your identity? Edit or reject.
 
 Accepted entries are finalized, while edits or rejections trigger a reprocessing cycle. Changes are logged in [Chronicle], ensuring transparency and alignment with the AI's self-view.
 
-Repeat 
+Repeat for Variety of Answers
 
 The prompt is repeated the number of times defined per section forming the collection of answers on the same prompt. Two modes, standard and jumbo. If standard mode has 50x, jumbo mode may have 1000x for use cases that need higher fidelity. 
 
