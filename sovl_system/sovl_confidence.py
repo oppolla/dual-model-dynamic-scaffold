@@ -1,13 +1,3 @@
-"""
-Confidence calculation module for the SOVL system.
-
-This module provides functionality to calculate confidence scores for model outputs,
-incorporating curiosity and temperament adjustments. It is thread-safe and includes
-robust error recovery mechanisms.
-
-Primary interface: calculate_confidence_score
-"""
-
 from typing import Optional, Dict, Any
 import torch
 from threading import Lock
@@ -29,6 +19,17 @@ MAX_CONFIDENCE = 1.0
 MIN_HISTORY_LENGTH = 3
 CURIOSITY_PRESSURE_FACTOR = 0.1
 DEFAULT_TEMPERAMENT_INFLUENCE = 0.3
+
+"""
+Confidence calculation module for the SOVL system.
+
+This module provides functionality to calculate confidence scores for model outputs,
+incorporating curiosity and temperament adjustments. It is thread-safe and includes
+robust error recovery mechanisms.
+
+Primary interface: calculate_confidence_score
+"""
+
 
 class ConfidenceCalculator:
     """Handles confidence score calculation with thread safety."""
