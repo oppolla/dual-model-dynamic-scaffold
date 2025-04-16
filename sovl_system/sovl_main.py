@@ -18,7 +18,7 @@ from sovl_logger import Logger
 from sovl_io import load_training_data, validate_quantization_mode, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer
-from sovl_config import ConfigManager
+from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
 from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
 from sovl_processor import LogitsProcessor, SOVLProcessor
 from sovl_utils import (
@@ -122,7 +122,7 @@ def _apply_adjustments(
         confidence *= (1.0 - pressure * 0.1)  # Reduce confidence under high pressure
         
     # Apply temperament influence
-    temperament_influence = context.config_manager.get("temperament_config.influence", 0.3)
+    temperament_influence = context.config_handler.config_manager.get("temperament_config.influence", 0.3)
     confidence *= (1.0 + state.temperament_score * temperament_influence)
     
     return confidence
@@ -244,8 +244,7 @@ class SystemContext:
         self.event_dispatcher = EventDispatcher()
         
         # Initialize config manager with event dispatcher
-        self.config_manager = ConfigManager(config_path, self.logger)
-        self.config_manager.set_event_dispatcher(self.event_dispatcher)
+        self.config_handler = ConfigHandler(config_path, self.logger, self.event_dispatcher)
         
     def _on_config_change(self) -> None:
         """Handle configuration changes and propagate them to affected components."""
@@ -273,210 +272,6 @@ class SystemInitializationError(Exception):
         self.stack_trace = stack_trace
         super().__init__(f"{message}\nConfig path: {config_path}\nStack trace:\n{stack_trace}")
 
-class ConfigHandler:
-    """Handles configuration validation and management."""
-    
-    def __init__(self, config_path: str, logger: Logger, event_dispatcher: EventDispatcher):
-        """
-        Initialize config handler with explicit dependencies.
-        
-        Args:
-            config_path: Path to configuration file
-            logger: Logger instance for logging events
-            event_dispatcher: Event dispatcher for handling events
-        """
-        self.logger = logger
-        self.event_dispatcher = event_dispatcher
-        self.config_manager = ConfigManager(config_path, logger)
-        self.config_manager.set_event_dispatcher(event_dispatcher)
-        
-        # Subscribe to configuration changes
-        self.event_dispatcher.subscribe("config_change", self._on_config_change)
-        self._refresh_configs()
-        
-    def _on_config_change(self) -> None:
-        """Handle configuration changes."""
-        try:
-            # Refresh configurations
-            self._refresh_configs()
-            
-            # Validate configurations
-            warnings = self._validate_all_configs()
-            if warnings:
-                self.logger.record_event(
-                    event_type="config_validation_warnings",
-                    message="Configuration validation warnings",
-                    level="warning",
-                    additional_info={"warnings": warnings}
-                )
-                
-            # Notify other components
-            self.event_dispatcher.notify("config_validated", warnings)
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="config_change_error",
-                message=f"Failed to handle config change: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            
-    def _refresh_configs(self) -> None:
-        """Refresh configuration sections from ConfigManager."""
-        self.core_config = self.config_manager.get_section("core_config")
-        self.controls_config = self.config_manager.get_section("controls_config")
-        self.curiosity_config = self.config_manager.get_section("curiosity_config")
-        self.training_config = self.config_manager.get_section("training_config")
-        
-        self.logger.record_event(
-            event_type="config_refresh",
-            message="Configuration sections refreshed",
-            level="info"
-        )
-        
-    def _validate_all_configs(self) -> List[str]:
-        """
-        Validate all configuration sections.
-        
-        Returns:
-            List of warning messages, empty if no warnings
-        """
-        warnings = []
-        
-        # Define validation sections and their specific validation rules
-        validation_sections = [
-            ("controls_config", self.controls_config, {}),
-            ("curiosity_config", self.curiosity_config, {}),
-            ("core_config", self.core_config, {
-                "processor": lambda k, v: k.startswith("processor_"),
-                "temperament": lambda k, v: k.startswith("temp_")
-            })
-        ]
-        
-        # Validate each section
-        for section_name, config, filters in validation_sections:
-            section_warnings = self._validate_config_section(
-                section_name=section_name,
-                config=config,
-                filters=filters
-            )
-            warnings.extend(section_warnings)
-            
-        return warnings
-        
-    def _validate_config_section(
-        self,
-        section_name: str,
-        config: Dict[str, Any],
-        filters: Dict[str, Callable[[str, Any], bool]] = None
-    ) -> List[str]:
-        """
-        Validate a configuration section.
-        
-        Args:
-            section_name: Name of the configuration section
-            config: Configuration dictionary to validate
-            filters: Optional dictionary of filter functions for specific validation rules
-            
-        Returns:
-            List of warning messages, empty if no warnings
-        """
-        warnings = []
-        
-        try:
-            for key, value in config.items():
-                # Apply filters if specified
-                if filters:
-                    for filter_name, filter_func in filters.items():
-                        if filter_func(key, value):
-                            # Skip validation for filtered keys
-                            continue
-                
-                # Validate the value
-                is_valid, error_msg = ValidationSchema.validate_value(
-                    section_name, key, value, self.logger
-                )
-                
-                if not is_valid:
-                    warnings.append(f"{section_name}.{key}: {error_msg}")
-                    self.logger.record_event(
-                        event_type="config_validation_error",
-                        message=f"Invalid {section_name} config value: {error_msg}",
-                        level="error",
-                        additional_info={
-                            "key": key,
-                            "value": value
-                        }
-                    )
-                    
-        except Exception as e:
-            self.logger.record_event(
-                event_type="config_validation_error",
-                message=f"Failed to validate {section_name} config: {str(e)}",
-                level="error",
-                additional_info={
-                    "section": section_name,
-                    "error": str(e)
-                }
-            )
-            warnings.append(f"Failed to validate {section_name} config: {str(e)}")
-            
-        return warnings
-        
-    def validate(self, model_config: Any = None) -> bool:
-        """
-        Validate all configurations.
-        
-        Args:
-            model_config: Optional model configuration for additional validation
-            
-        Returns:
-            bool: True if validation succeeds, False otherwise
-        """
-        try:
-            warnings = self._validate_all_configs()
-            if warnings:
-                self.logger.record_event(
-                    event_type="config_validation_failed",
-                    message="Configuration validation failed with warnings",
-                    level="error",
-                    additional_info={"warnings": warnings}
-                )
-                return False
-            return True
-        except Exception as e:
-            self.logger.record_event(
-                event_type="config_validation_failed",
-                message=f"Configuration validation failed: {str(e)}",
-                level="error"
-            )
-            return False
-            
-    def validate_with_model(self, model_config: Any) -> bool:
-        """
-        Validate configurations with model-specific checks.
-        
-        Args:
-            model_config: Model configuration for additional validation
-            
-        Returns:
-            bool: True if validation succeeds, False otherwise
-        """
-        try:
-            # First validate basic configurations
-            if not self.validate():
-                return False
-                
-            # Add model-specific validation here if needed
-            return True
-        except Exception as e:
-            self.logger.record_event(
-                event_type="config_validation_failed",
-                message=f"Configuration validation failed: {str(e)}",
-                level="error"
-            )
-            return False
-
 class ModelLoader:
     """Handles model loading, initialization, and cross-attention injection."""
     
@@ -496,7 +291,7 @@ class ModelLoader:
             raise ValueError("Missing required dependencies")
             
         # Initialize cross-attention injector if needed
-        cross_attn_config = self.context.config_manager.get_section("cross_attn_config", {})
+        cross_attn_config = self.context.config_handler.config_manager.get_section("cross_attn_config", {})
         if cross_attn_config.get("enabled", False):
             self._cross_attention_injector = CrossAttentionInjector()
         
@@ -504,14 +299,14 @@ class ModelLoader:
         """Validate cross-attention layer weights before injection."""
         try:
             # Get current cross-attention configuration
-            cross_attn_config = self.context.config_manager.get_section("cross_attn_config")
+            cross_attn_config = self.context.config_handler.config_manager.get_section("cross_attn_config")
             layer_weights = cross_attn_config.get("layer_weights", [])
             
             # Get current cross-attention layers
             if self._cross_attention_injector:
                 layers = self._cross_attention_injector.get_cross_attention_layers(
                     self.model,
-                    mode=self.context.core_config.get("layer_selection_mode", "balanced")
+                    mode=self.context.config_handler.config_manager.get("core_config.layer_selection_mode", "balanced")
                 )
                 
                 # Validate weights before injection
@@ -525,7 +320,7 @@ class ModelLoader:
                     additional_info={
                         "layer_count": len(layers),
                         "layer_weights": layer_weights,
-                        "layer_selection_mode": self.context.core_config.get("layer_selection_mode", "balanced")
+                        "layer_selection_mode": self.context.config_handler.config_manager.get("core_config.layer_selection_mode", "balanced")
                     }
                 )
                 
@@ -533,9 +328,9 @@ class ModelLoader:
                 self._cross_attention_injector.inject_cross_attention(
                     model=self.model,
                     scaffold_model=self.scaffold_model,
-                    core_config=self.context.core_config,
+                    core_config=self.context.config_handler.config_manager.get_section("core_config"),
                     cross_attn_config=cross_attn_config,
-                    lora_config=self.context.lora_config,
+                    lora_config=self.context.config_handler.config_manager.get_section("lora_config"),
                     token_map=self.token_map,
                     device=self.context.device
                 )
@@ -584,7 +379,7 @@ class StateTracker:
             raise ValueError("Missing required dependencies")
             
         self.state_manager = StateManager(
-            config_manager=self.context.config_manager,
+            config_manager=self.context.config_handler.config_manager,
             logger=self.context.logger,
             device=self.context.device
         )
@@ -670,7 +465,7 @@ class ErrorManager:
         
     def _initialize(self) -> None:
         """Initialize error handling configuration."""
-        config = self.context.config_manager.get_section("error_config", {})
+        config = self.context.config_handler.config_manager.get_section("error_config", {})
         self.error_cooldown = config.get("error_cooldown", 1.0)
         self.severity_thresholds = {
             "warning": float(config.get("warning_threshold", 3.0)),
@@ -967,8 +762,8 @@ class ErrorManager:
             self.error_counts[error_key] = 0
             
             # Take recovery actions
-            self.context.config_manager.update("training_config.batch_size", 1)
-            self.context.config_manager.update("training_config.learning_rate", 1e-5)
+            self.context.config_handler.config_manager.update("training_config.batch_size", 1)
+            self.context.config_handler.config_manager.update("training_config.learning_rate", 1e-5)
             
             self.logger.record_event(
                 event_type="training_recovery",
@@ -990,7 +785,7 @@ class ErrorManager:
         try:
             # Reduce batch size
             new_batch_size = max(1, batch_size // 2)
-            self.context.config_manager.update("training_config.batch_size", new_batch_size)
+            self.context.config_handler.config_manager.update("training_config.batch_size", new_batch_size)
             
             self.logger.record_event(
                 event_type="training_adjustment",
@@ -1015,8 +810,8 @@ class ErrorManager:
             self.error_counts[error_key] = 0
             
             # Reset curiosity parameters
-            self.context.config_manager.update("curiosity_config.pressure_threshold", 0.5)
-            self.context.config_manager.update("curiosity_config.decay_rate", 0.9)
+            self.context.config_handler.config_manager.update("curiosity_config.pressure_threshold", 0.5)
+            self.context.config_handler.config_manager.update("curiosity_config.decay_rate", 0.9)
             
             self.logger.record_event(
                 event_type="curiosity_recovery",
@@ -1039,8 +834,8 @@ class ErrorManager:
             self.error_counts[error_key] = 0
             
             # Clear memory and reduce usage
-            self.context.config_manager.update("memory_config.max_memory_mb", 512)
-            self.context.config_manager.update("memory_config.garbage_collection_threshold", 0.7)
+            self.context.config_handler.config_manager.update("memory_config.max_memory_mb", 512)
+            self.context.config_handler.config_manager.update("memory_config.garbage_collection_threshold", 0.7)
             
             self.logger.record_event(
                 event_type="memory_recovery",
@@ -1064,9 +859,9 @@ class ErrorManager:
         """Adjust curiosity parameters for non-critical errors."""
         try:
             # Adjust curiosity parameters
-            current_pressure = self.context.config_manager.get("curiosity_config.pressure_threshold", 0.5)
+            current_pressure = self.context.config_handler.config_manager.get("curiosity_config.pressure_threshold", 0.5)
             new_pressure = max(0.1, current_pressure - 0.05)
-            self.context.config_manager.update("curiosity_config.pressure_threshold", new_pressure)
+            self.context.config_handler.config_manager.update("curiosity_config.pressure_threshold", new_pressure)
             
             self.logger.record_event(
                 event_type="curiosity_adjustment",
@@ -1092,8 +887,8 @@ class ErrorManager:
             self.error_counts[error_key] = 0
             
             # Reset generation parameters
-            self.context.config_manager.update("generation_config.temperature", 0.7)
-            self.context.config_manager.update("generation_config.top_p", 0.9)
+            self.context.config_handler.config_manager.update("generation_config.temperature", 0.7)
+            self.context.config_handler.config_manager.update("generation_config.top_p", 0.9)
             
             self.logger.record_event(
                 event_type="generation_recovery",
@@ -1117,9 +912,9 @@ class ErrorManager:
         """Adjust generation parameters for non-critical errors."""
         try:
             # Adjust generation parameters
-            current_temp = self.context.config_manager.get("generation_config.temperature", 1.0)
+            current_temp = self.context.config_handler.config_manager.get("generation_config.temperature", 1.0)
             new_temp = max(0.5, current_temp - 0.05)
-            self.context.config_manager.update("generation_config.temperature", new_temp)
+            self.context.config_handler.config_manager.update("generation_config.temperature", new_temp)
             
             self.logger.record_event(
                 event_type="generation_adjustment",
@@ -1148,8 +943,8 @@ class ErrorManager:
             self.error_counts[error_key] = 0
             
             # Reset data parameters
-            self.context.config_manager.update("data_config.batch_size", 1)
-            self.context.config_manager.update("data_config.max_retries", 3)
+            self.context.config_handler.config_manager.update("data_config.batch_size", 1)
+            self.context.config_handler.config_manager.update("data_config.max_retries", 3)
             
             self.logger.record_event(
                 event_type="data_recovery",
@@ -1170,9 +965,9 @@ class ErrorManager:
         """Adjust data parameters for non-critical errors."""
         try:
             # Adjust data parameters
-            current_batch_size = self.context.config_manager.get("data_config.batch_size", 32)
+            current_batch_size = self.context.config_handler.config_manager.get("data_config.batch_size", 32)
             new_batch_size = max(1, current_batch_size // 2)
-            self.context.config_manager.update("data_config.batch_size", new_batch_size)
+            self.context.config_handler.config_manager.update("data_config.batch_size", new_batch_size)
             
             self.logger.record_event(
                 event_type="data_adjustment",

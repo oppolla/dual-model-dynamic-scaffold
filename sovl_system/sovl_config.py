@@ -1240,6 +1240,210 @@ class ConfigManager:
             )
             return False
 
+class ConfigHandler:
+    """Handles configuration validation and management."""
+    
+    def __init__(self, config_path: str, logger: Logger, event_dispatcher: EventDispatcher):
+        """
+        Initialize config handler with explicit dependencies.
+        
+        Args:
+            config_path: Path to configuration file
+            logger: Logger instance for logging events
+            event_dispatcher: Event dispatcher for handling events
+        """
+        self.logger = logger
+        self.event_dispatcher = event_dispatcher
+        self.config_manager = ConfigManager(config_path, logger)
+        self.config_manager.set_event_dispatcher(event_dispatcher)
+        
+        # Subscribe to configuration changes
+        self.event_dispatcher.subscribe("config_change", self._on_config_change)
+        self._refresh_configs()
+        
+    def _on_config_change(self) -> None:
+        """Handle configuration changes."""
+        try:
+            # Refresh configurations
+            self._refresh_configs()
+            
+            # Validate configurations
+            warnings = self._validate_all_configs()
+            if warnings:
+                self.logger.record_event(
+                    event_type="config_validation_warnings",
+                    message="Configuration validation warnings",
+                    level="warning",
+                    additional_info={"warnings": warnings}
+                )
+                
+            # Notify other components
+            self.event_dispatcher.notify("config_validated", warnings)
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_change_error",
+                message=f"Failed to handle config change: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            
+    def _refresh_configs(self) -> None:
+        """Refresh configuration sections from ConfigManager."""
+        self.core_config = self.config_manager.get_section("core_config")
+        self.controls_config = self.config_manager.get_section("controls_config")
+        self.curiosity_config = self.config_manager.get_section("curiosity_config")
+        self.training_config = self.config_manager.get_section("training_config")
+        
+        self.logger.record_event(
+            event_type="config_refresh",
+            message="Configuration sections refreshed",
+            level="info"
+        )
+        
+    def _validate_all_configs(self) -> List[str]:
+        """
+        Validate all configuration sections.
+        
+        Returns:
+            List of warning messages, empty if no warnings
+        """
+        warnings = []
+        
+        # Define validation sections and their specific validation rules
+        validation_sections = [
+            ("controls_config", self.controls_config, {}),
+            ("curiosity_config", self.curiosity_config, {}),
+            ("core_config", self.core_config, {
+                "processor": lambda k, v: k.startswith("processor_"),
+                "temperament": lambda k, v: k.startswith("temp_")
+            })
+        ]
+        
+        # Validate each section
+        for section_name, config, filters in validation_sections:
+            section_warnings = self._validate_config_section(
+                section_name=section_name,
+                config=config,
+                filters=filters
+            )
+            warnings.extend(section_warnings)
+            
+        return warnings
+        
+    def _validate_config_section(
+        self,
+        section_name: str,
+        config: Dict[str, Any],
+        filters: Dict[str, Callable[[str, Any], bool]] = None
+    ) -> List[str]:
+        """
+        Validate a configuration section.
+        
+        Args:
+            section_name: Name of the configuration section
+            config: Configuration dictionary to validate
+            filters: Optional dictionary of filter functions for specific validation rules
+            
+        Returns:
+            List of warning messages, empty if no warnings
+        """
+        warnings = []
+        
+        try:
+            for key, value in config.items():
+                # Apply filters if specified
+                if filters:
+                    for filter_name, filter_func in filters.items():
+                        if filter_func(key, value):
+                            # Skip validation for filtered keys
+                            continue
+                
+                # Validate the value
+                is_valid, error_msg = ValidationSchema.validate_value(
+                    section_name, key, value, self.logger
+                )
+                
+                if not is_valid:
+                    warnings.append(f"{section_name}.{key}: {error_msg}")
+                    self.logger.record_event(
+                        event_type="config_validation_error",
+                        message=f"Invalid {section_name} config value: {error_msg}",
+                        level="error",
+                        additional_info={
+                            "key": key,
+                            "value": value
+                        }
+                    )
+                    
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_validation_error",
+                message=f"Failed to validate {section_name} config: {str(e)}",
+                level="error",
+                additional_info={
+                    "section": section_name,
+                    "error": str(e)
+                }
+            )
+            warnings.append(f"Failed to validate {section_name} config: {str(e)}")
+            
+        return warnings
+        
+    def validate(self, model_config: Any = None) -> bool:
+        """
+        Validate all configurations.
+        
+        Args:
+            model_config: Optional model configuration for additional validation
+            
+        Returns:
+            bool: True if validation succeeds, False otherwise
+        """
+        try:
+            warnings = self._validate_all_configs()
+            if warnings:
+                self.logger.record_event(
+                    event_type="config_validation_failed",
+                    message="Configuration validation failed with warnings",
+                    level="error",
+                    additional_info={"warnings": warnings}
+                )
+                return False
+            return True
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_validation_failed",
+                message=f"Configuration validation failed: {str(e)}",
+                level="error"
+            )
+            return False
+            
+    def validate_with_model(self, model_config: Any) -> bool:
+        """
+        Validate configurations with model-specific checks.
+        
+        Args:
+            model_config: Model configuration for additional validation
+            
+        Returns:
+            bool: True if validation succeeds, False otherwise
+        """
+        try:
+            # First validate basic configurations
+            if not self.validate():
+                return False
+                
+            # Add model-specific validation here if needed
+            return True
+        except Exception as e:
+            self.logger.record_event(
+                event_type="config_validation_failed",
+                message=f"Configuration validation failed: {str(e)}",
+                level="error"
+            )
+            return False
+
 if __name__ == "__main__":
     from sovl_logger import LoggerConfig
     logger = Logger(LoggerConfig())
