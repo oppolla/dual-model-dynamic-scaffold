@@ -124,7 +124,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 
 ### [Echoes]
 
-  - Vivid emotional imprints of key memories that shape the AI’s perspective. Pivotal, emotional moments of wisdom or embarrassment that echo through time. Fields capture seminal learnings, drawn from prompts recalling defining experiences.
+  - Vivid emotional imprints of key memories that shape the AI’s perspective. Pivotal, emotional moments of wisdom or embarrassment that echo through time. Captures seminal learnings, drawn from prompts recalling defining experiences.
 
 - Constraints `String, max 2000 characters, regex ^[\w\s,.-":]{1,2000}$`
 
@@ -134,7 +134,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
   
 ### [Tides]
 
-  - Captures the AI’s emotional waves, the vibes and feelings that ebb and flow with triggers. Fields map the AI’s emotional journey, drawn from prompts exploring how experiences shape its mood.
+  - Captures the AI’s emotional waves, the vibes and feelings that ebb and flow with triggers. Map the AI’s emotional journey, drawn from prompts exploring how experiences shape its mood.
 
 - Constraints `String, max 1500 characters, regex ^[\w\s,.-":]{1,1500}$`
 
