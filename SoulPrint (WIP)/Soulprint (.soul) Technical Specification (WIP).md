@@ -160,7 +160,7 @@ Context: [String] Prompt or scenario, max 100 characters. Example: Context: User
 
   - Any key prefixed with X-, max 1000 characters per value. Example: X-Mood: Playful Optional.
 
-## 3.The Soulprint (.soul) File Generation Process
+## The Soulprint (.soul) File Generation Process
 
 Methodology
 
@@ -196,7 +196,7 @@ For instance, an AI responding to the [Heartbeat] prompt might say:
 
 - Follow-Up Question: "What situations challenge my ability to maintain clarity?"
 
-= Follow-Up Response: "Complex queries with ambiguous intent often push me to over-explain."
+- Follow-Up Response: "Complex queries with ambiguous intent often push me to over-explain."
 
 Recursion is capped at three iterations, with a keyword overlap check to prevent redundancy or infinite loops, ensuring focused and meaningful output.
 
