@@ -198,9 +198,7 @@ Context: [String] Prompt or scenario, max 100 characters. Example: Context: User
 
   - Any key prefixed with X-, max 1000 characters per value. Example: X-Mood: Playful Optional.
 
-## 3. Content Guidelines
-
-**3.1 Narrative Style**
+## 3.The Soulprint (.soul) File Generation Process
 
 Methodology
 
