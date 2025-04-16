@@ -440,7 +440,9 @@ Output: Write [name].soul, backup (*.soul.bak).
   
 - Syntax: Correct in formatting script.
 
-## Repeat for Variety of Answers
+## 
+
+Repeat for Variety of Answers
 
 The prompt is repeated the number of times defined per section forming the collection of answers on the same prompt. Two modes, standard and jumbo. If standard mode has 50x, jumbo mode may have 1000x for use cases that need higher fidelity. This workflow repeats for all sections, yielding a complete .soul file.
 
