@@ -98,7 +98,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 - Must validate all regex constraints and log errors in a structured format.
 - Must handle files up to 5MB (standard) or 10MB (jumbo) without memory exhaustion.
 
-## Digital Soul Facets
+## Soulprint Facets
   
 ### Core Engrams
   - [Identity] - _The Anchored Self_
