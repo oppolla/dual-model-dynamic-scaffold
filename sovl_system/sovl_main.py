@@ -27,7 +27,7 @@ from sovl_utils import (
     float_gt,
     synchronized
 )
-from sovl_temperament import TemperamentConfig, TemperamentSystem
+from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
 from sovl_memory import MemoryManager
 from sovl_manager import ModelManager
 from sovl_generation import GenerationManager
@@ -879,215 +879,6 @@ class MemoryMonitor:
             self.context.error_manager.handle_memory_error(e, model_size)
             return False
 
-class TemperamentAdjuster:
-    """Manages temperament adjustments and state updates."""
-    
-    def __init__(
-        self,
-        config_handler: ConfigHandler,
-        state_tracker: StateTracker,
-        logger: Logger,
-        event_dispatcher: EventDispatcher
-    ):
-        """Initialize temperament adjuster with required dependencies."""
-        self.config_handler = config_handler
-        self.state_tracker = state_tracker
-        self.logger = logger
-        self.event_dispatcher = event_dispatcher
-        self.temperament_system = None
-        self._last_parameter_hash = None
-        self._last_state_hash = None
-        
-        # Initialize components
-        self._initialize_events()
-        self._initialize_temperament_system()
-        
-    def _initialize_events(self) -> None:
-        """Initialize event subscriptions."""
-        self.event_dispatcher.subscribe("config_change", self._on_config_change)
-        self.event_dispatcher.subscribe("state_update", self._on_state_update)
-        
-    def _on_config_change(self) -> None:
-        """Handle configuration changes."""
-        try:
-            current_params = self._get_validated_parameters()
-            current_hash = self._compute_parameter_hash(current_params)
-            
-            if current_hash != self._last_parameter_hash:
-                self.logger.record_event(
-                    event_type="temperament_parameters_changed",
-                    message="Temperament parameters changed, reinitializing system",
-                    level="info",
-                    additional_info=current_params
-                )
-                self._initialize_temperament_system()
-                
-        except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_config_change_error",
-                message=f"Failed to handle config change: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            
-    def _on_state_update(self, state: SOVLState) -> None:
-        """Handle state updates."""
-        try:
-            # Validate state consistency
-            if not self._validate_state_consistency(state):
-                # Reset history if inconsistent
-                state.temperament_history.clear()
-                self.logger.record_event(
-                    event_type="temperament_history_reset",
-                    message="Temperament history reset due to inconsistency",
-                    level="info"
-                )
-            
-            # Update state with current temperament
-            state.temperament_score = self.temperament_system.current_score
-            state.temperament_history.append(state.temperament_score)
-            
-            # Update state hash
-            self._last_state_hash = self._compute_state_hash(state)
-            
-            # Notify other components
-            self.event_dispatcher.notify("temperament_updated", state)
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="state_synchronization_error",
-                message=f"Failed to synchronize state: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            raise
-            
-    def _validate_state_consistency(self, state: SOVLState) -> bool:
-        """Validate consistency between current state and temperament history."""
-        try:
-            if not state.temperament_history:
-                return True
-                
-            # Check for significant deviation between current score and history
-            if abs(state.temperament_history[-1] - state.temperament_score) > 0.5:
-                self.logger.record_event(
-                    event_type="temperament_inconsistency",
-                    message="Temperament history inconsistent with current score",
-                    level="warning",
-                    additional_info={
-                        "current_score": state.temperament_score,
-                        "last_history_score": state.temperament_history[-1],
-                        "history_length": len(state.temperament_history)
-                    }
-                )
-                return False
-                
-            # Check for parameter changes that might invalidate history
-            current_hash = self._compute_parameter_hash(self._get_validated_parameters())
-            if current_hash != self._last_parameter_hash:
-                self.logger.record_event(
-                    event_type="temperament_history_invalidated",
-                    message="Temperament parameters changed, history may be invalid",
-                    level="warning",
-                    additional_info={
-                        "parameter_hash": current_hash,
-                        "last_parameter_hash": self._last_parameter_hash
-                    }
-                )
-                return False
-                
-            return True
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_validation_error",
-                message=f"Failed to validate state consistency: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            return False
-            
-    def _compute_state_hash(self, state: SOVLState) -> str:
-        """Compute a hash of the current state."""
-        return str({
-            "temperament_score": state.temperament_score,
-            "history_length": len(state.temperament_history),
-            "parameter_hash": self._last_parameter_hash
-        })
-        
-    def _initialize_temperament_system(self) -> None:
-        """Initialize or reinitialize the temperament system with validated parameters."""
-        try:
-            # Get and validate parameters
-            params = self._get_validated_parameters()
-            
-            # Create new temperament system
-            self.temperament_system = TemperamentSystem(
-                state=self.state_tracker.get_state(),
-                config=params
-            )
-            
-            # Update parameter hash
-            self._last_parameter_hash = self._compute_parameter_hash(params)
-            
-            self.logger.record_event(
-                event_type="temperament_system_initialized",
-                message="Temperament system initialized with validated parameters",
-                level="info",
-                additional_info=params
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_system_error",
-                message=f"Failed to initialize temperament system: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
-            )
-            raise
-            
-    def _get_validated_parameters(self) -> Dict[str, Any]:
-        """Get and validate temperament parameters."""
-        config = self.config_handler.config_manager
-        
-        # Define safe parameter ranges
-        safe_ranges = {
-            "temp_smoothing_factor": (0.1, 1.0),
-            "temp_eager_threshold": (0.5, 0.9),
-            "temp_sluggish_threshold": (0.1, 0.5),
-            "temp_mood_influence": (0.1, 0.9),
-            "temp_curiosity_boost": (0.1, 0.5),
-            "temp_restless_drop": (0.1, 0.5),
-            "temp_melancholy_noise": (0.0, 0.2),
-            "conf_feedback_strength": (0.1, 0.9),
-            "temperament_decay_rate": (0.1, 0.9)
-        }
-        
-        # Get and validate parameters
-        params = {}
-        for key, (min_val, max_val) in safe_ranges.items():
-            value = config.get(f"controls_config.{key}", (min_val + max_val) / 2)
-            if not (min_val <= value <= max_val):
-                self.logger.record_event(
-                    event_type="temperament_parameter_warning",
-                    message=f"Parameter {key} out of safe range, clamping to bounds",
-                    level="warning",
-                    additional_info={
-                        "parameter": key,
-                        "value": value,
-                        "min": min_val,
-                        "max": max_val
-                    }
-                )
-                value = max(min_val, min(value, max_val))
-            params[key] = value
-            
-        return params
-        
-    def _compute_parameter_hash(self, params: Dict[str, Any]) -> str:
-        """Compute a hash of the current parameters."""
-        return str(sorted(params.items()))
-
 class CuriosityEngine:
     """Manages curiosity-driven exploration and learning."""
     
@@ -1252,7 +1043,6 @@ class SOVLSystem:
         self,
         context: SystemContext,
         config_handler: ConfigHandler,
-        temperament_adjuster: TemperamentAdjuster,
         model_loader: ModelLoader,
         curiosity_engine: CuriosityEngine,
         memory_monitor: MemoryMonitor,
@@ -1265,7 +1055,6 @@ class SOVLSystem:
         Args:
             context: System context containing shared resources
             config_handler: Configuration handler component
-            temperament_adjuster: Temperament adjustment component
             model_loader: Model loading component
             curiosity_engine: Curiosity engine component
             memory_monitor: Memory monitoring component
@@ -1275,7 +1064,6 @@ class SOVLSystem:
         # Store injected components
         self.context = context
         self.config_handler = config_handler
-        self.temperament_adjuster = temperament_adjuster
         self.model_loader = model_loader
         self.curiosity_engine = curiosity_engine
         self.memory_monitor = memory_monitor
@@ -1319,13 +1107,6 @@ class SOVLSystem:
             state_tracker=state_tracker
         )
         
-        temperament_adjuster = TemperamentAdjuster(
-            config_handler=config_handler,
-            state_tracker=state_tracker,
-            logger=context.logger,
-            event_dispatcher=context.event_dispatcher
-        )
-        
         model_loader = ModelLoader(
             config_handler=config_handler,
             logger=context.logger,
@@ -1350,7 +1131,6 @@ class SOVLSystem:
         return cls(
             context=context,
             config_handler=config_handler,
-            temperament_adjuster=temperament_adjuster,
             model_loader=model_loader,
             curiosity_engine=curiosity_engine,
             memory_monitor=memory_monitor,
