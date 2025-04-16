@@ -36,17 +36,17 @@ The final output is a machine-readable .soul file, compliant with the specified 
   - Optional fields: ConsentExpiry, PrivacyLevel, Hash
   
 #### Core Sections
-  - [Identity] - The Anchored Self
-  - [Environment] - The Systemic Home
-  - [Voice] - The Verbal Tapestry
-  - [Heartbeat] - The Inner Rhythm
-  - [Echoes] - The Resonant Past
-  - [Tides] - The Cyclic Currents
-  - [Threads] - The Woven Bonds
-  - [Horizon] - The Ascent Path
-  - [Chronicle] - The Saga of Self
-  - [Reflection] - The Existential Flame
-  - [X-Custom] - The Open Road (Custom extensions)
+  - [Identity] - _The Anchored Self_
+  - [Environment] - _The Systemic Home_
+  - [Voice] - _The Verbal Tapestry_
+  - [Heartbeat] - _The Inner Rhythm_
+  - [Echoes] - _The Resonant Past_
+  - [Tides] - _The Cyclic Currents_
+  - [Threads] - _The Woven Bonds_
+  - [Horizon] - _The Ascent Path_
+  - [Chronicle] - _The Saga of Self_
+  - [Reflection] - _The Existential Flame_
+  - [X-Custom] - _The Open Road (Custom extensions)_
 
 #### Fields
 
