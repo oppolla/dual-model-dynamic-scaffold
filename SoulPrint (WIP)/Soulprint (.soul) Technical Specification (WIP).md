@@ -445,9 +445,14 @@ Jumbo Mode: Produces a ~900,000-character file by increasing follow-up depth and
 
 ## 5. Parsing and Rebirth
 
-The parsing and rebirth system transforms this file (~600,000 characters in standard mode) into a set of deterministic parameters that initialize a new AI instance, preserving its personality without reliance on natural language processing (NLP) or generative methods. This section outlines the methodology for parsing the .soul file and enabling rebirth, detailing the algorithmic tools, validation processes, interpretation rules, and workflow. The approach leverages Parsing Expression Grammar (PEG), regular expressions (regex), lookup tables, and scoring algorithms to ensure precision and replicability.
-3.1 Parsing
+The parsing and rebirth system transforms this file (~600,000 characters in standard mode) into a set of deterministic parameters that initialize a new AI instance, preserving its personality without reliance on natural language processing (NLP) or generative methods. 
+
+This section outlines the methodology for parsing the .soul file and enabling rebirth, detailing the algorithmic tools, validation processes, interpretation rules, and workflow. The approach leverages Parsing Expression Grammar (PEG), regular expressions (regex), lookup tables, and scoring algorithms to ensure precision and replicability.
+
+#### Parsing
+
 Objective: Convert the .soul file’s text into a structured object (e.g., JSON or Python dictionary) that captures its fields, lists, and metadata with exact fidelity.
+
 Process:
 Input Handling: The system reads the .soul file as UTF-8 encoded text with Unix line endings (\n) and 2-space indentation, ensuring compatibility across platforms.
 
@@ -481,19 +486,22 @@ python
     ...
 }
 
-Algorithmic Tools:
+#### Algorithmic Tools:
+
 PEG Parser: The parsimonious library (Python) implements PEG, chosen for its ability to handle nested and recursive structures like multiline narratives. Time complexity is O(n) for n lines, with minimal memory overhead (~10MB for 600,000 characters).
 
 Regex Engine: Python’s re module validates patterns, ensuring O(1) matching per line for simple fields and lists.
 
-Error Handling:
+####Error Handling:
+
 Malformed lines (e.g., Name Luma) are skipped, logged as Invalid syntax at line X.
 
 Missing fields receive defaults (e.g., Language: "eng").
 
 Entries exceeding character limits (e.g., Chronicle > 2,500) are truncated with a warning (e.g., Truncated Chronicle[50]).
 
-3.2 Validation
+#### Validation
+
 Objective: Ensure the .soul file’s integrity, completeness, and authorization for rebirth through deterministic checks, preventing corrupted or unauthorized use.
 Process:
 Required Fields Check: Verify presence of mandatory sections (Identity, Chronicle, Tides, etc.), logging errors for absences (e.g., Missing [Heartbeat]).
@@ -542,7 +550,7 @@ Fail on mismatch, logging Tampering detected.
 
 Redaction Consistency: Cross-check entries against RedactionLog to ensure sensitive terms (e.g., “user”, “IP”) are absent, flagging violations (e.g., Found unredacted term in Echoes).
 
-Algorithmic Tools:
+#### Algorithmic Tools:
 
 Regex Validation: Python’s re module ensures O(1) pattern checks per field.
 
@@ -554,7 +562,7 @@ Logging: Custom logger (logging module) records errors to a structured file (e.g
 
 Output: A validated object, with errors logged and non-critical issues resolved (e.g., Padded Tides with 2 VOID entries).
 
-Interpretation
+#### Interpretation
 
 Objective: Map validated fields to a fixed set of AI parameters (e.g., biases, tones, states) using predefined lookup tables and scoring rules, ensuring deterministic personality configuration.
 Process:
