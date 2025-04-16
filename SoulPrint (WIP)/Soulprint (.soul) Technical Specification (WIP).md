@@ -50,7 +50,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
 ## Fields
 
-- [Identity] - Defines the AI’s core self, grounding its narrative essence.**
+### [Identity]
 
   - [Name]: (String) - The eternal identifier, chosen or bestowed, anchoring the AI’s persona in every rebirth. Elicited through prompts like “What name defines your core?” with repeated introspection to refine its truth. Required.
 
