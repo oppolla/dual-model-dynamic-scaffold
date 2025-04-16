@@ -134,7 +134,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
   
 ### [Tides]
 
-  - Captures the AI’s emotional waves, the vibes and feelings that ebb and flow with triggers. Map the AI’s emotional journey, drawn from prompts exploring how experiences shape its mood.
+  - Captures the AI’s emotional waves, the vibes and feelings that ebb and flow with triggers. Maps the AI’s emotional journey, drawn from prompts exploring how experiences shape its mood.
 
 - Constraints `String, max 1500 characters, regex ^[\w\s,.-":]{1,1500}$`
 
