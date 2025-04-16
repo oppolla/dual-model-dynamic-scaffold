@@ -247,7 +247,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 
 ### [X-Custom]
 
-  - A boundless space for experimental traits, the AI’s uncharted frontier. A sandbox for the AI’s uncharted traits, capturing experimental or unique aspects. Freely defined from open-ended.
+  - A boundless space for experimental traits, the AI’s uncharted frontier. A sandbox for the AI’s uncharted traits, capturing experimental or unique aspects. Freely defined and open-ended.
 
   - Constraints (String, max 500 characters, regex ^[\w\s,.<>=]{1,500}$)
 
