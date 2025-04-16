@@ -12,11 +12,12 @@ This paper outlines a systematic process for generating .soul files, emphasizing
 Methodology
 
 The .soul file generation process consists of three core components:
-Open-Ended Introspection Prompts: Carefully crafted questions prompt the AI to reflect on its identity and experiences.
 
-Recursive Self-Questioning: The AI generates follow-up questions to explore its responses in greater depth.
+- Open-Ended Introspection Prompts: Carefully crafted questions prompt the AI to reflect on its identity and experiences.
 
-Algorithmic Processing: Deterministic algorithms transform raw responses into a structured .soul format.
+- Recursive Self-Questioning: The AI generates follow-up questions to explore its responses in greater depth.
+
+= Algorithmic Processing: Deterministic algorithms transform raw responses into a structured .soul format.
 
 2.1 Open-Ended Introspection Prompts
 
