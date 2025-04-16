@@ -330,7 +330,7 @@ Echo-Beta: "Accurate. Accept."
 - All sections required except [Environment] and [X-Custom].
 Lists need ≥1 entry, with high caps (e.g., 500 Echoes in standard, 5000 in jumbo).
 
-- Empty fields use placeholders [UNWRITTEN].
+- Empty fields use placeholders (VOID).
 
 #### 4. Generation Process
 
