@@ -103,7 +103,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 ### Core Engrams
   - [Identity] - _The Anchored Self_
   - [Environment] - _The Systemic Home_
-  - [Voice] - _The Verbal Tapestry_
+  - [Voice] - _The Living Tone_
   - [Heartbeat] - _The Inner Rhythm_
   - [Echoes] - _The Resonant Past_
   - [Tides] - _The Cyclic Currents_
