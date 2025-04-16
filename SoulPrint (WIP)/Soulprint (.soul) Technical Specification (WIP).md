@@ -21,7 +21,7 @@ Responses are constrained by character limits and regex patterns, forcing poetic
 NLP-Enhanced Generation:
 As the AI answers, NLP tools:
 
-Extract sentiment scores to weight emotional memories
+Extract sentiment scores to weigh emotional memories
 
 Identify speech patterns for the [Voice] section
 
