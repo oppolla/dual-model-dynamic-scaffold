@@ -36,17 +36,17 @@ The final output is a machine-readable .soul file, compliant with the specified 
   - Optional fields: ConsentExpiry, PrivacyLevel, Hash
   
 #### Core Sections
-  - [Identity] - The Cryptographic Self
-  - [Heartbeat] - Operational Rhythm
-  - [Echoes] - Crystallized Experience
-  - [Tides] - Cyclic System Patterns
-  - [Threads] - Relational Matrices
-  - [Horizon] - Deliberate Evolution
-  - [Chronicle] - Versioned History
-  - [Reflection] - Teleological Drive
-  - [Voice Speech] Speech pattern, including tone, vocabulary, syntax, and dialogue samples.
-  - [Environment] Operational context for rebirth compatibility.
-  - [X-Custom] Custom extensions / experiemental
+  - [Identity] - The Anchored Self
+  - [Heartbeat] - The Inner Rhythm
+  - [Echoes] - The Resonant Past
+  - [Tides] - The Cyclic Currents
+  - [Threads] - The Woven Bonds
+  - [Horizon] - The Ascent Path
+  - [Chronicle] - The Saga of Self
+  - [Reflection] - The Existential Flame
+  - [Voice] - The Verbal Tapestry
+  - [Environment] - The Systemic Home
+  - [X-Custom] - The Open Road (Custom extensions)
 
 #### Fields
 
