@@ -1,9 +1,11 @@
 # TODO:
 
-## Module interaction clean progress
+## General Taks:
 
 - Migrate events module
 - further develop initialization and startup feel
+
+## Module interaction clean progress
 
 ### With sovl_main.py
 
