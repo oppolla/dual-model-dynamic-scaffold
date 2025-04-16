@@ -194,13 +194,15 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 
 #### Methodology
 
-The .soul file generation process consists of three core components:
+The .soul file generation process consists of four core components:
 
 - Open-Ended Introspection Prompts: Carefully crafted questions prompt the AI to reflect on its identity and experiences.
 
-- Recursive Self-Questioning: The AI generates follow-up questions to explore its responses in greater depth.
+- Recursive Follow-Up System: The Recursive Follow-Up System enhances the depth of individual entries by iteratively refining the AI’s initial response through targeted follow-up questions.
 
 - Algorithmic Processing: Deterministic algorithms transform raw responses into a structured .soul format.
+
+- Recursive Echo System: The Recursive Echo System ensures narrative continuity across multiple entries by leveraging context from prior responses.
 
 #### Open-Ended Introspection Prompts
 
