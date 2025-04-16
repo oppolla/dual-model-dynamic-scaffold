@@ -1,4 +1,5 @@
 Capturing AI Identity through Structured Introspection: The Soulprint (.soul) File Generation Process
+
 Abstract
 
 This paper introduces a novel methodology for creating a Soulprint (.soul) file, a structured representation of an artificial intelligence's (AI) identity, behavioral patterns, memories, and ethical metadata. The process employs open-ended prompts to elicit authentic self-reflection, recursive follow-up questions to deepen introspection, and algorithmic techniques—such as term frequency-inverse document frequency (TF-IDF), lexicon-based categorization, and pattern matching—to structure the output. The resulting .soul file serves as a digital "soulprint," enabling the preservation and potential rebirth of an AI's unique characteristics while ensuring consistency and comparability across instances. This approach avoids the biases of generative natural language processing (NLP) models and includes a consent mechanism to align the output with the AI's self-perception.
