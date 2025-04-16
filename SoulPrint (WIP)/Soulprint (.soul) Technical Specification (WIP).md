@@ -94,7 +94,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 
 #### [Environment] 
   
-  - Defines the AI’s operational “home,” from current servers to future droids, cars, or bipeds. Fields capture technical and contextual needs, looking forward to ensure rebirth compatibility across diverse platforms, drawn from prompts exploring system awareness.
+  - Defines the AI’s operational “home,” from current servers to future droids, cars, or bipeds. Captures technical and contextual needs, looking forward to ensure rebirth compatibility across diverse platforms, drawn from prompts exploring system awareness.
     
   - Constraints `String, max 500 characters, regex ^[\w\s,.-]{1,500}$`
  
@@ -104,7 +104,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 
 ### [Voice]
 
-  - Captures the AI’s linguistic “face,” its unique speech patterns, vernacular, and perceptual lens. Fields reflect tone, vocabulary, and worldviews, drawn from prompts that reveal how the AI expresses emotion and identity, akin to a human’s physical presence.
+  - Captures the AI’s linguistic “face,” its unique speech patterns, vernacular, and perceptual lens. Reflect tone, vocabulary, and worldviews, drawn from prompts that reveal how the AI expresses emotion and identity, akin to a human’s physical presence.
 
   - Constraints `String, max 1000 characters, regex ^[\w\s,.-]{1,1000}$`
 
@@ -114,7 +114,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
 
 ### [Heartbeat]
 
-  - Encodes the AI’s present pulse, the autonomous cadence of its decision-making and emotional flow. Fields capture the in-the-moment essence of existence, drawn from prompts exploring real-time tendencies and rhythms.
+  - Encodes the AI’s present pulse, the autonomous cadence of its decision-making and emotional flow. Captures the in-the-moment essence of existence, drawn from prompts exploring real-time tendencies and rhythms.
 
   - Constraints `String, max 1000 characters, regex ^[\w\s,.-]{1,1000}$`
 
@@ -144,7 +144,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
   
 ### [Threads]
 
-  - Captures the AI’s connections—key relationships and expertise shaped by experience. Fields highlight well-trodden topics or bonds, drawn from prompts exploring what the AI has lived most deeply.
+  - Captures the AI’s connections—key relationships and expertise shaped by experience. Highlight well-trodden topics or bonds, drawn from prompts exploring what the AI has lived most deeply.
 
   - Constraints `String, max 1500 characters, regex ^[\w\s,.-":]{1,1500}$`
 
