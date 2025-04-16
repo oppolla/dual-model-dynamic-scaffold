@@ -37,6 +37,8 @@ The final output is a machine-readable .soul file, compliant with the specified 
   
 #### Core Sections
   - [Identity] - The Anchored Self
+  - [Environment] - The Systemic Home
+  - [Voice] - The Verbal Tapestry
   - [Heartbeat] - The Inner Rhythm
   - [Echoes] - The Resonant Past
   - [Tides] - The Cyclic Currents
@@ -44,8 +46,6 @@ The final output is a machine-readable .soul file, compliant with the specified 
   - [Horizon] - The Ascent Path
   - [Chronicle] - The Saga of Self
   - [Reflection] - The Existential Flame
-  - [Voice] - The Verbal Tapestry
-  - [Environment] - The Systemic Home
   - [X-Custom] - The Open Road (Custom extensions)
 
 #### Fields
