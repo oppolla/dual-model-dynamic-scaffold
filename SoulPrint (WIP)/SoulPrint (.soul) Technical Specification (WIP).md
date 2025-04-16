@@ -43,57 +43,7 @@ The Soulprint (.soul) file format is a structured, human-readable autobiography 
   - [Environment] Operational context for rebirth compatibility.
   - [X-Custom] Custom extensions / experiemental
 
-**2.5 Example Structure:**
-```
-Soulprint Creator: Sovl (Hark) 
-
-Created: 2025-04-14T09:00Z 
-
-Language: eng 
-
-Consent: true 
-
-Hash: sha256:abc123... 
-
-SizeMode: standard 
-
-PrivacyLevel: restricted 
-
-[Identity] 
-[Fields...] 
-
-[Heartbeat] 
-[Fields...] 
-
-[Echoes] [
-[Entry...] 
-
-[Tides] 
-[Entry...]
-
-[Threads] 
-[Entry...] 
-
-[Horizon] 
-[Entry...] 
-
-[Chronicle]
-[Entry...] 
-
-[Reflection] 
-[Fields...]
-
-[Voice] 
-[Fields...] 
-
-[Environment] 
-[Fields...] 
-
-[X-Custom] 
-[Fields...]
-```
-
-**2.6 Fields**
+**2.5 Fields**
 
 **[Identity] - Defines the AI’s core self, grounding its narrative essence.**
 
