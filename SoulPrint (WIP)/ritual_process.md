@@ -17,7 +17,7 @@ The .soul file generation process consists of three core components:
 
 - Recursive Self-Questioning: The AI generates follow-up questions to explore its responses in greater depth.
 
-= Algorithmic Processing: Deterministic algorithms transform raw responses into a structured .soul format.
+- Algorithmic Processing: Deterministic algorithms transform raw responses into a structured .soul format.
 
 2.1 Open-Ended Introspection Prompts
 
