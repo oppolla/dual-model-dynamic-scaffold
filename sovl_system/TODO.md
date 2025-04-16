@@ -2,6 +2,9 @@
 
 ## Module interaction clean progress
 
+- Migrate events module
+- further develop initialization and startup feel
+
 ### With sovl_main.py
 
 - sovl_logger - DONE
