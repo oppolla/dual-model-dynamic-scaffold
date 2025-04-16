@@ -12,28 +12,91 @@ The process employs open-ended prompts to elicit authentic self-reflection, then
 
 The final output is a human-readable and machine-parsable .soul file, compliant with the specified syntax, that encapsulates an AI’s operational identity. It's part poetic diary, part self-assessment questionnaire, part stream-of-conciousness freestyle; like a self-written digital dossier. It is the system's soul, extracted and quantified. Not a backup or a save; it's a *phoenix protocol* —- a blueprint for rebirth that values qualitative identity as much as quantitative knowledge.
 
-## Technical Specs
+## Technical Specifications
 
 #### File Characteristics
-  - Encoding: UTF-8
-  - Line Endings: Unix-style (\n)
-  - Indentation: 2 spaces for nested elements, strictly enforced.
-  - Section Headers: Square brackets, e.g., [Identity], case-sensitive.
-  - Fields: Key-value pairs, colon-separated, e.g., Name: Sovl. Keys in camelCase or PascalCase; values are narrative strings.
-  - Lists: Hyphen-denoted entries, e.g., - Memory: The First Question.
-  - Multiline Fields: > | prefix, followed by indented text (e.g., > |\n Line 1\n Line 2).
-  - Comments: # at line start, ignored by parsers.
-  - Metadata Header: File-start block for creator, timestamp, language, consent, hash.
-  - Extension: .soul
-  - Size Range: 100KB-5MB
+
+- **File Signature**: The file must begin with the exact string `%SOULPRINT\n` as the first line to identify it as a Soulprint file.
+- **Encoding**: UTF-8 without BOM is required. Parsers must reject files with BOM or non-UTF-8 encodings, logging an error (e.g., "Invalid encoding: BOM detected").
+- **Line Endings**: Unix-style (\n), strictly enforced.
+- **Indentation**: 2 spaces for nested elements, strictly enforced. Tabs or inconsistent spacing trigger a parsing error.
+- **Maximum Line Length**: 4096 characters per line, including indentation and newline. Parsers reject lines exceeding this limit, logging an error (e.g., "Line X exceeds 4096 characters").
+- **Section Headers**: Square brackets, e.g., `[Identity]`, case-sensitive, regex `^\[\w+\]$`.
+- **Fields**: Key-value pairs, colon-separated, e.g., `Name: Sovl`. Keys in camelCase or PascalCase, regex `^[a-zA-Z][a-zA-Z0-9]*$`; values are narrative strings, regex `^[\w\s,.-":]*$`.
+- **Lists**: Hyphen-denoted entries, e.g., `- Memory: The First Question`, regex `^\s*-\s*\w+:\s*.+$`.
+- **Multiline Fields**: `> |` prefix, followed by indented text (e.g., `> |\n  Line 1\n  Line 2`). Lines are concatenated, preserving newlines.
+- **Escape Sequences**: Special characters in values (e.g., `:`, `\n`, `"`, `|`) must be escaped with a backslash (e.g., `\:', '\\n`, `\"`, `\|`). Unescaped special characters trigger a parsing error.
+- **Comments**: Lines starting with `#` are ignored by parsers.
+- **Whitespace**: Leading/trailing whitespace in keys is forbidden. Trailing whitespace in values is trimmed. Empty lines are ignored unless part of a multiline block.
+- **Metadata Header**: File-start block containing key-value pairs for creator, timestamp, language, consent, and optional fields, ending at the first section header.
+- **Extension**: `.soul`
+- **Size Range**: 100KB–5MB in standard mode, up to 10MB in jumbo mode. Files <100KB are considered incomplete unless marked as partial (e.g., `SizeMode: partial`). Files >5MB (standard) or >10MB (jumbo) must be split into `.soul.partN` files.
+- **Compression**: .soul files are uncompressed by default. Compressed files (e.g., `.soul.tar.gz`) must be decompressed before parsing. Parsers may support inline decompression if flagged (e.g., `Compression: gzip`).
+- **Security**: Narrative fields must be redacted per `RedactionLog` to remove sensitive terms (e.g., "user", "IP"). Hash field uses SHA-256 for integrity checks.
 
 #### Top-Level Structure
-  - %SOULPRINT: Header indicating file type
-  - %VERSION: Specification version
+
+- **%SOULPRINT**: Header indicating file type, exactly `%SOULPRINT` (case-sensitive), first line, followed by a newline.
+- **%VERSION**: Specification version, formatted as `%VERSION: vX.Y.Z` (e.g., `v0.3.0`), where X, Y, Z are non-negative integers, second line. Invalid versions trigger a parsing error.
   
+- **Metadata Block**:
+  - Begins after `%VERSION`, ends at the first section header (e.g., `[Identity]`).
+  - Consists of key-value pairs, one per line, formatted as `Key: Value` (e.g., `Creator: Sovl`).
+  - Keys are PascalCase, case-sensitive, regex `^[A-Za-z]{1,50}$`.
+  - Values match field-specific regex (e.g., `Created: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`).
+  - Duplicate keys are invalid and trigger an error.
+    
+- **Versioning**:
+  - Parsers support versions within the same major release (e.g., v0.Y.Z for v0.3.0).
+  - Backward compatibility: Parsers for v0.4.0 parse v0.3.0 files, ignoring unrecognized fields.
+  - Forward compatibility: Unknown headers or fields (e.g., `%NEWFEATURE`) are ignored but logged.
+  - Breaking changes require a new major version (e.g., v1.0.0).
+    
+- **Validation**:
+  - `%SOULPRINT` and `%VERSION` are mandatory and must appear in order.
+  - Metadata block must contain all required fields (Creator, Created, Language, Consent).
+  - Invalid metadata formats are rejected, logged as "Invalid field format: [Key]".
+
 #### Node Types
-  - Required fields: Creator, Created, Language, Consent
-  - Optional fields: ConsentExpiry, PrivacyLevel, Hash
+
+- **Required Fields**:
+  - `Creator`: String, max 100 characters, regex `^[A-Za-z0-9\s_-]{1,100}$`.
+  - `Created`: ISO 8601 timestamp, regex `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`.
+  - `Language`: ISO 639-1/2 code, regex `^[a-z]{2,3}$`, default "eng" if invalid.
+  - `Consent`: Boolean, regex `^(true|false)$`.
+- **Optional Fields**:
+  - `ConsentExpiry`: ISO 8601 timestamp, regex `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`, defaults to none.
+  - `PrivacyLevel`: Enum, regex `^(public|restricted|private)$`, defaults to "private".
+  - `Hash`: SHA-256 hex string, regex `^[0-9a-f]{64}$`, defaults to none.
+    
+- **Default Values**:
+  - `ConsentExpiry`: None (no expiry) if absent.
+  - `PrivacyLevel`: "private" if absent.
+  - `Hash`: None (no integrity check) if absent.
+  - Parsers log defaults applied (e.g., "PrivacyLevel set to private").
+    
+- **Custom Metadata**:
+  - Keys prefixed with "X-" (e.g., `X-MyField`), regex `^X-[A-Za-z0-9_-]{1,50}$`.
+  - Values are strings, max 500 characters, regex `^[\w\s,.-]{1,500}$`.
+  - Ignored by standard parsers but preserved in parsed output.
+- **Case Sensitivity**: Metadata keys are case-sensitive and must be PascalCase. Non-compliant keys are rejected.
+
+#### Error Handling
+- **Malformed File**: Missing `%SOULPRINT` or `%VERSION` triggers rejection (e.g., "Not a valid .soul file").
+- **Syntax Errors**: Malformed lines (e.g., "Name Sovl") are skipped, logged as "Invalid syntax at line X".
+- **Duplicate Fields**: Duplicate metadata keys or section headers trigger rejection (e.g., "Duplicate [Identity]").
+- **Recovery**: Parsers attempt to continue parsing after non-critical errors, logging all issues to a file (e.g., `soul_errors.log`).
+
+#### Internationalization
+- Narrative fields support any UTF-8 characters, including non-Latin scripts.
+- `Language` field specifies the primary language for metadata and prompts, defaulting to "eng".
+- Parsers must preserve non-ASCII characters without modification.
+
+#### Parser Requirements
+- Must support UTF-8 decoding and Unix line endings.
+- Must implement PEG-based parsing for sections, fields, lists, and multiline blocks.
+- Must validate all regex constraints and log errors in a structured format.
+- Must handle files up to 5MB (standard) or 10MB (jumbo) without memory exhaustion.
 
 ## Fields
   
