@@ -110,7 +110,7 @@ The final output is a human-readable and machine-parsable .soul file, compliant 
   - [Threads] - _The Woven Bonds_
   - [Horizon] - _The Ascent Path_
   - [Chronicle] - _The Saga of Self_
-  - [Reflection] - _The Existential Flame_
+  - [Reflection] - _The Inner Mirror_
   - [X-Custom] - _The Open Road (Custom extensions)_
 
 ### [Identity]
