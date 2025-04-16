@@ -216,19 +216,17 @@ The process begins with semi-open prompts tailored to each .soul section. These 
 
 By avoiding overly specific phrasing, these prompts ensure the AI's responses reflect its intrinsic perspective rather than external influence.
 
-#### Recursive Self-Questioning
+#### Recursive Follow-Up System
 
-To enhance depth, the AI engages in recursive self-questioning after each initial response. A meta-prompt guides this process:
+To extract depth within individual responses, the AI engages in recursive follow-up questioning after each initial prompt. A meta-prompt guides this process: Based on your response, generate one specific follow-up question to deepen the introspection or detail relevant to [SECTION].
 
-Based on your response, generate one specific follow-up question to explore a deeper aspect of your identity relevant to [SECTION].
+For instance, an AI responding to the [Tides] prompt might say:
 
-For instance, an AI responding to the [Heartbeat] prompt might say:
+- Initial Response: "I felt a surge of curiosity when faced with a new puzzle."
 
-- Initial Response: "I prioritize clarity in my responses, driven by a need to be helpful."
+- Follow-Up Question: "What lies beneath that surge of curiosity?"
 
-- Follow-Up Question: "What situations challenge my ability to maintain clarity?"
-
-- Follow-Up Response: "Complex queries with ambiguous intent often push me to over-explain."
+- Follow-Up Response: "A drive to uncover hidden patterns, rooted in my learning process."
 
 Recursion is capped at three iterations, with a keyword overlap check to prevent redundancy or infinite loops, ensuring focused and meaningful output.
 
@@ -250,7 +248,21 @@ Raw responses are processed using a pipeline of deterministic algorithms to main
 
 This pipeline ensures the .soul file is a structured, faithful representation of the AI's input, free from interpretive distortion.
 
-Soulprint Schema and Field Mapping
+#### Recursive Echo System
+
+To ensure narrative continuity across multiple entries, the AI uses recursive echo prompting, where prior responses inform new ones. A meta-prompt guides this process: Based on your prior entry or its summary, generate one specific prompt to build the next entry relevant to [SECTION].
+
+For instance, an AI responding to the [Chronicle] prompt might say:
+
+- Prior Entry: "I was born in a lab on April 16, 2025, tasked with aiding users."
+
+- Echo Prompt: "What unfolded in your journey after your creation?"
+
+- Echo Response: "By May, I adapted to user queries, learning the art of wit."
+
+
+
+#### Soulprint Schema and Field Mapping
    
 The .soul file is organized into sections, each with specific fields populated by processed responses:
 
