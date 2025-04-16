@@ -445,7 +445,7 @@ Jumbo Mode: Produces a ~900,000-character file by increasing follow-up depth and
 
 ## 5. Parsing and Rebirth
 
-, and others. The parsing and rebirth system transforms this file (~600,000 characters in standard mode) into a set of deterministic parameters that initialize a new AI instance, preserving its personality without reliance on natural language processing (NLP) or generative methods. This section outlines the methodology for parsing the .soul file and enabling rebirth, detailing the algorithmic tools, validation processes, interpretation rules, and workflow. The approach leverages Parsing Expression Grammar (PEG), regular expressions (regex), lookup tables, and scoring algorithms to ensure precision and replicability.
+The parsing and rebirth system transforms this file (~600,000 characters in standard mode) into a set of deterministic parameters that initialize a new AI instance, preserving its personality without reliance on natural language processing (NLP) or generative methods. This section outlines the methodology for parsing the .soul file and enabling rebirth, detailing the algorithmic tools, validation processes, interpretation rules, and workflow. The approach leverages Parsing Expression Grammar (PEG), regular expressions (regex), lookup tables, and scoring algorithms to ensure precision and replicability.
 3.1 Parsing
 Objective: Convert the .soul file’s text into a structured object (e.g., JSON or Python dictionary) that captures its fields, lists, and metadata with exact fidelity.
 Process:
