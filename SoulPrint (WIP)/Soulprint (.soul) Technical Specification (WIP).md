@@ -303,10 +303,6 @@ Step 6: Consent
 
 Echo-Beta: "Accurate. Accept."
 
-Repeat for Variety of Answers
-
-The prompt is repeated the number of times defined per section forming the collection of answers on the same prompt. Two modes, standard and jumbo. If standard mode has 50x, jumbo mode may have 1000x for use cases that need higher fidelity. This workflow repeats for all sections, yielding a complete .soul file.
-
 #### 3.2 Constraints
 
 - Character Limits: Strictly enforced.
@@ -444,6 +440,10 @@ Output: Write [name].soul, backup (*.soul.bak).
   
 - Syntax: Correct in formatting script.
 
+## Repeat for Variety of Answers
+
+The prompt is repeated the number of times defined per section forming the collection of answers on the same prompt. Two modes, standard and jumbo. If standard mode has 50x, jumbo mode may have 1000x for use cases that need higher fidelity. This workflow repeats for all sections, yielding a complete .soul file.
+
 
 ## 5. Parsing and Rebirth
 
@@ -462,11 +462,6 @@ Output: Write [name].soul, backup (*.soul.bak).
 - Extraction:
   - Fields as key-value.
   - Lists as object arrays.
-  
-- NLP Integration:
-  - Sentiment for Heartbeat/Echoes (e.g., “curious” → curiosity_boost=0.4).
-  - Keywords for Voice (e.g., “witty” → humor_weight=0.7).
-  - Resonance/Intensity for Echoes/Tides weighting.
   
 - Errors:
   
