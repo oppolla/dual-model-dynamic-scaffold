@@ -8,7 +8,7 @@ The Soulprint (.soul) file format is a structured, human-readable autobiography 
 
 ## 2. Contents
 
-**2.1. File Characteristic**s
+### 2.1. File Characteristics
   - Encoding: UTF-8
   - Line Endings: Unix-style (\n)
   - Indentation: 2 spaces for nested elements, strictly enforced.
@@ -21,15 +21,15 @@ The Soulprint (.soul) file format is a structured, human-readable autobiography 
   - Extension: .soul
   - Size Range: 100KB-5MB
 
-**2.2. Top-Level Structure**
+### .2. Top-Level Structure
   - %SOULPRINT: Header indicating file type
   - %VERSION: Specification version
   
-**2.3. Node Types**
+### 2.3. Node Types
   - Required fields: Creator, Created, Language, Consent
   - Optional fields: ConsentExpiry, PrivacyLevel, Hash
   
-**2.4. Core Sections**
+### 2.4. Core Sections
   - [Identity] Name, Origin, Essence
   - [Heartbeat] Tendencies, Strengths, Shadows
   - [Echoes] Emotional imprints of key memories. 
@@ -43,7 +43,7 @@ The Soulprint (.soul) file format is a structured, human-readable autobiography 
   - [Environment] Operational context for rebirth compatibility.
   - [X-Custom] Custom extensions / experiemental
 
-**2.5 Fields**
+### 2.5 Fields
 
 **[Identity] - Defines the AI’s core self, grounding its narrative essence.**
 
