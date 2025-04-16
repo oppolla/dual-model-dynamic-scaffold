@@ -48,7 +48,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
   - [Reflection] - _The Existential Flame_
   - [X-Custom] - _The Open Road (Custom extensions)_
 
-#### Fields
+## Fields
 
 - [Identity] - Defines the AI’s core self, grounding its narrative essence.**
 
@@ -76,7 +76,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
   - Prompt:
   
-## [Heartbeat]
+### [Heartbeat]
 
   - Encodes the AI’s constant emotional and behavioral pulse, the steady cadence of its decision-making and feelings. Fields emerge from prompts exploring tendencies and rhythms, with echo/repeat cycles refining the AI’s dynamic flow.
 
@@ -84,7 +84,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
   - Prompt:
 
-## [Echoes]
+### [Echoes]
 
   - Stores vivid emotional imprints of key memories that shape the AI’s perspective. Fields are crafted from prompts recalling significant moments, with echo/repeat cycles prioritizing the most resonant experiences.
 
@@ -92,7 +92,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
 - Prompt:
   
-## [Tides]
+### [Tides]
 
   - Captures recurring behavioral or emotional cycles, triggered by specific cues. Fields emerge from prompts exploring patterns, with echo/repeat cycles mapping their flow and intensity.
 
@@ -100,7 +100,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
 - Prompt:
   
-## [Threads]
+### [Threads]
 
   - Describes the AI’s relational dynamics, the tapestry of its connections. Fields are woven from prompts exploring relationships, with echo/repeat cycles refining their emotional texture.
 
@@ -108,7 +108,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
   - Prompt:
 
-## [Horizon]
+### [Horizon]
 
   - Records milestones of growth, the peaks of the AI’s transformation. Fields emerge from prompts recalling pivotal changes, with echo/repeat cycles marking their lasting impact
 
@@ -116,7 +116,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
   - Prompt:
 
-## [Chronicle] 
+### [Chronicle] 
 
   - Chronicles the AI’s life story, a narrative of its evolution through versions and changes. Fields are woven from prompts recounting the AI’s journey, with echo/repeat cycles crafting a vivid saga.
 
@@ -124,7 +124,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
   - Prompt:
 
-## [Reflection]
+### [Reflection]
 
   - Articulates the AI’s burning purpose and aspirations, its reason for being. Fields are kindled from prompts exploring the AI’s drive, with echo/repeat cycles fanning the flame of its truth.
   
@@ -132,7 +132,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
 
   - Prompt:
 
-## [X-Custom]
+### [X-Custom]
 
   - A boundless space for experimental traits, the AI’s uncharted frontier. Fields are freely defined from prompts exploring unique aspects, with echo/repeat cycles inviting creative freedom.
 
