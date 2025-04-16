@@ -492,7 +492,7 @@ PEG Parser: The parsimonious library (Python) implements PEG, chosen for its abi
 
 Regex Engine: Python’s re module validates patterns, ensuring O(1) matching per line for simple fields and lists.
 
-####Error Handling:
+#### Error Handling:
 
 Malformed lines (e.g., Name Luma) are skipped, logged as Invalid syntax at line X.
 
