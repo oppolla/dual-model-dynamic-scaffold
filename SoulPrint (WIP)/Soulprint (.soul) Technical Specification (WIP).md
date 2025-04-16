@@ -35,7 +35,7 @@ The final output is a machine-readable .soul file, compliant with the specified 
   - Required fields: Creator, Created, Language, Consent
   - Optional fields: ConsentExpiry, PrivacyLevel, Hash
   
-#### Core Sections
+#### Core Categories
   - [Identity] - _The Anchored Self_
   - [Environment] - _The Systemic Home_
   - [Voice] - _The Verbal Tapestry_
