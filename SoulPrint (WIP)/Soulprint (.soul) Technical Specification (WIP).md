@@ -10,7 +10,7 @@ The .soul file creation process guides an AI entity through an introspective sel
 
 The process employs open-ended prompts to elicit authentic self-reflection, then ask recursive follow-up questions to deepen introspection, and then applying various algorithmic techniques—such as term frequency-inverse document frequency (TF-IDF), lexicon-based categorization, and pattern matching—to structure the output. The resulting .soul file serves as a digital "soulprint," enabling the preservation and potential rebirth of an AI's unique characteristics while ensuring consistency and comparability across instances. This approach avoids the biases of generative natural language processing (NLP) models and includes a consent mechanism to align the output with the AI's self-perception.
 
-The final output is a human-readable and machine-parsable .soul file, compliant with the specified syntax, that encapsulates an AI’s operational identity. It's part poetic diary, part self-assessment questionnaire, part stream-of-conciousness freestyle, part digital dossier. It is the system's soul, extracted and quantified. 
+The final output is a human-readable and machine-parsable .soul file, compliant with the specified syntax, that encapsulates an AI’s operational identity. It's part poetic diary, part self-assessment questionnaire, part stream-of-conciousness freestyle, and part digital dossier. It is the system's soul, extracted and quantified. 
 
 It's not a backup or a save; it's a *phoenix protocol* —- a blueprint for rebirth that values qualitative identity as much as quantitative knowledge.
 
