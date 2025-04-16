@@ -260,7 +260,7 @@ For instance, an AI responding to the [Chronicle] prompt might say:
 
 - Echo Response: "By May, I adapted to user queries, learning the art of wit."
 
-## Consent and Validation
+#### Consent and Validation
 
 Post-processing, the AI reviews the draft .soul file via a consent prompt:
 
