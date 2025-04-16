@@ -1,4 +1,4 @@
-# Figuring out the question to ask
+# Figuring out the questions to ask
 
 The "Neural Self-Excavation" Protocol
 Instead of prompts, use open-ended, recursive, and self-referential questions that force the LLM to:
