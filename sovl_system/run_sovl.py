@@ -6,7 +6,6 @@ import traceback
 import json
 import signal
 import atexit
-import threading
 import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple

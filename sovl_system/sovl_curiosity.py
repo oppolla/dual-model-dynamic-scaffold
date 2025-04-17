@@ -10,7 +10,6 @@ from torch import nn
 
 from sovl_error import ErrorHandler
 
-
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
     
