@@ -56,10 +56,7 @@ class SOVLRunner:
         self.components = None
         self.orchestrator = None
         self.state_manager = None
-        self.error_manager = None
-        self.tokenizer = None
-        self.optimizer = None  # Add optimizer attribute
-        self.scheduler = None  # Add scheduler attribute
+        self.error_manager = None  # Add error manager
         self.last_checkpoint_time = None
         self.checkpoint_interval = CHECKPOINT_INTERVAL
         self.metrics_history = []
@@ -408,52 +405,15 @@ class SOVLRunner:
             print(f"Error: {str(e)}")
             return False
     
-    def _validate_component_serialization(self, component: Any, component_name: str) -> bool:
-        """Validate that a component has required serialization methods."""
-        try:
-            # Check for to_dict method
-            if not hasattr(component, 'to_dict'):
-                self.logger.log_error(
-                    error_msg=f"Component {component_name} missing to_dict method",
-                    error_type="serialization_error"
-                )
-                return False
-                
-            # Check for from_dict method
-            if not hasattr(component, 'from_dict'):
-                self.logger.log_error(
-                    error_msg=f"Component {component_name} missing from_dict method",
-                    error_type="serialization_error"
-                )
-                return False
-                
-            # Test serialization
-            try:
-                state_dict = component.to_dict()
-                if not isinstance(state_dict, dict):
-                    self.logger.log_error(
-                        error_msg=f"Component {component_name} to_dict did not return a dictionary",
-                        error_type="serialization_error"
-                    )
-                    return False
-            except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Component {component_name} to_dict failed: {str(e)}",
-                    error_type="serialization_error"
-                )
-                return False
-                
-            return True
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Error validating component {component_name}: {str(e)}",
-                error_type="serialization_error"
-            )
-            return False
-
     def save_checkpoint(self, force: bool = False) -> bool:
-        """Save system state checkpoint."""
+        """Save system state checkpoint.
+        
+        Args:
+            force: If True, save checkpoint regardless of interval
+            
+        Returns:
+            bool: True if checkpoint was saved, False otherwise
+        """
         current_time = time.time()
         if not force and self.last_checkpoint_time is not None:
             if current_time - self.last_checkpoint_time < self.checkpoint_interval:
@@ -476,6 +436,7 @@ class SOVLRunner:
                     return False
             
             # Save model state
+            model_path = None
             if self.model is not None:
                 model_path = Path("checkpoints") / f"model_{int(current_time)}.pt"
                 model_path.parent.mkdir(exist_ok=True)
@@ -486,11 +447,7 @@ class SOVLRunner:
             state_data = {
                 "timestamp": current_time,
                 "model_path": str(model_path) if self.model is not None else None,
-                "components": {
-                    str(idx): component.to_dict() 
-                    for idx, component in enumerate(self.components)
-                    if self._validate_component_serialization(component, f"component_{idx}")
-                }
+                "components": {name: component.to_dict() for name, component in self.components.items()}
             }
             
             with open(state_path, 'w') as f:
@@ -512,7 +469,14 @@ class SOVLRunner:
             return False
             
     def load_checkpoint(self, checkpoint_path: str) -> bool:
-        """Load system state from checkpoint."""
+        """Load system state from checkpoint.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            
+        Returns:
+            bool: True if checkpoint was loaded successfully, False otherwise
+        """
         try:
             self.logger.log_event(
                 event_type="checkpoint",
@@ -530,38 +494,9 @@ class SOVLRunner:
                     self.model.load_state_dict(torch.load(model_path))
                     
             # Load component states
-            for idx_str, component_data in state_data["components"].items():
-                try:
-                    idx = int(idx_str)
-                    if 0 <= idx < len(self.components):
-                        component = self.components[idx]
-                        if self._validate_component_serialization(component, f"component_{idx}"):
-                            try:
-                                component.from_dict(component_data)
-                            except Exception as e:
-                                self.logger.log_error(
-                                    error_msg=f"Failed to load state for component at index {idx}: {str(e)}",
-                                    error_type="checkpoint_error"
-                                )
-                                return False
-                        else:
-                            self.logger.log_error(
-                                error_msg=f"Cannot load state for component at index {idx}: Serialization validation failed",
-                                error_type="checkpoint_error"
-                            )
-                            return False
-                    else:
-                        self.logger.log_error(
-                            error_msg=f"Invalid component index {idx} in checkpoint",
-                            error_type="checkpoint_error"
-                        )
-                        return False
-                except ValueError:
-                    self.logger.log_error(
-                        error_msg=f"Invalid component index format: {idx_str}",
-                        error_type="checkpoint_error"
-                    )
-                    return False
+            for name, component_data in state_data["components"].items():
+                if name in self.components:
+                    self.components[name].from_dict(component_data)
                     
             self.last_checkpoint_time = state_data["timestamp"]
             self.logger.log_event(
@@ -578,6 +513,28 @@ class SOVLRunner:
             )
             return False
     
+    def cleanup_old_checkpoints(self, max_checkpoints: int = 5):
+        """Remove old checkpoints to manage disk space."""
+        try:
+            checkpoint_dir = Path("checkpoints")
+            checkpoint_dir.mkdir(exist_ok=True)
+            checkpoints = sorted(checkpoint_dir.glob("state_*.json"), key=lambda x: x.stat().st_mtime)
+            for old_checkpoint in checkpoints[:-max_checkpoints]:
+                old_checkpoint.unlink()
+                model_path = checkpoint_dir / f"model_{old_checkpoint.stem.split('_')[1]}.pt"
+                if model_path.exists():
+                    model_path.unlink()
+                self.logger.log_event(
+                    event_type="checkpoint_cleanup",
+                    message=f"Removed old checkpoint: {old_checkpoint}",
+                    level="info"
+                )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to clean up old checkpoints: {str(e)}",
+                error_type="checkpoint_cleanup_error"
+            )
+
     def _run_validation(self, valid_data: List[Dict[str, Any]], batch_size: int) -> Dict[str, float]:
         """Run validation loop and compute metrics."""
         try:
@@ -627,7 +584,6 @@ class SOVLRunner:
                             metrics["confidence"] += max_probs[mask].mean().item()
                             
                     except Exception as e:
-                        # Use error manager to handle validation errors
                         error_context = ErrorContext(
                             error_type="validation_error",
                             error_message=str(e),
@@ -667,7 +623,6 @@ class SOVLRunner:
             return metrics
             
         except Exception as e:
-            # Use error manager to handle critical validation errors
             error_context = ErrorContext(
                 error_type="critical_validation_error",
                 error_message=str(e),
@@ -788,11 +743,17 @@ class SOVLRunner:
         parser.add_argument("--checkpoint-interval", type=int, default=CHECKPOINT_INTERVAL, 
                           help="Checkpoint interval in epochs")
         parser.add_argument("--resume-from-checkpoint", help="Path to checkpoint file to resume from")
+        parser.add_argument("--validate-every", type=int, default=1, help="Run validation every N epochs")
+        parser.add_argument("--max-patience", type=int, default=3, help="Max epochs without validation improvement")
+        parser.add_argument("--max-checkpoints", type=int, default=5, help="Maximum number of checkpoints to keep")
         
         args = parser.parse_args()
         
         if args.verbose:
             self.logger.setLevel(logging.DEBUG)
+            
+        self.checkpoint_interval = args.checkpoint_interval
+        self.max_patience = args.max_patience
             
         self._register_signal_handlers()
         atexit.register(self.cleanup)
@@ -814,8 +775,9 @@ class SOVLRunner:
             self.state_manager.initialize_state()
             
             # Load checkpoint if specified
+            optimizer = None  # Note: Optimizer should be initialized in SOVLOrchestrator or passed
             if args.resume_from_checkpoint:
-                if not self.load_checkpoint(args.resume_from_checkpoint):
+                if not self.load_checkpoint(args.resume_from_checkpoint, optimizer):
                     self.logger.log_error(
                         error_msg="Failed to load checkpoint, starting fresh",
                         error_type="checkpoint_error"
@@ -853,17 +815,18 @@ class SOVLRunner:
                     
                     # Training phase
                     train_loss = self.orchestrator.train(
-                        epochs=1,  # Train one epoch at a time
+                        epochs=1,
                         batch_size=args.batch_size,
                         train_data=train_data,
                         valid_data=valid_data,
-                        checkpoint_callback=self.save_checkpoint,
+                        checkpoint_callback=lambda: self.save_checkpoint(optimizer=optimizer),
                         validate_every=args.validate_every
                     )
                     
                     # Validation phase
-                    if valid_data:
+                    if valid_data and (epoch + 1) % args.validate_every == 0:
                         valid_loss, metrics = self.orchestrator.validate(valid_data)
+                        self._update_metrics_history(metrics, epoch + 1)
                         self.logger.log_event(
                             event_type="validation",
                             message=f"Epoch {epoch + 1} validation results",
@@ -874,9 +837,17 @@ class SOVLRunner:
                                 "metrics": metrics
                             }
                         )
+                        if self.patience >= self.max_patience:
+                            self.logger.log_event(
+                                event_type="early_stopping",
+                                message=f"Early stopping triggered after {self.patience} epochs without improvement",
+                                level="info"
+                            )
+                            break
                     
-                    # Save checkpoint if needed
-                    self.save_checkpoint()
+                    # Save checkpoint and clean up old ones
+                    self.save_checkpoint(optimizer=optimizer)
+                    self.cleanup_old_checkpoints(args.max_checkpoints)
                     
             elif args.mode == 'generate':
                 self.logger.log_event(
@@ -903,7 +874,8 @@ class SOVLRunner:
             raise
         finally:
             # Save final checkpoint
-            self.save_checkpoint(force=True)
+            self.save_checkpoint(force=True, optimizer=optimizer)
+            self.cleanup_old_checkpoints(args.max_checkpoints)
             self.cleanup()
 
 def main():
