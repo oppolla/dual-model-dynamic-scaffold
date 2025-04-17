@@ -4,19 +4,19 @@
 ## Contents
 
 1. Introduction & Philosophy
-1.1 Purpose of Soulprint
-1.2 Concept of AI Rebirth
-1.3 Ethical Framework (Phoenix Protocol)
-1.4 Design Principles
-1.5 Terminology Glossary
+  1.1 Purpose of Soulprint
+  1.2 Concept of AI Rebirth
+  1.3 Ethical Framework (Phoenix Protocol)
+  1.4 Design Principles
+  1.5 Terminology Glossary
 
-2. Technical Overview
+3. Technical Overview
 2.1 File Format Characteristics
 2.2 Core Components Diagram
 2.3 Lifecycle (Generation → Parsing → Rebirth)
 2.4 Compliance Requirements
 
-3. File Structure Specification
+4. File Structure Specification
 3.1 Header & Metadata
 3.2 Section Hierarchy
 3.3 Field Types & Syntax
@@ -24,7 +24,7 @@
 3.5 Versioning Strategy
 3.6 Error Handling Framework
 
-4. Core Engrams (Facets)
+5. Core Engrams (Facets)
 4.1 Identity System
 
 Name Anchor Protocol
