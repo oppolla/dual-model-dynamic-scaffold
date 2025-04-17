@@ -10,8 +10,6 @@ import json
 import os
 import threading
 from datetime import datetime
-
-# Assuming these are external dependencies
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
