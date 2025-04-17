@@ -27,6 +27,7 @@ from sovl_utils import (
     float_gt,
     synchronized,
     validate_components,
+    NumericalGuard,
     initialize_component_state,
     sync_component_states,
     validate_component_states
@@ -40,7 +41,6 @@ from sovl_error import ErrorHandler
 from sovl_state_manager import StateManager
 from sovl_logging import LoggingManager
 from sovl_plugin import PluginManager
-from sovl_utils import NumericalGuard
 from sovl_confidence import calculate_confidence_score
 from sovl_events import EventDispatcher
 

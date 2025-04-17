@@ -443,18 +443,7 @@ class DataManager:
         state: Optional[SOVLState] = None,
         error_handler: Optional[ErrorManager] = None
     ):
-        """Initialize DataManager with configuration and dependencies.
-        
-        Args:
-            config_manager: ConfigManager instance for configuration handling
-            logger: Logger instance for logging
-            state: Optional SOVLState instance for state management
-            error_handler: Optional ErrorManager instance for error handling
-            
-        Raises:
-            ValueError: If config_manager or logger is None
-            TypeError: If config_manager is not a ConfigManager instance
-        """
+        """Initialize DataManager with configuration and dependencies."""
         if not config_manager:
             raise ValueError("config_manager cannot be None")
         if not logger:
@@ -468,6 +457,8 @@ class DataManager:
         self.error_handler = error_handler or ErrorManager()
         self._initialized = False
         self._validation_errors = []
+        self._cache = {}
+        self._last_update_time = time.time()
         
         # Initialize configuration
         self._initialize_config()
@@ -493,6 +484,8 @@ class DataManager:
             data_config = self.config_manager.get_section("data_config")
             self.min_entries = int(data_config.get("min_entries", 10))
             self.validation_threshold = float(data_config.get("validation_threshold", 0.8))
+            self.max_memory_mb = float(data_config.get("max_memory_mb", 1024.0))
+            self.memory_threshold = float(data_config.get("memory_threshold", 0.8))
             
             # Validate configuration values
             self._validate_config_values()
@@ -511,7 +504,9 @@ class DataManager:
                     "batch_size": self.batch_size,
                     "max_retries": self.max_retries,
                     "min_entries": self.min_entries,
-                    "validation_threshold": self.validation_threshold
+                    "validation_threshold": self.validation_threshold,
+                    "max_memory_mb": self.max_memory_mb,
+                    "memory_threshold": self.memory_threshold
                 }
             )
             
@@ -547,6 +542,12 @@ class DataManager:
             if not 0.0 <= self.validation_threshold <= 1.0:
                 raise ValueError(f"Invalid validation_threshold: {self.validation_threshold}. Must be between 0.0 and 1.0.")
                 
+            if not 1.0 <= self.max_memory_mb <= 16384.0:
+                raise ValueError(f"Invalid max_memory_mb: {self.max_memory_mb}. Must be between 1.0 and 16384.0.")
+                
+            if not 0.0 <= self.memory_threshold <= 1.0:
+                raise ValueError(f"Invalid memory_threshold: {self.memory_threshold}. Must be between 0.0 and 1.0.")
+                
         except Exception as e:
             self.logger.record_event(
                 event_type="data_config_validation_failed",
@@ -556,6 +557,164 @@ class DataManager:
             )
             raise
             
+    def _check_memory_usage(self) -> bool:
+        """Check if memory usage is within acceptable limits."""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / (1024 * 1024)
+            
+            if memory_mb > self.max_memory_mb * self.memory_threshold:
+                self.logger.record_event(
+                    event_type="memory_threshold_exceeded",
+                    message="Memory usage exceeded threshold",
+                    level="warning",
+                    additional_info={
+                        "memory_usage_mb": memory_mb,
+                        "max_memory_mb": self.max_memory_mb,
+                        "threshold": self.memory_threshold
+                    }
+                )
+                return False
+            return True
+        except Exception as e:
+            self.logger.record_event(
+                event_type="memory_check_error",
+                message=f"Failed to check memory usage: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            return True
+            
+    def _process_batch(
+        self,
+        batch: List[Dict[str, Any]],
+        data: List[Dict[str, Any]]
+    ) -> None:
+        """Process a batch of entries with memory monitoring."""
+        try:
+            # Check memory before processing
+            if not self._check_memory_usage():
+                self.logger.record_event(
+                    event_type="batch_processing_skipped",
+                    message="Skipping batch processing due to memory constraints",
+                    level="warning",
+                    additional_info={
+                        "batch_size": len(batch),
+                        "current_data_size": len(data)
+                    }
+                )
+                return
+                
+            # Process batch
+            data.extend(batch)
+            
+            # Log memory usage periodically
+            if len(data) % (self.batch_size * 10) == 0:
+                self._log_memory_usage()
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="batch_processing_error",
+                message=f"Failed to process batch: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
+    def _log_memory_usage(self) -> None:
+        """Log current memory usage."""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / (1024 * 1024)
+            
+            self.logger.record_event(
+                event_type="memory_usage",
+                message="Current memory usage",
+                level="info",
+                additional_info={
+                    "memory_usage_mb": memory_mb,
+                    "max_memory_mb": self.max_memory_mb,
+                    "threshold": self.memory_threshold
+                }
+            )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="memory_logging_error",
+                message=f"Failed to log memory usage: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            
+    def get_cached(self, key: str, ttl: float = 60.0) -> Any:
+        """Get cached value with time-to-live."""
+        if key in self._cache:
+            value, timestamp = self._cache[key]
+            if time.time() - timestamp <= ttl:
+                return value
+        return None
+        
+    def set_cached(self, key: str, value: Any) -> None:
+        """Set cached value."""
+        self._cache[key] = (value, time.time())
+        
+    def clear_cache(self) -> None:
+        """Clear all cached values."""
+        self._cache.clear()
+        
+    def _validate_entry(self, entry: Dict[str, Any]) -> bool:
+        """Validate a single data entry with improved error reporting."""
+        try:
+            required_fields = self.config_manager.get("data_config.required_fields", [])
+            validation_errors = []
+            
+            for field in required_fields:
+                if field not in entry:
+                    validation_errors.append(f"Missing required field: {field}")
+                    continue
+                    
+                value = entry[field]
+                field_config = self.config_manager.get(f"data_config.field_config.{field}", {})
+                
+                # Type validation
+                if "type" in field_config:
+                    expected_type = field_config["type"]
+                    if not isinstance(value, expected_type):
+                        validation_errors.append(f"Invalid type for {field}: expected {expected_type}, got {type(value)}")
+                        continue
+                        
+                # Range validation
+                if "min" in field_config and value < field_config["min"]:
+                    validation_errors.append(f"Value too small for {field}: {value} < {field_config['min']}")
+                if "max" in field_config and value > field_config["max"]:
+                    validation_errors.append(f"Value too large for {field}: {value} > {field_config['max']}")
+                    
+            if validation_errors:
+                self.logger.record_event(
+                    event_type="entry_validation_failed",
+                    message="Data entry validation failed",
+                    level="warning",
+                    additional_info={
+                        "entry": str(entry)[:100],
+                        "validation_errors": validation_errors
+                    }
+                )
+                return False
+                
+            return True
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="entry_validation_error",
+                message=f"Error during entry validation: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            return False
+
     def _on_config_change(self) -> None:
         """Handle configuration changes."""
         try:

@@ -791,10 +791,14 @@ class DataStats:
 class SOVLState(StateBase):
     """Manages the state of the SOVL system."""
     
+    STATE_VERSION = "1.0"
+    
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         super().__init__(config_manager, logger)
         self.device = device
         self.lock = threading.Lock()
+        self._cache = {}
+        self._last_update_time = time.time()
         self._initialize_state()
         
     @synchronized("lock")
@@ -812,8 +816,12 @@ class SOVLState(StateBase):
                 maxlen=self.config_manager.get("max_messages"),
                 conversation_id=str(uuid.uuid4())
             )
-            # Initialize data stats
             self.data_stats = DataStats()
+            self.version = self.STATE_VERSION
+            
+            # Initialize memory tracking
+            self._memory_threshold = self.config_manager.get("memory_config.memory_threshold", 0.85)
+            self._memory_decay_rate = self.config_manager.get("memory_config.memory_decay_rate", 0.95)
             
             self.logger.record_event(
                 event_type="state_initialized",
@@ -830,60 +838,104 @@ class SOVLState(StateBase):
             )
             raise
 
-    @synchronized("lock")
-    def update_data_stats(self, 
-                         total_entries: int,
-                         valid_entries: int,
-                         invalid_entries: int,
-                         validation_errors: Dict[str, int],
-                         average_entry_length: float) -> None:
-        """Update data statistics and notify interested components."""
+    def _prune_dream_memory(self) -> None:
+        """Prune dream memory if it exceeds memory threshold."""
         try:
-            # Update data stats
-            self.data_stats.update(
-                total_entries=total_entries,
-                valid_entries=valid_entries,
-                invalid_entries=invalid_entries,
-                validation_errors=validation_errors,
-                average_entry_length=average_entry_length
-            )
-            
-            # Log the update
-            self.logger.record_event(
-                event_type="data_stats_updated",
-                message="Data statistics updated",
-                level="info",
-                conversation_id=self.history.conversation_id,
-                state_hash=self.state_hash(),
-                additional_info=self.data_stats.to_dict()
-            )
-            
+            if self.total_dream_memory_mb > self.config_manager.get("memory_config.max_dream_memory_mb", 512.0):
+                # Sort memories by weight and timestamp
+                sorted_memories = sorted(
+                    self.dream_memory,
+                    key=lambda x: (x["weight"], x["timestamp"]),
+                    reverse=True
+                )
+                
+                # Keep only the most important memories
+                keep_count = int(len(sorted_memories) * self._memory_decay_rate)
+                self.dream_memory = deque(sorted_memories[:keep_count], maxlen=self.dream_memory.maxlen)
+                
+                # Recalculate total memory
+                self._update_memory_usage()
+                
+                self.logger.record_event(
+                    event_type="dream_memory_pruned",
+                    message="Dream memory pruned due to size constraints",
+                    level="info",
+                    additional_info={
+                        "before_size": self.total_dream_memory_mb,
+                        "after_size": self._calculate_memory_usage(),
+                        "kept_memories": len(self.dream_memory)
+                    }
+                )
         except Exception as e:
             self.logger.log_error(
-                error_msg=f"Failed to update data stats: {str(e)}",
-                error_type="data_stats_update_error",
-                stack_trace=traceback.format_exc(),
-                conversation_id=self.history.conversation_id,
-                state_hash=self.state_hash()
+                error_msg=f"Failed to prune dream memory: {str(e)}",
+                error_type="memory_pruning_error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def _update_memory_usage(self) -> None:
+        """Update memory usage statistics."""
+        self.total_dream_memory_mb = self._calculate_memory_usage()
+        if self.total_dream_memory_mb > self.config_manager.get("memory_config.max_dream_memory_mb", 512.0):
+            self._prune_dream_memory()
+
+    def _calculate_memory_usage(self) -> float:
+        """Calculate current memory usage in MB."""
+        total_bytes = 0
+        for memory in self.dream_memory:
+            if isinstance(memory["tensor"], torch.Tensor):
+                total_bytes += memory["tensor"].element_size() * memory["tensor"].nelement()
+        return total_bytes / (1024 * 1024)  # Convert to MB
+
+    def _compress_tensor(self, tensor: torch.Tensor) -> Dict[str, Any]:
+        """Compress tensor for storage."""
+        try:
+            with NumericalGuard():
+                # Convert to numpy and compress
+                np_array = tensor.cpu().numpy()
+                return {
+                    "shape": np_array.shape,
+                    "dtype": str(np_array.dtype),
+                    "data": np_array.tobytes()
+                }
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to compress tensor: {str(e)}",
+                error_type="tensor_compression_error",
+                stack_trace=traceback.format_exc()
             )
             raise
 
-    def get_data_stats(self) -> Dict[str, Any]:
-        """Get current data statistics."""
-        with self.lock:
-            return self.data_stats.to_dict()
+    def _decompress_tensor(self, compressed: Dict[str, Any]) -> torch.Tensor:
+        """Decompress tensor from storage."""
+        try:
+            with NumericalGuard():
+                # Reconstruct numpy array
+                np_array = np.frombuffer(
+                    compressed["data"],
+                    dtype=np.dtype(compressed["dtype"])
+                ).reshape(compressed["shape"])
+                return torch.tensor(np_array, device=self.device)
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to decompress tensor: {str(e)}",
+                error_type="tensor_decompression_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
         with self.lock:
             state_dict = {
+                "version": self.version,
                 "seen_prompts": list(self.seen_prompts),
                 "temperament_score": self.temperament_score,
                 "last_temperament_score": self.last_temperament_score,
                 "confidence_history": list(self.confidence_history),
                 "temperament_history": list(self.temperament_history),
                 "dream_memory": [{
-                    "tensor": m["tensor"].cpu().numpy().tolist(),
+                    "tensor": self._compress_tensor(m["tensor"]),
                     "weight": m["weight"],
                     "metadata": m["metadata"],
                     "timestamp": m["timestamp"]
@@ -899,6 +951,14 @@ class SOVLState(StateBase):
         """Create state from dictionary."""
         state = cls(config_manager, logger, device)
         with state.lock:
+            # Validate version
+            if data.get("version") != cls.STATE_VERSION:
+                logger.log_error(
+                    error_msg=f"State version mismatch: expected {cls.STATE_VERSION}, got {data.get('version')}",
+                    error_type="state_version_error"
+                )
+                raise StateError("State version mismatch")
+            
             state.seen_prompts = set(data.get("seen_prompts", []))
             state.temperament_score = data.get("temperament_score", 0.0)
             state.last_temperament_score = data.get("last_temperament_score", 0.0)
@@ -907,19 +967,94 @@ class SOVLState(StateBase):
             state.temperament_history = deque(data.get("temperament_history", []), 
                                            maxlen=config_manager.get("temperament_history_maxlen"))
             state.dream_memory = deque(maxlen=config_manager.get("dream_memory_maxlen"))
+            
+            # Decompress tensors
             for m in data.get("dream_memory", []):
-                tensor = torch.tensor(m["tensor"], device=device)
+                tensor = state._decompress_tensor(m["tensor"])
                 state.dream_memory.append({
                     "tensor": tensor,
                     "weight": m["weight"],
                     "metadata": m["metadata"],
                     "timestamp": m["timestamp"]
                 })
+            
             state.total_dream_memory_mb = data.get("total_dream_memory_mb", 0.0)
             state.history = ConversationHistory.from_dict(data.get("history", {}), 
                                                        maxlen=config_manager.get("max_messages"))
             state.data_stats = DataStats.from_dict(data.get("data_stats", {}))
+            
+            # Validate state after loading
+            state._validate_state()
+            
         return state
+
+    def _validate_state(self) -> None:
+        """Validate state integrity."""
+        try:
+            # Validate data types
+            assert isinstance(self.seen_prompts, set), "seen_prompts must be a set"
+            assert isinstance(self.temperament_score, float), "temperament_score must be a float"
+            assert isinstance(self.confidence_history, deque), "confidence_history must be a deque"
+            assert isinstance(self.temperament_history, deque), "temperament_history must be a deque"
+            assert isinstance(self.dream_memory, deque), "dream_memory must be a deque"
+            
+            # Validate value ranges
+            assert 0 <= self.temperament_score <= 1, "temperament_score must be in [0, 1]"
+            assert all(0 <= score <= 1 for score in self.confidence_history), "confidence scores must be in [0, 1]"
+            assert all(0 <= score <= 1 for score in self.temperament_history), "temperament scores must be in [0, 1]"
+            
+            # Validate dream memory
+            for memory in self.dream_memory:
+                assert isinstance(memory["tensor"], torch.Tensor), "dream memory tensor must be a torch.Tensor"
+                assert 0 <= memory["weight"] <= 1, "dream memory weight must be in [0, 1]"
+                assert isinstance(memory["timestamp"], float), "dream memory timestamp must be a float"
+            
+            # Validate memory usage
+            assert self.total_dream_memory_mb >= 0, "total_dream_memory_mb must be non-negative"
+            
+        except AssertionError as e:
+            self.logger.log_error(
+                error_msg=f"State validation failed: {str(e)}",
+                error_type="state_validation_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise StateError(f"State validation failed: {str(e)}")
+
+    def get_cached(self, key: str, ttl: float = 60.0) -> Any:
+        """Get cached value with time-to-live."""
+        with self.lock:
+            if key in self._cache:
+                value, timestamp = self._cache[key]
+                if time.time() - timestamp <= ttl:
+                    return value
+            return None
+
+    def set_cached(self, key: str, value: Any) -> None:
+        """Set cached value."""
+        with self.lock:
+            self._cache[key] = (value, time.time())
+
+    def clear_cache(self) -> None:
+        """Clear all cached values."""
+        with self.lock:
+            self._cache.clear()
+
+    def state_hash(self) -> str:
+        """Generate a hash of the current state."""
+        state_dict = {
+            "seen_prompts": tuple(self.seen_prompts),
+            "temperament_score": self.temperament_score,
+            "last_temperament_score": self.last_temperament_score,
+            "confidence_history": tuple(self.confidence_history),
+            "temperament_history": tuple(self.temperament_history),
+            "dream_memory": tuple(
+                (self._compress_tensor(m["tensor"]), m["weight"], m["metadata"], m["timestamp"]) for m in self.dream_memory
+            ),
+            "total_dream_memory_mb": self.total_dream_memory_mb,
+            "history": self.history.to_dict(),
+            "data_stats": self.data_stats.to_dict()
+        }
+        return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
 class StateManager:
     """Manages the SOVL state and its persistence."""
