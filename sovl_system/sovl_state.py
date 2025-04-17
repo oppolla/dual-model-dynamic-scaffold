@@ -764,22 +764,45 @@ class SOVLState(StateBase):
             self.log_event("memory_calculation_failed", f"Failed to calculate memory usage: {str(e)}", level="warning")
             return 0.0
 
-    def _compress_tensor(self, tensor: torch.Tensor) -> Dict[str, Any]:
-        """Compress tensor for storage."""
+    def _compress_tensor(self, tensor: torch.Tensor, target_device: Optional[str] = None) -> Dict[str, Any]:
+        """Compress tensor for storage.
+        
+        Args:
+            tensor: The tensor to compress
+            target_device: Optional target device to move tensor to before compression
+                          If None, tensor will be moved to CPU
+        """
         try:
             with NumericalGuard():
-                np_array = tensor.cpu().numpy()
+                # Move tensor to target device if specified, otherwise move to CPU
+                if target_device is not None:
+                    tensor = tensor.to(target_device)
+                else:
+                    tensor = tensor.cpu()
+                np_array = tensor.numpy()
                 return {"shape": np_array.shape, "dtype": str(np_array.dtype), "data": np_array.tobytes()}
         except Exception as e:
             self.log_error(f"Failed to compress tensor: {str(e)}", error_type="tensor_compression_error")
             raise
 
-    def _decompress_tensor(self, compressed: Dict[str, Any]) -> torch.Tensor:
-        """Decompress tensor from storage."""
+    def _decompress_tensor(self, compressed: Dict[str, Any], target_device: Optional[str] = None) -> torch.Tensor:
+        """Decompress tensor from storage.
+        
+        Args:
+            compressed: The compressed tensor data
+            target_device: Optional target device to move tensor to after decompression
+                          If None, tensor will be moved to the instance's device
+        """
         try:
             with NumericalGuard():
                 np_array = np.frombuffer(compressed["data"], dtype=np.dtype(compressed["dtype"])).reshape(compressed["shape"])
-                return torch.tensor(np_array, device=self.device)
+                tensor = torch.tensor(np_array)
+                # Move tensor to target device if specified, otherwise use instance's device
+                if target_device is not None:
+                    tensor = tensor.to(target_device)
+                else:
+                    tensor = tensor.to(self.device)
+                return tensor
         except Exception as e:
             self.log_error(f"Failed to decompress tensor: {str(e)}", error_type="tensor_decompression_error")
             raise
@@ -795,7 +818,7 @@ class SOVLState(StateBase):
                 "confidence_history": list(self.confidence_history),
                 "temperament_history": list(self.temperament_history),
                 "dream_memory": [{
-                    "tensor": self._compress_tensor(m["tensor"]),
+                    "tensor": self._compress_tensor(m["tensor"], target_device="cpu"),
                     "weight": m["weight"],
                     "metadata": m["metadata"],
                     "timestamp": m["timestamp"]
@@ -824,7 +847,7 @@ class SOVLState(StateBase):
             state.dream_memory = deque(maxlen=config_manager.get("controls_config.dream_memory_maxlen", 10))
             for m in data.get("dream_memory", []):
                 state.dream_memory.append({
-                    "tensor": state._decompress_tensor(m["tensor"]),
+                    "tensor": state._decompress_tensor(m["tensor"], target_device=device),
                     "weight": m["weight"],
                     "metadata": m["metadata"],
                     "timestamp": m["timestamp"]

@@ -79,6 +79,7 @@ class CommandHandler(cmd.Cmd):
         self.sovl_system = sovl_system
         self.history = deque(maxlen=100)
         self.current_index = -1
+        self.debug_mode = False
         
     def preloop(self):
         """Initialize the command handler."""
@@ -185,6 +186,156 @@ class CommandHandler(cmd.Cmd):
         else:
             print("No matching commands found")
             
+    def do_debug(self, arg):
+        """
+        Debug command with various subcommands:
+        debug on/off - Enable/disable debug mode
+        debug state - Show internal state
+        debug components - List active components
+        debug errors - Show recent errors
+        debug memory - Show memory usage
+        debug trace - Show execution trace
+        """
+        if not arg:
+            print("Debug commands:")
+            print("  debug on/off - Enable/disable debug mode")
+            print("  debug state - Show internal state")
+            print("  debug components - List active components")
+            print("  debug errors - Show recent errors")
+            print("  debug memory - Show memory usage")
+            print("  debug trace - Show execution trace")
+            return
+
+        cmd = arg.lower().split()
+        if cmd[0] == "on":
+            self.debug_mode = True
+            print("Debug mode enabled")
+            self.sovl_system.logger.set_level(logging.DEBUG)
+        elif cmd[0] == "off":
+            self.debug_mode = False
+            print("Debug mode disabled")
+            self.sovl_system.logger.set_level(logging.INFO)
+        elif cmd[0] == "state":
+            self._show_debug_state()
+        elif cmd[0] == "components":
+            self._show_debug_components()
+        elif cmd[0] == "errors":
+            self._show_debug_errors()
+        elif cmd[0] == "memory":
+            self._show_debug_memory()
+        elif cmd[0] == "trace":
+            self._show_debug_trace()
+        else:
+            print(f"Unknown debug command: {cmd[0]}")
+            print("Type 'debug' for available debug commands")
+
+    def _show_debug_state(self):
+        """Show internal state of the system."""
+        try:
+            state = self.sovl_system.state_tracker.get_state()
+            print("\nSystem State:")
+            print("-------------")
+            for key, value in state.items():
+                print(f"{key}: {value}")
+        except Exception as e:
+            print(f"Error getting system state: {e}")
+
+    def _show_debug_components(self):
+        """List all active components and their status."""
+        try:
+            components = {
+                "Model Loader": hasattr(self.sovl_system, "model_loader"),
+                "Curiosity Engine": hasattr(self.sovl_system, "curiosity_engine"),
+                "Memory Monitor": hasattr(self.sovl_system, "memory_monitor"),
+                "State Tracker": hasattr(self.sovl_system, "state_tracker"),
+                "Error Manager": hasattr(self.sovl_system, "error_manager"),
+                "Config Handler": hasattr(self.sovl_system, "config_handler")
+            }
+            print("\nActive Components:")
+            print("-----------------")
+            for component, active in components.items():
+                status = "Active" if active else "Inactive"
+                print(f"{component}: {status}")
+        except Exception as e:
+            print(f"Error listing components: {e}")
+
+    def _show_debug_errors(self):
+        """Show recent errors from the error manager."""
+        try:
+            if hasattr(self.sovl_system, "error_manager"):
+                errors = self.sovl_system.error_manager.get_recent_errors()
+                if errors:
+                    print("\nRecent Errors:")
+                    print("--------------")
+                    for error in errors:
+                        print(f"Type: {error['type']}")
+                        print(f"Message: {error['message']}")
+                        print(f"Time: {error['timestamp']}")
+                        if 'stack_trace' in error:
+                            print(f"Stack Trace:\n{error['stack_trace']}")
+                        print("-" * 50)
+                else:
+                    print("No recent errors found")
+            else:
+                print("Error manager not available")
+        except Exception as e:
+            print(f"Error retrieving error history: {e}")
+
+    def _show_debug_memory(self):
+        """Show detailed memory usage statistics."""
+        try:
+            if hasattr(self.sovl_system, "memory_monitor"):
+                stats = self.sovl_system.get_memory_stats()
+                print("\nMemory Usage:")
+                print("-------------")
+                for key, value in stats.items():
+                    print(f"{key}: {value}")
+                if torch.cuda.is_available():
+                    print("\nGPU Memory:")
+                    print("-----------")
+                    print(f"Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+                    print(f"Cached: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
+            else:
+                print("Memory monitor not available")
+        except Exception as e:
+            print(f"Error getting memory stats: {e}")
+
+    def _show_debug_trace(self):
+        """Show execution trace of recent operations."""
+        try:
+            if hasattr(self.sovl_system, "logger"):
+                trace = self.sovl_system.logger.get_recent_events()
+                if trace:
+                    print("\nExecution Trace:")
+                    print("----------------")
+                    for event in trace:
+                        print(f"Event: {event['event_type']}")
+                        print(f"Message: {event['message']}")
+                        print(f"Time: {event['timestamp']}")
+                        if 'additional_info' in event:
+                            print("Additional Info:")
+                            for key, value in event['additional_info'].items():
+                                print(f"  {key}: {value}")
+                        print("-" * 50)
+                else:
+                    print("No recent events found")
+            else:
+                print("Logger not available")
+        except Exception as e:
+            print(f"Error retrieving execution trace: {e}")
+
+    def help_debug(self):
+        """Show help for debug command."""
+        print("\nDebug Commands:")
+        print("-------------")
+        print("debug on/off        - Enable/disable debug mode")
+        print("debug state         - Show internal state")
+        print("debug components    - List active components")
+        print("debug errors        - Show recent errors")
+        print("debug memory        - Show memory usage")
+        print("debug trace         - Show execution trace")
+        print("\nUse these commands to inspect and troubleshoot the system.")
+
     def default(self, line):
         """Handle unknown commands."""
         print(f"Unknown command: {line}")

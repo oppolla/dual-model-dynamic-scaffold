@@ -336,43 +336,119 @@ class Logger(ILoggerClient):
     _lock = RLock()
     
     def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-    
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+            return cls._instance
+            
     def __init__(self):
         if not hasattr(self, '_initialized'):
-            with self._lock:
-                if not hasattr(self, '_initialized'):
-                    self._manager = LogManager()
-                    self._initialized = True
-    
-    def configure(self, config: LoggerConfig) -> None:
-        """Configure the logger with new settings."""
-        self._manager.configure(config)
-    
-    def log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
-        """Log an event."""
-        self._manager.log_event(event_type, message, level, **kwargs)
-    
-    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, **kwargs) -> None:
-        """Log an error."""
-        self._manager.log_error(error_msg, error_type, stack_trace, **kwargs)
-    
-    def get_logs(self, start_time: float = None, end_time: float = None, 
-                event_type: str = None, level: str = None) -> List[Dict[str, Any]]:
-        """Get logs matching the specified criteria."""
-        return self._manager.get_logs(start_time, end_time, event_type, level)
-    
-    def clear_logs(self) -> None:
-        """Clear all logs."""
-        self._manager.clear_logs()
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get logging statistics."""
-        return self._manager.get_stats()
+            self._initialized = True
+            self._log_queue = deque(maxlen=1000)
+            self._event_queue = deque(maxlen=100)
+            self._error_queue = deque(maxlen=50)
+            self._debug_mode = False
+            self._log_level = logging.INFO
+            self._lock = RLock()
+            
+    def set_level(self, level: int) -> None:
+        """Set the logging level."""
+        with self._lock:
+            self._log_level = level
+            self._debug_mode = level == logging.DEBUG
+            
+    def is_debug_enabled(self) -> bool:
+        """Check if debug mode is enabled."""
+        return self._debug_mode
+        
+    def get_recent_events(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get recent events from the event queue."""
+        with self._lock:
+            return list(self._event_queue)[-limit:]
+            
+    def get_recent_errors(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get recent errors from the error queue."""
+        with self._lock:
+            return list(self._error_queue)[-limit:]
+            
+    def get_debug_stats(self) -> Dict[str, Any]:
+        """Get debug statistics about the logging system."""
+        with self._lock:
+            return {
+                "debug_mode": self._debug_mode,
+                "log_level": self._log_level,
+                "queue_sizes": {
+                    "log_queue": len(self._log_queue),
+                    "event_queue": len(self._event_queue),
+                    "error_queue": len(self._error_queue)
+                },
+                "queue_limits": {
+                    "log_queue": self._log_queue.maxlen,
+                    "event_queue": self._event_queue.maxlen,
+                    "error_queue": self._error_queue.maxlen
+                }
+            }
+            
+    def record_event(self, event_type: str, message: str, level: str = "info", additional_info: Dict[str, Any] = None) -> None:
+        """Record an event with timestamp and optional additional information."""
+        with self._lock:
+            event = {
+                "event_type": event_type,
+                "message": message,
+                "level": level,
+                "timestamp": datetime.now().isoformat()
+            }
+            if additional_info:
+                event["additional_info"] = additional_info
+                
+            self._event_queue.append(event)
+            
+            if level == "error":
+                self._error_queue.append(event)
+                
+            if self._debug_mode or level in ["error", "warning"]:
+                print(f"[{level.upper()}] {event_type}: {message}")
+                if additional_info:
+                    print(f"Additional Info: {json.dumps(additional_info, indent=2)}")
+                    
+    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, additional_info: Dict[str, Any] = None) -> None:
+        """Log an error with detailed information."""
+        with self._lock:
+            error = {
+                "error_type": error_type or "unknown_error",
+                "message": error_msg,
+                "timestamp": datetime.now().isoformat(),
+                "stack_trace": stack_trace
+            }
+            if additional_info:
+                error["additional_info"] = additional_info
+                
+            self._error_queue.append(error)
+            
+            if self._debug_mode:
+                print(f"[ERROR] {error_type}: {error_msg}")
+                if stack_trace:
+                    print(f"Stack Trace:\n{stack_trace}")
+                if additional_info:
+                    print(f"Additional Info: {json.dumps(additional_info, indent=2)}")
+                    
+    def clear_queues(self) -> None:
+        """Clear all event and error queues."""
+        with self._lock:
+            self._log_queue.clear()
+            self._event_queue.clear()
+            self._error_queue.clear()
+            
+    def get_log_level_name(self) -> str:
+        """Get the current log level name."""
+        level_names = {
+            logging.DEBUG: "DEBUG",
+            logging.INFO: "INFO",
+            logging.WARNING: "WARNING",
+            logging.ERROR: "ERROR",
+            logging.CRITICAL: "CRITICAL"
+        }
+        return level_names.get(self._log_level, "UNKNOWN")
 
 class LoggingManager:
     """Manages logging setup and configuration for the SOVL system."""

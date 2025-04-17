@@ -234,148 +234,135 @@ class ModelLoader:
             raise
 
 class StateTracker:
-    """Tracks and manages system state."""
+    """Tracks system state and history."""
     
     def __init__(self, context: SystemContext):
-        """
-        Initialize state tracker with system context.
-        
-        Args:
-            context: System context containing shared resources
-        """
+        """Initialize state tracker with system context."""
         self.context = context
-        self.logger = context.logger
-        self.config = context.config_handler.get_section("state")
-        self.state = {}
+        self.state = None
+        self._state_history = deque(maxlen=100)  # Keep last 100 states
+        self._state_changes = deque(maxlen=50)  # Keep last 50 state changes
+        self._lock = Lock()
         
-        # Subscribe to configuration changes
-        self.context.event_dispatcher.subscribe(
-            "config_changed",
-            self._on_config_change
-        )
-        
-        # Validate initial state configuration
-        if not self._validate_state_config():
-            raise StateTrackingError(
-                "Invalid state configuration",
-                self.config,
-                traceback.format_exc()
-            )
-            
     def _validate_state_config(self) -> bool:
-        """Validate state configuration section."""
+        """Validate state configuration."""
         try:
-            required_fields = ["state_file", "backup_interval", "max_history"]
-            for field in required_fields:
-                if field not in self.config:
-                    self.logger.log_error(
-                        error_msg=f"Missing required state configuration field: {field}",
-                        error_type="config_validation_error",
-                        stack_trace=None,
-                        additional_info={
-                            "missing_field": field,
-                            "config_section": "state"
-                        }
-                    )
-                    return False
-                    
-            # Validate backup interval
-            if not isinstance(self.config["backup_interval"], int) or self.config["backup_interval"] <= 0:
-                self.logger.log_error(
-                    error_msg=f"Invalid backup interval: {self.config['backup_interval']}",
-                    error_type="config_validation_error",
-                    stack_trace=None,
-                    additional_info={
-                        "invalid_value": self.config["backup_interval"],
-                        "config_section": "state"
-                    }
+            config = self.context.config_handler.get_section("state")
+            if not config:
+                self.context.logger.log_error(
+                    error_msg="Missing state configuration section",
+                    error_type="config_validation_error"
                 )
                 return False
                 
+            required_fields = ["max_history", "state_file"]
+            for field in required_fields:
+                if field not in config:
+                    self.context.logger.log_error(
+                        error_msg=f"Missing required state configuration field: {field}",
+                        error_type="config_validation_error",
+                        additional_info={"missing_field": field}
+                    )
+                    return False
+                    
             return True
             
         except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
+            self.context.logger.log_error(
+                error_msg=f"Failed to validate state configuration: {str(e)}",
                 error_type="config_validation_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_section": "state"
-                }
+                stack_trace=traceback.format_exc()
             )
             return False
             
-    def _on_config_change(self, event_data: dict) -> None:
-        """Handle configuration changes."""
-        try:
-            if "state" in event_data:
-                self.config = event_data["state"]
-                
-                # Validate new configuration
-                if not self._validate_state_config():
-                    self.logger.log_error(
-                        error_msg="Invalid state configuration after change",
-                        error_type="config_validation_error",
-                        stack_trace=None,
-                        additional_info={
-                            "new_config": self.config
-                        }
-                    )
-                    return
-                    
-                self.logger.log_training_event(
-                    event_type="config_updated",
-                    message="State configuration updated successfully",
-                    additional_info={
-                        "config_section": "state",
-                        "changes": event_data["state"]
-                    }
-                )
-                
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="config_update_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_section": "state",
-                    "event_data": event_data
+    def get_state(self) -> Dict[str, Any]:
+        """Get current system state."""
+        with self._lock:
+            if not self.state:
+                return {}
+            return self.state.to_dict()
+            
+    def get_state_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent state history."""
+        with self._lock:
+            return [state.to_dict() for state in list(self._state_history)[-limit:]]
+            
+    def get_state_changes(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent state changes."""
+        with self._lock:
+            return list(self._state_changes)[-limit:]
+            
+    def get_state_stats(self) -> Dict[str, Any]:
+        """Get state tracking statistics."""
+        with self._lock:
+            return {
+                "total_states": len(self._state_history),
+                "total_changes": len(self._state_changes),
+                "current_state_age": time.time() - self.state.timestamp if self.state else None,
+                "last_change_time": self._state_changes[-1]["timestamp"] if self._state_changes else None,
+                "state_types": {
+                    state_type: count
+                    for state_type, count in Counter(
+                        change["type"] for change in self._state_changes
+                    ).items()
                 }
-            )
+            }
             
     def update_state(self, key: str, value: Any) -> None:
-        """Update state with validated configuration."""
-        try:
-            if not self._validate_state_config():
-                raise StateTrackingError(
-                    "Cannot update state with invalid configuration",
-                    self.config,
-                    traceback.format_exc()
-                )
+        """Update state with new value and record the change."""
+        with self._lock:
+            if not self.state:
+                self.state = SOVLState()
                 
-            self.state[key] = value
+            old_value = getattr(self.state, key, None)
+            setattr(self.state, key, value)
             
-            self.logger.log_training_event(
-                event_type="state_updated",
-                message=f"State updated for key: {key}",
+            # Record state change
+            change = {
+                "type": "state_update",
+                "key": key,
+                "old_value": old_value,
+                "new_value": value,
+                "timestamp": time.time()
+            }
+            self._state_changes.append(change)
+            
+            # Add current state to history
+            self._state_history.append(self.state.copy())
+            
+            # Log state change
+            self.context.logger.record_event(
+                event_type="state_change",
+                message=f"State updated: {key}",
+                level="debug" if self.context.logger.is_debug_enabled() else "info",
                 additional_info={
                     "key": key,
-                    "value": value,
-                    "state_file": self.config["state_file"]
+                    "old_value": old_value,
+                    "new_value": value,
+                    "state_hash": self.state.state_hash
                 }
             )
             
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="state_update_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "key": key,
-                    "value": value
+    def clear_history(self) -> None:
+        """Clear state history and changes."""
+        with self._lock:
+            self._state_history.clear()
+            self._state_changes.clear()
+            
+    def get_debug_info(self) -> Dict[str, Any]:
+        """Get detailed debug information about state tracking."""
+        with self._lock:
+            return {
+                "current_state": self.get_state(),
+                "state_stats": self.get_state_stats(),
+                "recent_changes": self.get_state_changes(5),
+                "recent_history": self.get_state_history(5),
+                "memory_usage": {
+                    "state_history_size": len(self._state_history),
+                    "state_changes_size": len(self._state_changes),
+                    "current_state_size": sys.getsizeof(self.state) if self.state else 0
                 }
-            )
-            raise
+            }
 
 class ErrorManager:
     """Manages error handling and recovery for the SOVL system."""
@@ -429,187 +416,114 @@ class ErrorManager:
         return False
         
     def handle_training_error(self, error: Exception, batch_size: int) -> None:
-        """Handle training errors with duplicate detection."""
+        """Handle training-related errors."""
         try:
-            error_key = f"training:{type(error).__name__}"
+            error_type = "training_error"
+            self._record_error(error, error_type, {"batch_size": batch_size})
             
-            if self._is_duplicate_error(error, "training"):
-                self._log_event(
-                    event_type="duplicate_training_error",
-                    message=f"Duplicate training error detected: {error_key}",
-                    level="warning",
+            # Existing error handling logic
+            if not self._is_duplicate_error(error, error_type):
+                self.context.logger.log_error(
+                    error_msg=str(error),
+                    error_type=error_type,
+                    stack_trace=traceback.format_exc(),
                     additional_info={
-                        "error_key": error_key,
-                        "batch_size": batch_size
+                        "batch_size": batch_size,
+                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
                     }
                 )
-                return
                 
-            self.error_counts[error_key] += 1
+            self._recover_training(error_type)
+            self._adjust_training_parameters(batch_size)
             
-            self._log_error(
-                error=error,
-                context="training",
-                level="error",
-                additional_info={
-                    "error_key": error_key,
-                    "error_count": self.error_counts[error_key],
-                    "batch_size": batch_size
-                }
-            )
-            
-            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
-                self._recover_training(error_key)
-            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
-                self._adjust_training_parameters(batch_size)
-                
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="error_handling",
-                level="critical",
-                additional_info={
-                    "original_error": str(error),
-                    "batch_size": batch_size
-                }
+            self.context.logger.log_error(
+                error_msg=f"Error handler failed: {str(e)}",
+                error_type="error_handler_failure",
+                stack_trace=traceback.format_exc()
             )
             
     def handle_curiosity_error(self, error: Exception, pressure: float) -> None:
-        """Handle curiosity errors with duplicate detection."""
+        """Handle curiosity-related errors."""
         try:
-            error_key = f"curiosity:{type(error).__name__}"
+            error_type = "curiosity_error"
+            self._record_error(error, error_type, {"pressure": pressure})
             
-            if self._is_duplicate_error(error, "curiosity"):
-                self._log_event(
-                    event_type="duplicate_curiosity_error",
-                    message=f"Duplicate curiosity error detected: {error_key}",
-                    level="warning",
+            # Existing error handling logic
+            if not self._is_duplicate_error(error, error_type):
+                self.context.logger.log_error(
+                    error_msg=str(error),
+                    error_type=error_type,
+                    stack_trace=traceback.format_exc(),
                     additional_info={
-                        "error_key": error_key,
-                        "pressure": pressure
+                        "pressure": pressure,
+                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
                     }
                 )
-                return
                 
-            self.error_counts[error_key] += 1
+            self._recover_curiosity(error_type)
+            self._adjust_curiosity_parameters(pressure)
             
-            self._log_error(
-                error=error,
-                context="curiosity",
-                level="error",
-                additional_info={
-                    "error_key": error_key,
-                    "error_count": self.error_counts[error_key],
-                    "pressure": pressure
-                }
-            )
-            
-            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
-                self._recover_curiosity(error_key)
-            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
-                self._adjust_curiosity_parameters(pressure)
-                
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="error_handling",
-                level="critical",
-                additional_info={
-                    "original_error": str(error),
-                    "pressure": pressure
-                }
+            self.context.logger.log_error(
+                error_msg=f"Error handler failed: {str(e)}",
+                error_type="error_handler_failure",
+                stack_trace=traceback.format_exc()
             )
             
     def handle_memory_error(self, error: Exception, memory_usage: float) -> None:
-        """Handle memory errors with duplicate detection."""
+        """Handle memory-related errors."""
         try:
-            error_key = f"memory:{type(error).__name__}"
+            error_type = "memory_error"
+            self._record_error(error, error_type, {"memory_usage": memory_usage})
             
-            if self._is_duplicate_error(error, "memory"):
-                self._log_event(
-                    event_type="duplicate_memory_error",
-                    message=f"Duplicate memory error detected: {error_key}",
-                    level="warning",
+            # Existing error handling logic
+            if not self._is_duplicate_error(error, error_type):
+                self.context.logger.log_error(
+                    error_msg=str(error),
+                    error_type=error_type,
+                    stack_trace=traceback.format_exc(),
                     additional_info={
-                        "error_key": error_key,
-                        "memory_usage": memory_usage
+                        "memory_usage": memory_usage,
+                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
                     }
                 )
-                return
                 
-            self.error_counts[error_key] += 1
+            self._recover_memory(error_type)
             
-            self._log_error(
-                error=error,
-                context="memory",
-                level="error",
-                additional_info={
-                    "error_key": error_key,
-                    "error_count": self.error_counts[error_key],
-                    "memory_usage": memory_usage
-                }
-            )
-            
-            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
-                self._recover_memory(error_key)
-            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
-                self._adjust_memory_parameters(memory_usage)
-                
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="error_handling",
-                level="critical",
-                additional_info={
-                    "original_error": str(error),
-                    "memory_usage": memory_usage
-                }
+            self.context.logger.log_error(
+                error_msg=f"Error handler failed: {str(e)}",
+                error_type="error_handler_failure",
+                stack_trace=traceback.format_exc()
             )
             
     def handle_generation_error(self, error: Exception, temperature: float) -> None:
-        """Handle generation errors with duplicate detection."""
+        """Handle generation-related errors."""
         try:
-            error_key = f"generation:{type(error).__name__}"
+            error_type = "generation_error"
+            self._record_error(error, error_type, {"temperature": temperature})
             
-            if self._is_duplicate_error(error, "generation"):
-                self._log_event(
-                    event_type="duplicate_generation_error",
-                    message=f"Duplicate generation error detected: {error_key}",
-                    level="warning",
+            # Existing error handling logic
+            if not self._is_duplicate_error(error, error_type):
+                self.context.logger.log_error(
+                    error_msg=str(error),
+                    error_type=error_type,
+                    stack_trace=traceback.format_exc(),
                     additional_info={
-                        "error_key": error_key,
-                        "temperature": temperature
+                        "temperature": temperature,
+                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
                     }
                 )
-                return
                 
-            self.error_counts[error_key] += 1
+            self._recover_generation(error_type)
+            self._adjust_generation_parameters(temperature)
             
-            self._log_error(
-                error=error,
-                context="generation",
-                level="error",
-                additional_info={
-                    "error_key": error_key,
-                    "error_count": self.error_counts[error_key],
-                    "temperature": temperature
-                }
-            )
-            
-            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
-                self._recover_generation(error_key)
-            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
-                self._adjust_generation_parameters(temperature)
-                
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="error_handling",
-                level="critical",
-                additional_info={
-                    "original_error": str(error),
-                    "temperature": temperature
-                }
+            self.context.logger.log_error(
+                error_msg=f"Error handler failed: {str(e)}",
+                error_type="error_handler_failure",
+                stack_trace=traceback.format_exc()
             )
             
     def handle_data_error(self, error: Exception, context: Dict[str, Any], conversation_id: str) -> None:
@@ -892,6 +806,18 @@ class ErrorManager:
                 message=f"Failed to adjust data parameters: {str(e)}",
                 level="error"
             )
+
+    def _record_error(self, error: Exception, error_type: str, context: Dict[str, Any] = None) -> None:
+        """Record an error in the history."""
+        error_entry = {
+            "type": error_type,
+            "message": str(error),
+            "timestamp": time.time(),
+            "stack_trace": traceback.format_exc(),
+            "context": context or {}
+        }
+        self.recent_errors.append(error_entry)
+        self.error_counts[f"{error_type}:{type(error).__name__}"] += 1
 
 class MemoryMonitor:
     """Monitors system memory health."""
@@ -1275,24 +1201,122 @@ class SOVLSystem:
             if not hasattr(self.memory_monitor, 'memory_manager'):
                 return {"error": "Memory manager not initialized"}
                 
-            stats = self.memory_monitor.memory_manager.get_stats()
-            self.logger.record_event(
-                event_type="memory_stats_retrieved",
-                message="Retrieved memory statistics",
-                level="info",
-                additional_info=stats
-            )
+            stats = {
+                "total_allocated": self.memory_monitor.memory_manager.get_total_allocated(),
+                "peak_allocated": self.memory_monitor.memory_manager.get_peak_allocated(),
+                "current_usage": self.memory_monitor.memory_manager.get_current_usage(),
+                "available_memory": self.memory_monitor.memory_manager.get_available_memory(),
+                "fragmentation": self.memory_monitor.memory_manager.get_fragmentation(),
+                "gc_count": self.memory_monitor.memory_manager.get_gc_count()
+            }
+            
+            if torch.cuda.is_available():
+                stats.update({
+                    "gpu_allocated": torch.cuda.memory_allocated(),
+                    "gpu_cached": torch.cuda.memory_reserved(),
+                    "gpu_max_memory": torch.cuda.max_memory_allocated()
+                })
+                
             return stats
             
         except Exception as e:
             self.error_manager.handle_memory_error(e, 0)
-            self.logger.record_event(
-                event_type="memory_stats_error",
-                message="Failed to get memory statistics",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
+            return {"error": str(e)}
+
+    def get_recent_errors(self) -> List[Dict[str, Any]]:
+        """Get list of recent errors from error manager."""
+        try:
+            if not hasattr(self, 'error_manager'):
+                return []
+                
+            return self.error_manager.get_recent_errors()
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to get recent errors: {str(e)}",
+                error_type="error_retrieval_error",
+                stack_trace=traceback.format_exc()
+            )
+            return []
+
+    def get_component_status(self) -> Dict[str, bool]:
+        """Get status of all system components."""
+        try:
+            return {
+                "model_loader": hasattr(self, "model_loader"),
+                "curiosity_engine": hasattr(self, "curiosity_engine"),
+                "memory_monitor": hasattr(self, "memory_monitor"),
+                "state_tracker": hasattr(self, "state_tracker"),
+                "error_manager": hasattr(self, "error_manager"),
+                "config_handler": hasattr(self, "config_handler")
+            }
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to get component status: {str(e)}",
+                error_type="component_status_error",
+                stack_trace=traceback.format_exc()
+            )
+            return {}
+
+    def get_system_state(self) -> Dict[str, Any]:
+        """Get current system state."""
+        try:
+            if not hasattr(self, 'state_tracker'):
+                return {"error": "State tracker not initialized"}
+                
+            state = self.state_tracker.get_state()
+            state.update({
+                "debug_mode": self.context.logger.is_debug_enabled(),
+                "last_error": self.error_manager.get_last_error() if hasattr(self, 'error_manager') else None,
+                "components": self.get_component_status(),
+                "memory_stats": self.get_memory_stats()
+            })
+            return state
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to get system state: {str(e)}",
+                error_type="state_retrieval_error",
+                stack_trace=traceback.format_exc()
             )
             return {"error": str(e)}
+
+    def set_debug_mode(self, enabled: bool) -> None:
+        """Enable or disable debug mode."""
+        try:
+            if enabled:
+                self.context.logger.set_level(logging.DEBUG)
+                self.context.logger.record_event(
+                    event_type="debug_mode_change",
+                    message="Debug mode enabled",
+                    level="debug"
+                )
+            else:
+                self.context.logger.set_level(logging.INFO)
+                self.context.logger.record_event(
+                    event_type="debug_mode_change",
+                    message="Debug mode disabled",
+                    level="info"
+                )
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to set debug mode: {str(e)}",
+                error_type="debug_mode_error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def get_execution_trace(self) -> List[Dict[str, Any]]:
+        """Get recent execution trace from logger."""
+        try:
+            if not hasattr(self.context, 'logger'):
+                return []
+                
+            return self.context.logger.get_recent_events()
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to get execution trace: {str(e)}",
+                error_type="trace_retrieval_error",
+                stack_trace=traceback.format_exc()
+            )
+            return []
