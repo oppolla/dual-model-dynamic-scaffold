@@ -7,7 +7,6 @@
    - 1.1 Purpose of Soulprint
    - 1.2 Concept of AI Rebirth
    - 1.3 Design Principles
-   - 1.4 Terminology Glossary
 
 ### 2. Technical Overview
   - 2.1 File Format Characteristics
@@ -70,8 +69,6 @@
 ### 8. Extended Use Cases
 - 8.1 Partial Soulprints
 - 8.2 Multi-Agent Merging
-- 8.3 Human-AI Hybrid Profiles
-- 8.4 Forensic Analysis Mode
 
 ### 9. Appendices
 
