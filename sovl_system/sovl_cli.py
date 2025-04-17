@@ -8,6 +8,9 @@ import functools
 from sovl_main import SOVLSystem
 from sovl_config import ConfigManager
 from sovl_utils import safe_compare
+import readline
+import rlcompleter
+from collections import deque
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -27,26 +30,42 @@ COMMAND_CATEGORIES = {
 }
 
 class CommandHistory:
+    """Manages command history with search functionality."""
     def __init__(self, max_size: int = 100):
-        self.history: List[Tuple[float, str, Optional[str]]] = []
-        self.max_size = max_size
+        self.history = deque(maxlen=max_size)
+        self.current_index = -1
 
-    def add(self, command: str, result: Optional[str] = None):
-        self.history.append((time.time(), command, result))
-        if len(self.history) > self.max_size:
-            self.history.pop(0)
+    def add(self, command: str):
+        """Add a command to history."""
+        self.history.append(command)
+        self.current_index = -1
 
-    def get_last(self, n: int = 1) -> List[Tuple[float, str, Optional[str]]]:
-        return self.history[-n:]
+    def get_previous(self) -> Optional[str]:
+        """Get previous command in history."""
+        if not self.history:
+            return None
+        if self.current_index < len(self.history) - 1:
+            self.current_index += 1
+        return self.history[-(self.current_index + 1)]
 
-    def search(self, term: str) -> List[Tuple[float, str, Optional[str]]]:
-        return [entry for entry in self.history if term.lower() in entry[1].lower()]
+    def get_next(self) -> Optional[str]:
+        """Get next command in history."""
+        if not self.history or self.current_index < 0:
+            return None
+        if self.current_index > 0:
+            self.current_index -= 1
+            return self.history[-(self.current_index + 1)]
+        self.current_index = -1
+        return ""
 
-    def format_entry(self, entry: Tuple[float, str, Optional[str]]) -> str:
-        timestamp, cmd, result = entry
-        time_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-        status = "✓" if result and "error" not in result.lower() else "✗"
-        return f"{time_str} [{status}] {cmd}"
+    def search(self, query: str) -> List[str]:
+        """Search through command history."""
+        return [cmd for cmd in self.history if query.lower() in cmd.lower()]
+
+    def clear(self):
+        """Clear command history."""
+        self.history.clear()
+        self.current_index = -1
 
 class CommandHandler:
     """Centralized command handling logic."""
@@ -69,6 +88,36 @@ class CommandHandler:
             'history': self.cmd_history, 'help': self.cmd_help,
             'monitor': self.cmd_monitor
         }
+        self.history = CommandHistory()
+        self._setup_autocomplete()
+        self._setup_history_search()
+
+    def _setup_autocomplete(self):
+        """Setup command autocompletion."""
+        def complete(text, state):
+            options = [cmd for cmd in self.commands.keys() if cmd.startswith(text)]
+            if state < len(options):
+                return options[state]
+            return None
+
+        readline.set_completer(complete)
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer_delims(' \t\n')
+
+    def _setup_history_search(self):
+        """Set up command history search functionality."""
+        def history_search(text: str, state: int) -> Optional[str]:
+            """Search through command history."""
+            if not text:
+                return None
+            matches = self.history.search(text)
+            if state < len(matches):
+                return matches[state]
+            return None
+
+        readline.set_completer(history_search)
+        readline.parse_and_bind('"\e[A": history-search-backward')
+        readline.parse_and_bind('"\e[B": history-search-forward')
 
     def execute(self, cmd: str, args: List[str]) -> bool:
         if cmd not in self.commands:
