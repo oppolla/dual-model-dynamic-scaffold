@@ -738,3 +738,27 @@ class SOVLProcessor:
                 return (i, i + min_rep_length)
         
         return None
+    
+class SoulLogitsProcessor(LogitsProcessor):
+    """Boosts token probabilities for .soul file keywords during generation."""
+    
+    def __init__(self, soul_keywords: Dict[str, float], tokenizer: PreTrainedTokenizer):
+        self.soul_keywords = soul_keywords
+        self.tokenizer = tokenizer
+
+    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        try:
+            for keyword, weight in self.soul_keywords.items():
+                token_ids = self.tokenizer.encode(keyword, add_special_tokens=False)
+                for token_id in token_ids:
+                    scores[:, token_id] += weight * 2.0  # Hypersensitive boost
+            return scores
+        except Exception as e:
+            # Log error but don't interrupt generation
+            self.logger.log_error(
+                error_msg=f"Failed to apply soul logits processing: {str(e)}",
+                error_type="soul_logits_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"keywords": self.soul_keywords}
+            )
+            return scores
