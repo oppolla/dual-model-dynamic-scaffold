@@ -1,10 +1,17 @@
 Step-by-Step Guide to Loading a Local Model and Running SOVL
+
 Prerequisites
+
 Python Environment: Ensure you have Python 3.8+ installed.
+
 Dependencies: Install the required packages:
+
 `pip install torch transformers peft bitsandbytes`
+
 Local Model: Have a Hugging Face model (e.g., `Llama-2-7b`) downloaded locally.
+
 Step 1: Prepare the Configuration File
+
 Create a `sovl_config.json` file in your workspace with the following structure:
 
 ```
@@ -82,9 +89,11 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
 ### Step 3: Run the Script
 
 Execute the script:
+
 `python run_sovl.py`
 
 Step 4: Verify the System
@@ -141,34 +150,54 @@ if __name__ == "__main__":
     main()
 ```
 2. Key CLI Commands
+3. 
 Once the CLI is active, you can use these commands:
+
 System Control:
+
 `monitor start/stop/status:` Control the monitoring system.
+
 `status:` Check system health (memory, training, etc.).
+
 `config get/set:` View or modify configurations (e.g., config set monitor.update_interval 2.0).
 
 Training:
+
 `train [epochs]:` Start training (e.g., train 10).
+
 `dream:` Run a dream cycle to consolidate memories.
+
 Debugging:
+
 `log view [n]:` Show recent logs (e.g., log view 5).
+
 `panic:` Force a system reset if errors occur.
 
 4. Example Workflow
+5. 
 Start the CLI:
+
 `python run_sovl.py`
+
 Begin Monitoring:
+
 `Enter command: monitor start`
+
 Check Status:
+
 `Enter command: status`
+
 Output:
+
 ```
    --- System Status ---
    Memory Usage: 4.2 GB / 16.0 GB
    Training Progress: 0%
    Monitoring: Active (update every 1.0s)
 ```
+
 Run Training:
+
 `Enter command: train 5`
 
 
