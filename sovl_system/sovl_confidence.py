@@ -8,7 +8,7 @@ import traceback
 # SOVL-specific dependencies
 from sovl_state import SOVLState
 from sovl_error import ErrorManager
-from sovl_context import SystemContext
+from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
 from sovl_utils import synchronized, NumericalGuard
 from sovl_config import ConfigManager

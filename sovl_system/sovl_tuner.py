@@ -6,7 +6,7 @@ from sovl_utils import NumericalGuard
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import SOVLTrainer
 from sovl_scaffold import CrossAttentionInjector
-from sovl_validation import ValidationSchema
+from sovl_tuner import ValidationSchema
 import traceback
 from collections import defaultdict, deque
 from sovl_error import ErrorManager

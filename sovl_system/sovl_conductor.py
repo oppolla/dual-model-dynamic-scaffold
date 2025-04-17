@@ -15,9 +15,9 @@ from sovl_logger import LoggingManager
 from sovl_state import SOVLState
 from sovl_error import ErrorHandler
 from sovl_utils import calculate_confidence, detect_repetitions
-from sovl_plugin import PluginManager
+from sovl_grafter import PluginManager
 from collections import deque
-from sovl_state_manager import StateManager
+from sovl_state import StateManager
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem

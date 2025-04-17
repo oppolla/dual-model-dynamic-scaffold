@@ -9,7 +9,7 @@ from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
-from sovl_error_manager import ErrorManager
+from sovl_error import ErrorManager
 from sovl_main import confidence_calculator
 from sovl_config import ConfigManager
 

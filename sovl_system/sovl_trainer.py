@@ -15,7 +15,7 @@ import traceback
 from sovl_scaffold import ScaffoldProvider
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
-from sovl_exceptions import ConfigurationError
+from sovl_io import ConfigurationError
 
 @dataclass
 class TrainingConfig:

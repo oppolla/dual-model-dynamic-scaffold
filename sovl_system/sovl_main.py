@@ -38,9 +38,9 @@ from sovl_manager import ModelManager
 from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
 from sovl_error import ErrorHandler
-from sovl_state_manager import StateManager
-from sovl_logging import LoggingManager
-from sovl_plugin import PluginManager
+from sovl_state import StateManager
+from sovl_logger import LoggingManager
+from sovl_grafter import PluginManager
 from sovl_confidence import calculate_confidence_score
 from sovl_events import EventDispatcher
 

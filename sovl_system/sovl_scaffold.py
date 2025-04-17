@@ -11,10 +11,12 @@ import contextlib
 import logging
 import math
 from sovl_logger import Logger
-from sovl_config import ConfigManager
+from sovl_config import ConfigManager, ConfigSchema, _SchemaValidator
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
 from sovl_error import ErrorHandler
 from sovl_main import confidence_calculator
+from sovl_confidence import ConfidenceCalculator
+from sovl_io import ConfigurationError
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
@@ -1257,10 +1259,18 @@ class CrossAttentionInjector:
 def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for scaffold generation."""
     try:
-        with torch.no_grad():
-            probs = torch.softmax(logits, dim=-1)
-            selected_probs = probs[torch.arange(len(generated_ids)), generated_ids]
-            return float(selected_probs.mean())
+        # Get the singleton instance of ConfidenceCalculator
+        confidence_calculator = ConfidenceCalculator.get_instance()
+        
+        # Calculate confidence using the calculator
+        return confidence_calculator.calculate_confidence_score(
+            logits=logits,
+            generated_ids=generated_ids,
+            state=None,  # Scaffold doesn't need state for basic confidence
+            error_manager=None,  # Scaffold doesn't need error manager for basic confidence
+            context=None,  # Scaffold doesn't need context for basic confidence
+            curiosity_manager=None  # Scaffold doesn't need curiosity for basic confidence
+        )
     except Exception as e:
         raise RuntimeError(f"Failed to calculate confidence score: {str(e)}")
 

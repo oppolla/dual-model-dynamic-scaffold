@@ -10,7 +10,7 @@ from sovl_utils import synchronized, safe_divide, float_lt
 from sovl_config import ConfigManager, ConfigHandler
 from sovl_state import SOVLState
 from sovl_logger import Logger, LoggerConfig
-from sovl_event import EventDispatcher
+from sovl_events import EventDispatcher
 
 @dataclass
 class TemperamentConfig:

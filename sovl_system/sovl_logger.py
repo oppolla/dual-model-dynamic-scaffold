@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import torch
 from logging.handlers import RotatingFileHandler
 import traceback
-import psutil
 
 @dataclass
 class LoggerConfig:
@@ -24,13 +23,15 @@ class LoggerConfig:
     max_log_age_days: int = 30  # Maximum age of logs to keep
     prune_interval_hours: int = 24  # How often to prune old logs
     memory_threshold_mb: int = 100  # Memory threshold to trigger aggressive pruning
+    gpu_memory_threshold: float = 0.85  # GPU memory usage threshold (0-1)
 
     _RANGES = {
         "max_size_mb": (0, 100),
         "max_in_memory_logs": (100, 10000),
         "max_log_age_days": (1, 365),
         "prune_interval_hours": (1, 168),
-        "memory_threshold_mb": (10, 1000)
+        "memory_threshold_mb": (10, 1000),
+        "gpu_memory_threshold": (0.1, 1.0)
     }
 
     def __post_init__(self):
@@ -281,11 +282,12 @@ class Logger:
                 )
 
     def _get_memory_stats(self) -> Dict[str, Any]:
-        """Get current memory statistics."""
+        """Get current memory statistics using PyTorch."""
         stats = {
             "gpu_allocated": None,
             "gpu_reserved": None,
-            "gpu_memory_percent": None
+            "gpu_memory_percent": None,
+            "system_memory": None
         }
         
         if torch.cuda.is_available():
@@ -300,25 +302,20 @@ class Logger:
                     "gpu_memory_percent": (allocated / total) * 100 if total > 0 else None
                 })
             except Exception as e:
-                self.fallback_logger.log_event(
-                    "memory_stats_failed",
-                    message=f"Failed to get GPU memory stats: {str(e)}",
-                    level="warning"
-                )
+                self.fallback_logger.warning(f"Failed to get GPU memory stats: {str(e)}")
         
         return stats
 
     def _should_prune(self) -> bool:
-        """Check if logs should be pruned."""
-        current_time = time.time()
-        if current_time - self._last_prune_time < self.config.prune_interval_hours * 3600:
+        """Check if logs should be pruned based on memory usage."""
+        try:
+            memory_stats = self._get_memory_stats()
+            if memory_stats["gpu_memory_percent"] is not None:
+                return memory_stats["gpu_memory_percent"] > self.config.gpu_memory_threshold * 100
             return False
-            
-        memory_usage = self._get_memory_stats()
-        if memory_usage['gpu_memory_percent'] > self.config.memory_threshold_mb:
-            return True
-            
-        return False
+        except Exception as e:
+            self.fallback_logger.warning(f"Failed to check memory for pruning: {str(e)}")
+            return False
 
     def _prune_old_logs(self) -> None:
         """Prune old logs based on age and memory usage."""
