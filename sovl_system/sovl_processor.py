@@ -250,7 +250,7 @@ class TensorValidator:
 
 
 class SOVLProcessor:
-    """Processes logits to calculate confidence with temperament and curiosity integration."""
+    """Processes and manages the SOVL system state."""
     
     # Constants for adjustments
     TEMPERAMENT_SCALE: float = 0.1
@@ -261,7 +261,7 @@ class SOVLProcessor:
 
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         """
-        Initialize the processor.
+        Initialize the SOVL processor.
 
         Args:
             config_manager: Configuration manager instance.
@@ -272,97 +272,15 @@ class SOVLProcessor:
         self.logger = logger
         self.device = device
         
-        # Load processor configuration
-        self.config = ProcessorConfig.from_config_manager(config_manager)
-        
-        # Initialize token mapping components
-        self._initialize_token_mapping()
+        # Initialize message queue for curiosity parameters
+        self._curiosity_queue = deque(maxlen=100)
+        self._last_curiosity_update = 0.0
+        self._curiosity_update_interval = 1.0  # seconds
         
         self._lock = Lock()
         self._validator = TensorValidator(device, logger)
+        
         self._log_init()
-
-    def _initialize_token_mapping(self) -> None:
-        """Initialize token mapping components with validation."""
-        try:
-            # Get token mapping configuration
-            token_config = self.config_manager.get_section("token_config", {})
-            
-            # Initialize scaffold_unk_id with validation
-            self.scaffold_unk_id = token_config.get("scaffold_unk_id", 0)
-            if not isinstance(self.scaffold_unk_id, int) or self.scaffold_unk_id < 0:
-                self.logger.log_training_event(
-                    event_type="token_mapping_warning",
-                    message=f"Invalid scaffold_unk_id: {self.scaffold_unk_id}, using default 0",
-                    level="warning"
-                )
-                self.scaffold_unk_id = 0
-            
-            # Initialize token map with validation
-            self.token_map = token_config.get("token_map", {})
-            if not isinstance(self.token_map, dict):
-                self.logger.log_training_event(
-                    event_type="token_mapping_warning",
-                    message="Invalid token_map type, using empty dict",
-                    level="warning"
-                )
-                self.token_map = {}
-            
-            # Validate token map entries
-            valid_entries = {}
-            for base_id, scaffold_ids in self.token_map.items():
-                try:
-                    # Ensure base_id is a valid integer
-                    base_id = int(base_id)
-                    if base_id < 0:
-                        continue
-                        
-                    # Ensure scaffold_ids is a list of valid integers
-                    if not isinstance(scaffold_ids, (list, tuple)):
-                        continue
-                        
-                    valid_scaffold_ids = []
-                    for sid in scaffold_ids:
-                        try:
-                            sid = int(sid)
-                            if sid >= 0:
-                                valid_scaffold_ids.append(sid)
-                        except (ValueError, TypeError):
-                            continue
-                            
-                    if valid_scaffold_ids:
-                        valid_entries[base_id] = valid_scaffold_ids
-                        
-                except (ValueError, TypeError):
-                    continue
-                    
-            self.token_map = valid_entries
-            
-            # Log initialization
-            self.logger.log_training_event(
-                event_type="token_mapping_initialized",
-                message="Token mapping initialized successfully",
-                level="info",
-                additional_info={
-                    "scaffold_unk_id": self.scaffold_unk_id,
-                    "token_map_size": len(self.token_map)
-                }
-            )
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_type="token_mapping_error",
-                message="Failed to initialize token mapping",
-                error=str(e),
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "scaffold_unk_id": self.scaffold_unk_id,
-                    "token_map_size": len(self.token_map)
-                }
-            )
-            # Use safe defaults
-            self.scaffold_unk_id = 0
-            self.token_map = {}
 
     def _log_init(self) -> None:
         """Log initialization event."""
@@ -380,13 +298,74 @@ class SOVLProcessor:
             }
         )
 
+    def update_curiosity_params(self, pressure: float, timestamp: float) -> None:
+        """Update curiosity parameters in the queue."""
+        with self._lock:
+            self._curiosity_queue.append((pressure, timestamp))
+            self._last_curiosity_update = timestamp
+            
+            # Log curiosity update
+            self.logger.log_event(
+                "curiosity_params_updated",
+                {
+                    "pressure": pressure,
+                    "timestamp": timestamp
+                }
+            )
+
+    def _get_curiosity_params(self, timestamp: Optional[float] = None) -> Optional[float]:
+        """Get current curiosity parameters from queue."""
+        with self._lock:
+            if not self._curiosity_queue:
+                return None
+                
+            if timestamp is None or timestamp - self._last_curiosity_update >= self._curiosity_update_interval:
+                # Get most recent pressure
+                pressure, _ = self._curiosity_queue[-1]
+                return pressure
+                
+            return None
+
+    def calculate_confidence(self, timestamp: Optional[float] = None) -> float:
+        """Calculate confidence score with curiosity pressure consideration."""
+        try:
+            # Get current curiosity pressure if available
+            pressure = self._get_curiosity_params(timestamp)
+            
+            # Base confidence calculation
+            confidence = self._calculate_base_confidence()
+            
+            # Adjust confidence based on curiosity pressure if available
+            if pressure is not None:
+                # Higher pressure reduces confidence to encourage exploration
+                confidence = confidence * (1.0 - pressure * 0.5)
+            
+            return max(0.0, min(1.0, confidence))
+            
+        except Exception as e:
+            self.logger.log_event(
+                "confidence_calculation_failed",
+                {"error": str(e)},
+                level="error"
+            )
+            return 0.5  # Default to neutral confidence
+
+    def _calculate_base_confidence(self) -> float:
+        """Calculate base confidence score."""
+        # Implementation of _calculate_base_confidence method
+        # This method should return a float representing the base confidence score
+        # based on the current state of the processor
+        # For example, it could be based on the current logits, confidence history, etc.
+        # This is a placeholder and should be implemented based on your specific requirements
+        return 0.5  # Placeholder return, actual implementation needed
+
     # Confidence Calculation Methods
     def calculate_confidence(
         self,
         logits: Union[torch.Tensor, List[torch.Tensor]],
         generated_ids: Optional[torch.Tensor] = None,
         temperament_influence: Optional[float] = None,
-        curiosity_pressure: Optional[float] = None
+        timestamp: Optional[float] = None
     ) -> torch.Tensor:
         """
         Calculate batched confidence scores.
@@ -395,7 +374,7 @@ class SOVLProcessor:
             logits: Input logits (batch, seq_len, vocab_size).
             generated_ids: Optional mask for valid positions (batch, seq_len).
             temperament_influence: Temperament score (-1.0 to 1.0).
-            curiosity_pressure: Curiosity pressure (0.0 to 1.0).
+            timestamp: Optional timestamp for curiosity parameter synchronization.
 
         Returns:
             Confidence scores (batch,).
@@ -405,11 +384,16 @@ class SOVLProcessor:
         """
         try:
             with self._lock, NumericalGuard():
+                # Get curiosity pressure from queue if available
+                curiosity_pressure = None
+                if timestamp is not None and timestamp - self._last_curiosity_update >= self._curiosity_update_interval:
+                    curiosity_pressure = self._get_curiosity_params()
+                
                 return self._compute_confidence(
                     logits, generated_ids, temperament_influence, curiosity_pressure
                 )
         except Exception as e:
-            self._log_confidence_error(e, logits, generated_ids, temperament_influence, curiosity_pressure)
+            self._log_confidence_error(e, logits, generated_ids, temperament_influence, None)
             raise LogitsError(f"Confidence calculation failed: {str(e)}")
 
     def _compute_confidence(

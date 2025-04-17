@@ -175,40 +175,31 @@ class Curiosity:
 class CuriosityPressure:
     """Manages curiosity pressure accumulation and eruption."""
     
-    def __init__(self):
-        self.value: float = 0.0
-        self.last_update: float = time.time()
+    def __init__(self, base_pressure: float, max_pressure: float, min_pressure: float, decay_rate: float):
+        self.base_pressure = base_pressure
+        self.max_pressure = max_pressure
+        self.min_pressure = min_pressure
+        self.decay_rate = decay_rate
+        self.current_pressure = base_pressure
+        self.last_update = time.time()
 
-    def update(
-        self,
-        temperament: float,
-        confidence: float,
-        silence: float,
-        silence_threshold: float
-    ) -> None:
-        """Update pressure based on temperament, confidence, and silence."""
+    def update(self, confidence: float) -> float:
+        """Update pressure based on confidence."""
         time_delta = time.time() - self.last_update
         self.last_update = time.time()
 
-        temperament_effect = 0.1 * max(0.0, temperament)
-        confidence_effect = 0.05 * (1.0 - confidence)
-        silence_effect = 0.2 * (silence / silence_threshold) if silence > silence_threshold else 0.0
+        self.current_pressure = self.base_pressure + (confidence - self.base_pressure) * 0.1
+        self.current_pressure = max(self.min_pressure, min(self.max_pressure, self.current_pressure))
 
-        self.value = self._clamp_pressure(
-            self.value + time_delta * (temperament_effect + confidence_effect + silence_effect)
-        )
+        return self.current_pressure
 
     def should_erupt(self, threshold: float) -> bool:
         """Check if pressure exceeds threshold."""
-        return self.value >= threshold
+        return self.current_pressure >= threshold
 
     def drop_pressure(self, amount: float) -> None:
         """Reduce pressure by a specified amount."""
-        self.value = self._clamp_pressure(self.value - amount)
-
-    def _clamp_pressure(self, value: float) -> float:
-        """Clamp pressure between 0.0 and 1.0."""
-        return max(0.0, min(1.0, value))
+        self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
 
 
 class CuriosityCallbacks:
@@ -290,7 +281,12 @@ class CuriosityManager:
         self.last_update = time.time()
         self.conversation_id = None
         self.state_hash = None
-        self.pressure_mgr = CuriosityPressure()
+        self.pressure_mgr = CuriosityPressure(
+            base_pressure=0.5,
+            max_pressure=0.9,
+            min_pressure=0.1,
+            decay_rate=0.95
+        )
         self.lock = threading.Lock()
         self._pressure_history = deque(maxlen=100)
         self._last_pressure_change = 0.0
@@ -555,42 +551,38 @@ class CuriosityManager:
             })
             raise
 
-    def update_pressure(self, new_pressure: float) -> None:
-        """Update curiosity pressure and ensure state synchronization."""
-        try:
-            # Validate pressure value
-            if not isinstance(new_pressure, (int, float)):
-                raise ValueError("Pressure must be numeric")
-            if not 0.0 <= new_pressure <= 1.0:
-                raise ValueError("Pressure must be between 0.0 and 1.0")
-
-            # Update local pressure
-            self.pressure = new_pressure
-            self.last_update = time.time()
-
-            # Update state if available
-            if self.state is not None:
-                self.state.curiosity.pressure = new_pressure
-                self.state_hash = self.state.state_hash
-                self._log_event(
-                    "pressure_updated",
-                    pressure=new_pressure,
-                    conversation_id=self.conversation_id,
-                    state_hash=self.state_hash
-                )
-            else:
-                self._log_warning(
-                    "pressure_update_no_state",
-                    pressure=new_pressure
-                )
-
-        except Exception as e:
-            self._log_error(
-                "pressure_update_failed",
-                error=str(e),
-                pressure=new_pressure
+    def update_pressure(self, confidence: float, timestamp: float) -> None:
+        """Update pressure based on confidence and timestamp."""
+        with self.lock:
+            # Calculate new pressure
+            new_pressure = self.pressure_mgr.update(confidence)
+            
+            # Add to queue
+            self._pressure_queue.append((new_pressure, timestamp))
+            self._last_pressure_update = timestamp
+            
+            # Log pressure update
+            self.logger.log_event(
+                "curiosity_pressure_updated",
+                {
+                    "pressure": new_pressure,
+                    "confidence": confidence,
+                    "timestamp": timestamp
+                }
             )
-            raise
+
+    def get_current_pressure(self, timestamp: Optional[float] = None) -> float:
+        """Get current pressure from queue."""
+        with self.lock:
+            if not self._pressure_queue:
+                return self.pressure_mgr.current_pressure
+                
+            if timestamp is None or timestamp - self._last_pressure_update >= self._pressure_update_interval:
+                # Get most recent pressure
+                pressure, _ = self._pressure_queue[-1]
+                return pressure
+                
+            return self.pressure_mgr.current_pressure
 
     def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log an event with standardized fields."""
