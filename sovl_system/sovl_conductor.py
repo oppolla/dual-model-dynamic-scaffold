@@ -243,15 +243,18 @@ class SOVLOrchestrator:
             )
             self._log_event("logger_initialized", {"log_file": log_file})
         except Exception as e:
-            print(f"Failed to initialize logger: {str(e)}")
+            self.logger.log_error(
+                error_msg="Failed to initialize logger",
+                error_type="logger_init_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"log_file": log_file}
+            )
             raise
 
-    def _log_event(self, event_type: str, additional_info: Optional[Dict[str, Any]] = None) -> None:
+    def _log_event(self, event_type: str, additional_info: Optional[Dict[str, Any]] = None, level: str = "info") -> None:
         """Log an event with standardized metadata."""
         try:
             metadata = {
-                "event_type": event_type,
-                "timestamp": time.time(),
                 "conversation_id": getattr(self.state, 'history', {}).get('conversation_id', None),
                 "state_hash": getattr(self.state, 'state_hash', None),
                 "device": str(self.device) if hasattr(self, 'device') else None
@@ -262,11 +265,19 @@ class SOVLOrchestrator:
             self.logger.record_event(
                 event_type=event_type,
                 message=f"Orchestrator event: {event_type}",
-                level="info",
+                level=level,
                 additional_info=metadata
             )
         except Exception as e:
-            print(f"Failed to log event: {str(e)}")
+            self.logger.log_error(
+                error_msg="Failed to log event",
+                error_type="logging_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "event_type": event_type,
+                    "original_error": str(e)
+                }
+            )
 
     def _log_error(self, message: str, error: Exception) -> None:
         """Log an error with standardized metadata and stack trace."""
@@ -285,7 +296,7 @@ class SOVLOrchestrator:
                 additional_info=metadata
             )
         except Exception as e:
-            print(f"Failed to log error: {str(e)}")
+            print(f"Failed to log error: {str(e)}")  # Fallback to print if logger fails
 
     def set_system(self, system: 'SOVLSystem') -> None:
         """Set the SOVL system reference and sync state."""
@@ -370,10 +381,10 @@ class SOVLOrchestrator:
                 
             # Validate conversation ID consistency
             if state.history.conversation_id != self.state.history.conversation_id:
-                self._log_event("conversation_id_mismatch", {
-                    "orchestrator_conversation_id": self.state.history.conversation_id,
-                    "system_conversation_id": state.history.conversation_id,
-                    "state_hash": state.state_hash
+                self._log_event("state_sync_mismatch", {
+                    "orchestrator_hash": self.state.state_hash,
+                    "system_hash": self._system.state_tracker.state.state_hash,
+                    "conversation_id": self.state.history.conversation_id
                 }, level="warning")
                 # Align conversation IDs
                 state.history.conversation_id = self.state.history.conversation_id
@@ -501,7 +512,7 @@ class SOVLOrchestrator:
             self.controls_config = self.config_handler.controls_config
             
             # Log final configuration state
-            self.context.logger.record_event(
+            self.logger.record_event(
                 event_type="config_validation",
                 message="Using validated configurations from ConfigHandler",
                 level="info",
@@ -513,13 +524,12 @@ class SOVLOrchestrator:
             )
             
         except Exception as e:
-            self.context.logger.record_event(
-                event_type="config_validation_error",
-                message="Failed to get validated configurations",
-                level="error",
+            self.logger.log_error(
+                error_msg="Failed to get validated configurations",
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
+                    "error": str(e)
                 }
             )
             raise
@@ -530,7 +540,12 @@ if __name__ == "__main__":
     try:
         orchestrator.run()
     except Exception as e:
-        print(f"Error running SOVL system: {str(e)}")
+        orchestrator.logger.log_error(
+            error_msg="Error running SOVL system",
+            error_type="system_execution_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={"error": str(e)}
+        )
         raise
     finally:
         orchestrator.shutdown()

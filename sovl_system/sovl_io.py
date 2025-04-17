@@ -258,10 +258,15 @@ def validate_quantization_mode(mode: str, logger: Logger) -> str:
     normalized_mode = mode.lower()
     
     if normalized_mode not in valid_modes:
-        logger.write({
-            "warning": f"Invalid quantization mode '{mode}'. Defaulting to 'fp16'.",
-            "timestamp": time.time()
-        })
+        logger.record_event(
+            event_type="quantization_mode_validation",
+            message=f"Invalid quantization mode '{mode}'. Defaulting to 'fp16'.",
+            level="warning",
+            additional_info={
+                "invalid_mode": mode,
+                "default_mode": "fp16"
+            }
+        )
         return "fp16"
     
     return normalized_mode
@@ -336,6 +341,21 @@ if __name__ == "__main__":
     loader = JSONLLoader(config_manager, logger)
     try:
         data = loader.load_jsonl("sample.jsonl", min_entries=1)
-        print(f"Loaded {len(data)} entries")
+        logger.record_event(
+            event_type="data_loaded",
+            message=f"Loaded {len(data)} entries from sample.jsonl",
+            level="info",
+            additional_info={
+                "entries_loaded": len(data),
+                "file_path": "sample.jsonl"
+            }
+        )
     except (InsufficientDataError, DataValidationError) as e:
-        print(f"Error: {str(e)}")
+        logger.log_error(
+            error_msg=str(e),
+            error_type="data_loading_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={
+                "file_path": "sample.jsonl"
+            }
+        )

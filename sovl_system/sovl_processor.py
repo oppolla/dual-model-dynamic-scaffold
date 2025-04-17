@@ -221,15 +221,12 @@ class TensorValidator:
 
     def _log_error(self, message: str, error: str, **kwargs) -> None:
         """Log validation errors with context."""
-        log_data = {
-            "event": EventType.ERROR.value,
-            "error": f"{message}: {error}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        }
-        for key, value in kwargs.items():
-            log_data[f"{key}_shape"] = str(getattr(value, 'shape', 'N/A'))
-        self.logger.record(log_data)
+        self.logger.log_error(
+            error_msg=f"{message}: {error}",
+            error_type="validation_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={f"{key}_shape": str(getattr(value, 'shape', 'N/A')) for key, value in kwargs.items()}
+        )
 
 
 class SOVLProcessor:
@@ -284,21 +281,21 @@ class SOVLProcessor:
             # Initialize scaffold_unk_id with validation
             self.scaffold_unk_id = token_config.get("scaffold_unk_id", 0)
             if not isinstance(self.scaffold_unk_id, int) or self.scaffold_unk_id < 0:
-                self.logger.record({
-                    "event": EventType.WARNING.value,
-                    "message": f"Invalid scaffold_unk_id: {self.scaffold_unk_id}, using default 0",
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="token_mapping_warning",
+                    message=f"Invalid scaffold_unk_id: {self.scaffold_unk_id}, using default 0",
+                    level="warning"
+                )
                 self.scaffold_unk_id = 0
             
             # Initialize token map with validation
             self.token_map = token_config.get("token_map", {})
             if not isinstance(self.token_map, dict):
-                self.logger.record({
-                    "event": EventType.WARNING.value,
-                    "message": "Invalid token_map type, using empty dict",
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="token_mapping_warning",
+                    message="Invalid token_map type, using empty dict",
+                    level="warning"
+                )
                 self.token_map = {}
             
             # Validate token map entries
@@ -332,37 +329,45 @@ class SOVLProcessor:
             self.token_map = valid_entries
             
             # Log initialization
-            self.logger.record({
-                "event": EventType.PROCESSOR_INIT.value,
-                "message": "Token mapping initialized",
-                "timestamp": time.time(),
-                "scaffold_unk_id": self.scaffold_unk_id,
-                "token_map_size": len(self.token_map)
-            })
+            self.logger.record_event(
+                event_type="token_mapping_initialized",
+                message="Token mapping initialized successfully",
+                level="info",
+                additional_info={
+                    "scaffold_unk_id": self.scaffold_unk_id,
+                    "token_map_size": len(self.token_map)
+                }
+            )
             
         except Exception as e:
-            self.logger.record({
-                "event": EventType.ERROR.value,
-                "message": f"Failed to initialize token mapping: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.log_error(
+                error_msg="Failed to initialize token mapping",
+                error_type="initialization_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "scaffold_unk_id": self.scaffold_unk_id,
+                    "token_map_size": len(self.token_map)
+                }
+            )
             # Use safe defaults
             self.scaffold_unk_id = 0
             self.token_map = {}
 
     def _log_init(self) -> None:
         """Log initialization event."""
-        self.logger.record({
-            "event": EventType.PROCESSOR_INIT.value,
-            "config": vars(self.config),
-            "device": str(self.device),
-            "token_mapping": {
-                "scaffold_unk_id": self.scaffold_unk_id,
-                "token_map_size": len(self.token_map)
-            },
-            "timestamp": time.time()
-        })
+        self.logger.record_event(
+            event_type="processor_initialized",
+            message="Processor initialized successfully",
+            level="info",
+            additional_info={
+                "config": vars(self.config),
+                "device": str(self.device),
+                "token_mapping": {
+                    "scaffold_unk_id": self.scaffold_unk_id,
+                    "token_map_size": len(self.token_map)
+                }
+            }
+        )
 
     # Confidence Calculation Methods
     def calculate_confidence(
@@ -474,14 +479,17 @@ class SOVLProcessor:
         curiosity: Optional[float]
     ) -> None:
         """Log confidence calculation event."""
-        self.logger.record({
-            "event": EventType.CONFIDENCE_CALC.value,
-            "confidence": conf.tolist(),
-            "logits_shape": logits.shape,
-            "temperament_influence": temperament,
-            "curiosity_pressure": curiosity,
-            "timestamp": time.time()
-        })
+        self.logger.record_event(
+            event_type="confidence_calculated",
+            message="Confidence calculation completed",
+            level="info",
+            additional_info={
+                "confidence": conf.tolist(),
+                "logits_shape": logits.shape,
+                "temperament_influence": temperament,
+                "curiosity_pressure": curiosity
+            }
+        )
 
     def _log_confidence_error(
         self,
@@ -492,16 +500,17 @@ class SOVLProcessor:
         curiosity: Optional[float]
     ) -> None:
         """Log confidence calculation errors."""
-        self.logger.record({
-            "event": EventType.ERROR.value,
-            "error": f"Confidence calculation failed: {str(error)}",
-            "logits_shape": str(getattr(logits, 'shape', 'N/A')),
-            "generated_ids_shape": str(getattr(generated_ids, 'shape', 'N/A')),
-            "temperament_influence": temperament,
-            "curiosity_pressure": curiosity,
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
+        self.logger.log_error(
+            error_msg="Confidence calculation failed",
+            error_type="confidence_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={
+                "logits_shape": str(getattr(logits, 'shape', 'N/A')),
+                "generated_ids_shape": str(getattr(generated_ids, 'shape', 'N/A')),
+                "temperament_influence": temperament,
+                "curiosity_pressure": curiosity
+            }
+        )
 
     # Configuration and State Management
     def tune(self, **kwargs) -> None:
@@ -521,20 +530,22 @@ class SOVLProcessor:
                 processor_config.update(kwargs)
                 self.config_manager.update_section("processor_config", processor_config)
                 
-                self.logger.record({
-                    "event": EventType.PROCESSOR_TUNE.value,
-                    "old_config": old_config,
-                    "new_config": vars(self.config),
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="processor_tuned",
+                    message="Processor configuration updated",
+                    level="info",
+                    additional_info={
+                        "old_config": old_config,
+                        "new_config": vars(self.config)
+                    }
+                )
         except Exception as e:
-            self.logger.record({
-                "event": EventType.ERROR.value,
-                "error": f"Processor tuning failed: {str(e)}",
-                "kwargs": kwargs,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.log_error(
+                error_msg="Processor tuning failed",
+                error_type="tuning_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"kwargs": kwargs}
+            )
             raise
 
     def get_state(self) -> Dict[str, Any]:
@@ -551,27 +562,28 @@ class SOVLProcessor:
         """
         try:
             with self._lock:
-                self.logger.record({
-                    "event": EventType.PROCESSOR_LOAD_STATE.value,
-                    "state": state,
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="state_loaded",
+                    message="Processor state loaded",
+                    level="info",
+                    additional_info={"state": state}
+                )
         except Exception as e:
-            self.logger.record({
-                "event": EventType.ERROR.value,
-                "error": f"Failed to load state: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.log_error(
+                error_msg="Failed to load processor state",
+                error_type="state_error",
+                stack_trace=traceback.format_exc()
+            )
             raise
 
     def reset(self) -> None:
         """Reset processor state."""
         with self._lock:
-            self.logger.record({
-                "event": EventType.PROCESSOR_RESET.value,
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="processor_reset",
+                message="Processor state reset",
+                level="info"
+            )
 
     def detect_repetitions(
         self,
@@ -633,13 +645,17 @@ class SOVLProcessor:
                 )
                 
         except Exception as e:
-            self.logger.record({
-                "event": EventType.ERROR.value,
-                "error": f"Repetition detection failed: {str(e)}",
-                "token_ids_shape": str(getattr(token_ids, 'shape', 'N/A')),
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.log_error(
+                error_msg="Repetition detection failed",
+                error_type="detection_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "token_ids_shape": str(getattr(token_ids, 'shape', 'N/A')),
+                    "min_rep_length": min_rep_length,
+                    "max_scan": max_scan,
+                    "batch_size": batch_size
+                }
+            )
             return None
 
     def _detect_repetitions_batch(

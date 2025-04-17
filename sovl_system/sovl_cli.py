@@ -105,8 +105,7 @@ class CommandHandler:
                         "base_temperature": base_temp,
                         "temp_adjust": temp_adjust,
                         "raw_temperature": raw_temp,
-                        "clamped_temperature": temperature,
-                        "timestamp": time.time()
+                        "clamped_temperature": temperature
                     }
                 )
             
@@ -128,8 +127,7 @@ class CommandHandler:
                     "prompt_length": len(prompt),
                     "max_tokens": max_tokens,
                     "temperature": temperature,
-                    "response_length": len(response),
-                    "timestamp": time.time()
+                    "response_length": len(response)
                 }
             )
             
@@ -138,17 +136,14 @@ class CommandHandler:
         except Exception as e:
             # Handle generation errors
             self.system.error_manager.handle_generation_error(e, temperature)
-            self.system.logger.record_event(
-                event_type="generation_error",
-                message="Error during response generation",
-                level="error",
+            self.system.logger.log_error(
+                error_msg="Error during response generation",
+                error_type="generation_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
-                    "error": str(e),
                     "prompt": prompt[:200],  # Truncate for logging
                     "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "stack_trace": traceback.format_exc(),
-                    "timestamp": time.time()
+                    "temperature": temperature
                 }
             )
             raise
@@ -166,7 +161,6 @@ class CommandHandler:
             additional_info={
                 "prompt": prompt,
                 "response": response,
-                "timestamp": time.time(),
                 "conversation_id": getattr(self.system.history, 'conversation_id', 'N/A'),
                 "confidence_score": confidence,
                 "is_system_question": is_system,
@@ -276,20 +270,15 @@ class CommandHandler:
                 event_type="cli_save_state",
                 message="State saved successfully",
                 level="info",
-                additional_info={
-                    "path": path,
-                    "timestamp": time.time()
-                }
+                additional_info={"path": path}
             )
             print("State saved.")
         else:
-            self.system.logger.record_event(
-                event_type="cli_save_error",
-                message="Save state method not found",
-                level="error",
-                additional_info={
-                    "timestamp": time.time()
-                }
+            self.system.logger.log_error(
+                error_msg="Save state method not found",
+                error_type="cli_save_error",
+                stack_trace=None,
+                additional_info={"path": path}
             )
             print("Error: 'save_state' method not found.")
         return False
@@ -303,20 +292,15 @@ class CommandHandler:
                 event_type="cli_load_state",
                 message="State loaded successfully",
                 level="info",
-                additional_info={
-                    "path": path,
-                    "timestamp": time.time()
-                }
+                additional_info={"path": path}
             )
             print("State loaded.")
         else:
-            self.system.logger.record_event(
-                event_type="cli_load_error",
-                message="Load state method not found",
-                level="error",
-                additional_info={
-                    "timestamp": time.time()
-                }
+            self.system.logger.log_error(
+                error_msg="Load state method not found",
+                error_type="cli_load_error",
+                stack_trace=None,
+                additional_info={"path": path}
             )
             print("Error: 'load_state' method not found.")
         return False
@@ -547,13 +531,10 @@ class CommandHandler:
 
         print(f"\n--- Last {num_entries} Log Entries ---")
         if not hasattr(self.system, 'logger') or not hasattr(self.system.logger, 'read'):
-            self.system.logger.record_event(
-                event_type="cli_log_error",
-                message="Logger not available",
-                level="error",
-                additional_info={
-                    "timestamp": time.time()
-                }
+            self.system.logger.log_error(
+                error_msg="Logger not available",
+                error_type="cli_log_error",
+                stack_trace=None
             )
             print("Error: Logger not available.")
             return False
@@ -1231,11 +1212,12 @@ def run_cli(config_manager_instance: Optional[ConfigManager] = None):
                 break
             except Exception as e:
                 print(f"Command error: {e}")
-                sovl_system.logger.record({
-                    "error": f"Command execution failed: {str(e)}",
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
-                })
+                sovl_system.logger.log_error(
+                    error_msg="Command execution failed",
+                    error_type="cli_command_error",
+                    stack_trace=traceback.format_exc(),
+                    additional_info={"command": user_input}
+                )
     except SystemInitializationError as e:
         print(f"System initialization failed: {e.message}")
         if e.stack_trace:
@@ -1254,21 +1236,21 @@ def shutdown_system(sovl_system: SOVLSystem):
             sovl_system.save_state("final_state.json")
             print("Final state saved.")
         cleanup_resources(sovl_system)
-        sovl_system.logger.record({
-            "event": "system_shutdown",
-            "timestamp": time.time(),
-            "status": "clean"
-        })
+        sovl_system.logger.record_event(
+            event_type="system_shutdown",
+            message="System shutdown completed successfully",
+            level="info",
+            additional_info={"status": "clean"}
+        )
         print("Shutdown complete.")
     except Exception as e:
         print(f"Error during shutdown: {e}")
-        sovl_system.logger.record({
-            "event": "system_shutdown",
-            "status": "error",
-            "error": str(e),
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
+        sovl_system.logger.log_error(
+            error_msg="System shutdown failed",
+            error_type="shutdown_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={"status": "error"}
+        )
 
 def cleanup_resources(sovl_system: SOVLSystem):
     try:
@@ -1278,16 +1260,17 @@ def cleanup_resources(sovl_system: SOVLSystem):
             sovl_system.cleanup()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        sovl_system.logger.record({
-            "event": "cli_cleanup_complete",
-            "timestamp": time.time()
-        })
+        sovl_system.logger.record_event(
+            event_type="cli_cleanup_complete",
+            message="CLI resources cleaned up successfully",
+            level="info"
+        )
     except Exception as e:
-        sovl_system.logger.record({
-            "error": f"CLI cleanup failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
+        sovl_system.logger.log_error(
+            error_msg="CLI cleanup failed",
+            error_type="cleanup_error",
+            stack_trace=traceback.format_exc()
+        )
 
 if __name__ == "__main__":
     run_cli()

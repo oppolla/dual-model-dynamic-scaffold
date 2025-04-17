@@ -728,6 +728,17 @@ class TrainingCycleManager:
             # Save updated state
             self.state_manager.save_state()
             
+            # Log successful training cycle
+            self.logger.log_training_event(
+                event_type="training_cycle_complete",
+                epoch=epochs or self.config.max_epochs,
+                batch_size=batch_size or self.config.batch_size,
+                data_exposure=results.get("data_exposure", 0.0),
+                conversation_id=self.state.history.conversation_id,
+                state_hash=self.state.state_hash,
+                additional_info=results
+            )
+            
             return results
             
         except Exception as e:
@@ -741,17 +752,22 @@ class TrainingCycleManager:
         """Run sleep training on dream-generated content."""
         try:
             if not self.config.enable_sleep_training:
-                self.logger.record({
-                    "event": "sleep_training_skipped",
-                    "reason": "Sleep training disabled",
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="sleep_training_skipped",
+                    message="Sleep training disabled",
+                    level="info",
+                    conversation_id=self.state.history.conversation_id,
+                    state_hash=self.state.state_hash
+                )
                 return
                 
-            self.logger.record({
-                "event": "sleep_training_start",
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="sleep_training_start",
+                message="Starting sleep training",
+                level="info",
+                conversation_id=self.state.history.conversation_id,
+                state_hash=self.state.state_hash
+            )
             
             # Get current state
             state = self.state_manager.get_state()
@@ -774,16 +790,26 @@ class TrainingCycleManager:
             # Save updated state
             self.state_manager.save_state()
                 
-            self.logger.record({
-                "event": "sleep_training_complete",
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="sleep_training_complete",
+                message="Sleep training completed successfully",
+                level="info",
+                conversation_id=self.state.history.conversation_id,
+                state_hash=self.state.state_hash,
+                additional_info={
+                    "last_weight": self.trainer.last_weight,
+                    "last_temperament_score": self.trainer.last_temperament_score
+                }
+            )
             
         except Exception as e:
-            self.logger.record({
-                "error": f"Sleep training failed: {str(e)}",
-                "timestamp": time.time()
-            })
+            self.logger.log_error(
+                error_msg=f"Sleep training failed: {str(e)}",
+                error_type="sleep_training_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=self.state.history.conversation_id,
+                state_hash=self.state.state_hash
+            )
             raise
 
 class SOVLTrainer:
@@ -867,7 +893,15 @@ class SOVLTrainer:
             )
             
         except Exception as e:
-            self.logger.error(f"Error initializing model: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Error initializing model: {str(e)}",
+                error_type="model_initialization_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "model_name": self.config.model_name,
+                    "device": str(self.device)
+                }
+            )
             raise
             
     def _initialize_components(self) -> None:
@@ -896,7 +930,15 @@ class SOVLTrainer:
             )
             
         except Exception as e:
-            self.logger.error(f"Error initializing components: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Error initializing components: {str(e)}",
+                error_type="component_initialization_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "state_hash": self.state.state_hash,
+                    "conversation_id": self.state.history.conversation_id
+                }
+            )
             raise
 
     def train_step_with_scaffold(

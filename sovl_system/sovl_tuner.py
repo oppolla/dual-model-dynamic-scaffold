@@ -141,7 +141,7 @@ class SOVLTuner:
             
             # Check for duplicate errors within cooldown period
             if current_time - self._last_error_time < self._error_cooldown:
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="duplicate_error",
                     message=f"Duplicate error detected within cooldown period: {error_key}",
                     level="warning",
@@ -157,10 +157,10 @@ class SOVLTuner:
             self._error_counts[error_key] += 1
             
             # Log error locally
-            self.logger.record_event(
-                event_type="tuner_error",
-                message=f"Error in {error_type}: {str(error)}",
-                level="error",
+            self.logger.log_error(
+                error_msg=f"Error in {error_type}: {str(error)}",
+                error_type="tuner_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "error_type": error_type,
                     "error_key": error_key,
@@ -182,10 +182,10 @@ class SOVLTuner:
                     
         except Exception as e:
             # Fallback logging if error handling fails
-            self.logger.record_event(
-                event_type="error_handling_failed",
-                message=f"Failed to handle error: {str(e)}",
-                level="critical",
+            self.logger.log_error(
+                error_msg=f"Failed to handle error: {str(e)}",
+                error_type="error_handling_failed",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "original_error": str(error),
                     "error_type": error_type,
@@ -221,7 +221,7 @@ class SOVLTuner:
             
             if isinstance(validation_range.min_value, bool):
                 if not isinstance(value, bool):
-                    self.logger.record_event(
+                    self.logger.log_training_event(
                         event_type="param_validation_error",
                         message=f"{key} must be a boolean value",
                         level="error",
@@ -235,7 +235,7 @@ class SOVLTuner:
                 
             if isinstance(validation_range.min_value, str):
                 if not isinstance(value, str):
-                    self.logger.record_event(
+                    self.logger.log_training_event(
                         event_type="param_validation_error",
                         message=f"{key} must be a string value",
                         level="error",
@@ -246,7 +246,7 @@ class SOVLTuner:
                     )
                     return False
                 if value not in [validation_range.min_value, validation_range.max_value]:
-                    self.logger.record_event(
+                    self.logger.log_training_event(
                         event_type="param_validation_error",
                         message=f"{key} must be one of: {validation_range.min_value}, {validation_range.max_value}",
                         level="error",
@@ -259,7 +259,7 @@ class SOVLTuner:
                 return True
                 
             if not isinstance(value, (int, float)):
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="param_validation_error",
                     message=f"{key} must be a numeric value",
                     level="error",
@@ -271,7 +271,7 @@ class SOVLTuner:
                 return False
                 
             if not (validation_range.min_value <= value <= validation_range.max_value):
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="param_validation_error",
                     message=f"{key} must be between {validation_range.min_value} and {validation_range.max_value}. Got: {value}",
                     level="error",
@@ -287,10 +287,10 @@ class SOVLTuner:
             return True
             
         except ValueError as e:
-            self.logger.record_event(
-                event_type="param_validation_error",
-                message=f"Failed to validate parameter: {str(e)}",
-                level="error",
+            self.logger.log_error(
+                error_msg=f"Failed to validate parameter: {str(e)}",
+                error_type="param_validation_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "param_name": param_name,
                     "value": value
@@ -318,7 +318,7 @@ class SOVLTuner:
             
             # Check for confidence issues
             if variance > 0.1:  # High variance in confidence
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="confidence_variance_high",
                     message="High variance detected in confidence scores",
                     level="warning",
@@ -335,7 +335,7 @@ class SOVLTuner:
                 
                 if new_influence != current_influence:
                     self.tune_curiosity(temperament_influence=new_influence)
-                    self.logger.record_event(
+                    self.logger.log_training_event(
                         event_type="temperament_influence_adjusted",
                         message="Adjusted temperament influence to stabilize confidence",
                         level="info",
@@ -347,7 +347,7 @@ class SOVLTuner:
                     )
                     
             elif mean_conf < 0.3:  # Consistently low confidence
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="confidence_low",
                     message="Consistently low confidence detected",
                     level="warning",
@@ -362,7 +362,7 @@ class SOVLTuner:
                     current_pressure = self.curiosity_manager.get_pressure()
                     if current_pressure > 0.3:
                         self.curiosity_manager.reduce_pressure(0.1)
-                        self.logger.record_event(
+                        self.logger.log_training_event(
                             event_type="curiosity_pressure_reduced",
                             message="Reduced curiosity pressure to improve confidence",
                             level="info",
@@ -374,10 +374,10 @@ class SOVLTuner:
                         )
                         
         except Exception as e:
-            self.logger.record_event(
-                event_type="confidence_monitoring_error",
-                message=f"Error in confidence monitoring: {str(e)}",
-                level="error",
+            self.logger.log_error(
+                error_msg=f"Error in confidence monitoring: {str(e)}",
+                error_type="confidence_monitoring_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={"error": str(e)}
             )
             
@@ -399,13 +399,15 @@ class SOVLTuner:
                 self.trainer.update_parameters(tuned_params)
             
             # Log tuning results
-            self.logger.record({
-                "event": "parameters_tuned",
-                "previous_params": current_params,
-                "new_params": tuned_params,
-                "metrics": metrics,
-                "timestamp": time.time()
-            })
+            self.logger.log_training_event(
+                event_type="parameters_tuned",
+                message="System parameters tuned successfully",
+                additional_info={
+                    "previous_params": current_params,
+                    "new_params": tuned_params,
+                    "metrics": metrics
+                }
+            )
             
             return tuned_params
             
@@ -449,7 +451,7 @@ class SOVLTuner:
                         self.curiosity_manager.reduce_pressure(reduction_amount)
                         
                         # Log pressure adjustment
-                        self.logger.record_event(
+                        self.logger.log_training_event(
                             event_type="pressure_adjusted",
                             message="Adjusted curiosity pressure based on performance",
                             level="info",
@@ -520,7 +522,7 @@ class SOVLTuner:
             if value is not None:
                 full_key = f"{prefix}{param}"
                 if not self.validate_param(full_key, value):
-                    self.logger.record_event(
+                    self.logger.log_training_event(
                         event_type="curiosity_tuning_validation_failed",
                         message=f"Validation failed for parameter: {param}",
                         level="error",
@@ -553,7 +555,7 @@ class SOVLTuner:
                     }
                     self.curiosity_manager.tune(**manager_params)
                 except Exception as e:
-                    self.logger.record_event(
+                    self.logger.log_training_event(
                         event_type="curiosity_manager_tune_failed",
                         message=f"Failed to update CuriosityManager: {str(e)}",
                         level="error",
@@ -565,19 +567,17 @@ class SOVLTuner:
                     # Don't return False here as config update was successful
                     # Just log the error and continue
             
-            self.logger.record_event(
+            self.logger.log_training_event(
                 event_type="curiosity_tuning_success",
                 message="Successfully tuned curiosity parameters",
-                level="info",
                 additional_info={
                     "updated_params": list(updates.keys())
                 }
             )
         else:
-            self.logger.record_event(
+            self.logger.log_training_event(
                 event_type="curiosity_tuning_failed",
                 message="Failed to tune curiosity parameters",
-                level="error",
                 additional_info={
                     "attempted_params": list(updates.keys())
                 }
@@ -631,7 +631,7 @@ class SOVLTuner:
                 if value is not None:
                     min_val, max_val = safe_ranges[key]
                     if not (min_val <= value <= max_val):
-                        self.logger.record_event(
+                        self.logger.log_training_event(
                             event_type="temperament_parameter_warning",
                             message=f"Parameter {key} out of safe range, clamping to bounds",
                             level="warning",
@@ -662,7 +662,7 @@ class SOVLTuner:
                     with self.trainer.state.lock:
                         self.trainer.state.temperament_history.clear()
                         self.trainer.state.temperament_score = 0.5  # Reset to neutral
-                        self.logger.record_event(
+                        self.logger.log_training_event(
                             event_type="temperament_history_reset",
                             message="Temperament history reset after parameter update",
                             level="info",
@@ -673,7 +673,7 @@ class SOVLTuner:
                         )
                 
                 # Log successful update
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="temperament_parameters_updated",
                     message="Temperament parameters updated successfully",
                     level="info",
@@ -683,7 +683,7 @@ class SOVLTuner:
                     }
                 )
             else:
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="temperament_update_failed",
                     message="Failed to update temperament parameters",
                     level="error",
@@ -693,10 +693,10 @@ class SOVLTuner:
             return success
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_adjustment_error",
-                message=f"Failed to adjust temperament: {str(e)}",
-                level="error",
+            self.logger.log_error(
+                error_msg=f"Failed to adjust temperament: {str(e)}",
+                error_type="temperament_adjustment_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={"error": str(e)}
             )
             return False
@@ -751,12 +751,14 @@ class SOVLTuner:
                     self.trainer.config.dream_memory_weight = updates["controls_config.dream_memory_weight"]
                 
                 self.config_manager.save_config()
-                self.logger.record({
-                    "event": "tune_dream",
-                    "params": updates,
-                    "success": success,
-                    "timestamp": time.time()
-                })
+                self.logger.log_training_event(
+                    event_type="tune_dream",
+                    message="Dreaming parameters tuned successfully",
+                    additional_info={
+                        "params": updates,
+                        "success": success
+                    }
+                )
             return success
         return True
     
@@ -801,12 +803,14 @@ class SOVLTuner:
                         self.trainer.config.sleep_max_steps = updates["training_config.sleep_max_steps"]
                 
                 self.config_manager.save_config()
-                self.logger.record({
-                    "event": "set_sleep_params",
-                    "params": updates,
-                    "success": success,
-                    "timestamp": time.time()
-                })
+                self.logger.log_training_event(
+                    event_type="set_sleep_params",
+                    message="Sleep parameters set successfully",
+                    additional_info={
+                        "params": updates,
+                        "success": success
+                    }
+                )
             return success
         return True
     
@@ -840,12 +844,14 @@ class SOVLTuner:
                     self.controls_config[param] = value
                 
                 self.config_manager.save_config()
-                self.logger.record({
-                    "event": "set_global_blend",
-                    "params": updates,
-                    "success": success,
-                    "timestamp": time.time()
-                })
+                self.logger.log_training_event(
+                    event_type="set_global_blend",
+                    message="Global blend parameters set successfully",
+                    additional_info={
+                        "params": updates,
+                        "success": success
+                    }
+                )
             return success
         return True
     
@@ -890,12 +896,14 @@ class SOVLTuner:
                         self.trainer.lora_capacity = updates["training_config.lora_capacity"]
                 
                 self.config_manager.save_config()
-                self.logger.record({
-                    "event": "tune_lifecycle",
-                    "params": updates,
-                    "success": success,
-                    "timestamp": time.time()
-                })
+                self.logger.log_training_event(
+                    event_type="tune_lifecycle",
+                    message="Lifecycle parameters tuned successfully",
+                    additional_info={
+                        "params": updates,
+                        "success": success
+                    }
+                )
             return success
         return True
     
@@ -906,12 +914,14 @@ class SOVLTuner:
             if success:
                 self.core_config["use_dynamic_layers"] = enable
                 self.config_manager.save_config()
-                self.logger.record({
-                    "event": "toggle_dynamic_layers",
-                    "enable": enable,
-                    "success": success,
-                    "timestamp": time.time()
-                })
+                self.logger.log_training_event(
+                    event_type="toggle_dynamic_layers",
+                    message="Dynamic layers toggled",
+                    additional_info={
+                        "enable": enable,
+                        "success": success
+                    }
+                )
             return success
         return False
     
@@ -922,12 +932,14 @@ class SOVLTuner:
             if success:
                 self.core_config["quantization"] = mode
                 self.config_manager.save_config()
-                self.logger.record({
-                    "event": "set_quantization_mode",
-                    "mode": mode,
-                    "success": success,
-                    "timestamp": time.time()
-                })
+                self.logger.log_training_event(
+                    event_type="set_quantization_mode",
+                    message="Quantization mode set",
+                    additional_info={
+                        "mode": mode,
+                        "success": success
+                    }
+                )
             return success
         return False
     
@@ -940,10 +952,14 @@ class SOVLTuner:
     ) -> bool:
         """Set scaffold influence for cross-attention layers."""
         if not self.cross_attention_injector or not base_model:
-            self.logger.record({
-                "error": "CrossAttentionInjector or base_model not provided",
-                "timestamp": time.time()
-            })
+            self.logger.log_training_event(
+                event_type="scaffold_influence_error",
+                message="CrossAttentionInjector or base_model not provided",
+                level="error",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
             return False
         
         # Validate layer_weights length if provided
@@ -957,7 +973,7 @@ class SOVLTuner:
                 
                 # Validate layer count matches weights
                 if len(layer_weights) != len(layers):
-                    self.logger.record_event(
+                    self.logger.log_training_event(
                         event_type="scaffold_influence_error",
                         message="Layer weights length mismatch",
                         level="error",
@@ -973,7 +989,7 @@ class SOVLTuner:
                 # Validate weight values
                 for i, weight in enumerate(layer_weights):
                     if not (0.0 <= weight <= 1.0):
-                        self.logger.record_event(
+                        self.logger.log_training_event(
                             event_type="scaffold_influence_error",
                             message="Invalid layer weight value",
                             level="error",
@@ -986,7 +1002,7 @@ class SOVLTuner:
                         return False
                         
                 # Log successful validation
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="scaffold_influence_validated",
                     message="Layer weights validated successfully",
                     level="info",
@@ -998,10 +1014,10 @@ class SOVLTuner:
                 )
                 
             except Exception as e:
-                self.logger.record_event(
-                    event_type="scaffold_influence_error",
-                    message=f"Failed to validate layer weights: {str(e)}",
-                    level="error",
+                self.logger.log_error(
+                    error_msg=f"Failed to validate layer weights: {str(e)}",
+                    error_type="scaffold_influence_error",
+                    stack_trace=traceback.format_exc(),
                     additional_info={"error": str(e)}
                 )
                 return False
@@ -1019,7 +1035,7 @@ class SOVLTuner:
             )
             
             # Log successful influence update
-            self.logger.record_event(
+            self.logger.log_training_event(
                 event_type="scaffold_influence_updated",
                 message="Scaffold influence updated successfully",
                 level="info",
@@ -1033,10 +1049,10 @@ class SOVLTuner:
             return True
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="scaffold_influence_error",
-                message=f"Failed to set scaffold influence: {str(e)}",
-                level="error",
+            self.logger.log_error(
+                error_msg=f"Failed to set scaffold influence: {str(e)}",
+                error_type="scaffold_influence_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={"error": str(e)}
             )
             return False
@@ -1065,12 +1081,14 @@ class SOVLTuner:
                 if success:
                     self.controls_config["dynamic_cross_attn_mode"] = validated_mode
                     self.config_manager.save_config()
-                    self.logger.record({
-                        "event": "tune_cross_attention",
-                        "dynamic_mode": dynamic_mode,
-                        "success": True,
-                        "timestamp": time.time()
-                    })
+                    self.logger.log_training_event(
+                        event_type="tune_cross_attention",
+                        message="Cross-attention settings tuned successfully",
+                        additional_info={
+                            "dynamic_mode": dynamic_mode,
+                            "success": success
+                        }
+                    )
             else:
                 success = False
         
@@ -1091,10 +1109,15 @@ class SOVLTuner:
         }
         
         if mode not in modes and (use_scaffold_memory is None or use_token_map_memory is None):
-            self.logger.record({
-                "error": f"Invalid memory mode: {mode}. Use: {', '.join(modes.keys())} or specify use_scaffold_memory/use_token_map_memory",
-                "timestamp": time.time()
-            })
+            self.logger.log_training_event(
+                event_type="toggle_memory_error",
+                message=f"Invalid memory mode: {mode}. Use: {', '.join(modes.keys())} or specify use_scaffold_memory/use_token_map_memory",
+                level="error",
+                additional_info={
+                    "mode": mode,
+                    "timestamp": time.time()
+                }
+            )
             return False
         
         scaffold_mem, token_mem = modes.get(mode, (use_scaffold_memory, use_token_map_memory))
@@ -1109,14 +1132,16 @@ class SOVLTuner:
             self.controls_config["use_scaffold_memory"] = scaffold_mem
             self.controls_config["use_token_map_memory"] = token_mem
             self.config_manager.save_config()
-            self.logger.record({
-                "event": "toggle_memory",
-                "mode": mode if mode in modes else "custom",
-                "scaffold_memory": scaffold_mem,
-                "token_map_memory": token_mem,
-                "success": success,
-                "timestamp": time.time()
-            })
+            self.logger.log_training_event(
+                event_type="toggle_memory",
+                message="Memory modes toggled",
+                additional_info={
+                    "mode": mode if mode in modes else "custom",
+                    "scaffold_memory": scaffold_mem,
+                    "token_map_memory": token_mem,
+                    "success": success
+                }
+            )
         return success
     
     def update_component_references(

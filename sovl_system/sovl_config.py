@@ -384,11 +384,12 @@ class ConfigManager:
             self._last_config_hash = self._compute_config_hash()
             self.logger.record_event(
                 event_type="config_load",
-                message=f"Loaded config from {self.config_file}",
+                message="Configuration loaded successfully",
                 level="info",
                 additional_info={
                     "config_file": self.config_file,
-                    "config_hash": self._last_config_hash
+                    "config_hash": self._last_config_hash,
+                    "schema_version": self.DEFAULT_SCHEMA[0].value
                 }
             )
 
@@ -1240,6 +1241,34 @@ class ConfigManager:
             )
             return False
 
+    def validate_with_model(self, model_config: Any) -> bool:
+        """
+        Validate configurations with model-specific checks.
+        
+        Args:
+            model_config: Model configuration for additional validation
+            
+        Returns:
+            bool: True if validation succeeds, False otherwise
+        """
+        try:
+            # First validate basic configurations
+            if not self.validate():
+                return False
+                
+            # Add model-specific validation here if needed
+            return True
+        except Exception as e:
+            self.logger.log_error(
+                error_msg="Configuration validation failed",
+                error_type="validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "model_config": str(model_config)
+                }
+            )
+            return False
+
 class ConfigHandler:
     """Handles configuration validation and management."""
     
@@ -1437,10 +1466,13 @@ class ConfigHandler:
             # Add model-specific validation here if needed
             return True
         except Exception as e:
-            self.logger.record_event(
-                event_type="config_validation_failed",
-                message=f"Configuration validation failed: {str(e)}",
-                level="error"
+            self.logger.log_error(
+                error_msg="Configuration validation failed",
+                error_type="validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "model_config": str(model_config)
+                }
             )
             return False
 

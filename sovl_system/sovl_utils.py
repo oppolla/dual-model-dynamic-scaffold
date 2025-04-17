@@ -53,7 +53,7 @@ def validate_quantization_mode(mode: str, logger: Optional[Logger] = None) -> st
     valid_modes = {'fp16', 'int8', 'int4'}
     if mode not in valid_modes:
         if logger:
-            logger.record_event(
+            logger.log_training_event(
                 event_type="invalid_quantization_mode",
                 message=f"Invalid quantization mode: {mode}",
                 level="warning",
@@ -78,10 +78,9 @@ def log_memory_usage(label: str = "", device: torch.device = None, logger: Optio
     if logger:
         stats = memory_usage(device)
         if stats:
-            logger.record_event(
-                event_type="memory_usage",
-                message="Memory usage statistics",
-                level="info",
+            logger.log_memory_usage(
+                phase=label,
+                device=device,
                 additional_info={
                     "memory_stats": stats,
                     "label": label
@@ -122,7 +121,7 @@ def dynamic_batch_size(
             adjusted = max(1, adjusted)
         
         if logger:
-            logger.record_event(
+            logger.log_training_event(
                 event_type="batch_size_adjustment",
                 message="Batch size adjusted based on memory",
                 level="info",
@@ -136,10 +135,10 @@ def dynamic_batch_size(
     
     except Exception as e:
         if logger:
-            logger.record_event(
-                event_type="batch_size_error",
-                message=f"Dynamic batch size failed: {str(e)}",
-                level="error",
+            logger.log_error(
+                error_msg=f"Dynamic batch size failed: {str(e)}",
+                error_type="batch_size_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "base_size": base_size,
                     "error": str(e)
@@ -176,7 +175,7 @@ def detect_repetitions(
             next_window = filtered[i + min_rep_length:i + 2 * min_rep_length]
             if window == next_window:
                 if logger:
-                    logger.record_event(
+                    logger.log_training_event(
                         event_type="repetition_detected",
                         message="Token repetition detected",
                         level="warning",
@@ -191,10 +190,10 @@ def detect_repetitions(
     
     except Exception as e:
         if logger:
-            logger.record_event(
-                event_type="repetition_detection_error",
-                message=f"Repetition detection failed: {str(e)}",
-                level="error",
+            logger.log_error(
+                error_msg=f"Repetition detection failed: {str(e)}",
+                error_type="repetition_detection_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "token_ids_length": len(token_ids),
                     "error": str(e)
@@ -241,26 +240,31 @@ def adjust_temperature(
             adjusted_temp = max(min_temp, min(max_temp, base_temp + temp_adjustment))
             
             if logger:
-                logger.record({
-                    'event': 'temperature_adjustment',
-                    'base_temp': base_temp,
-                    'temperament_score': temperament_score,
-                    'mood_influence': mood_influence,
-                    'curiosity_pressure': curiosity_pressure,
-                    'adjusted_temp': adjusted_temp,
-                    'timestamp': time.time()
-                })
+                logger.log_training_event(
+                    event_type="temperature_adjustment",
+                    message="Temperature adjusted based on temperament and curiosity",
+                    level="info",
+                    additional_info={
+                        "base_temp": base_temp,
+                        "temperament_score": temperament_score,
+                        "mood_influence": mood_influence,
+                        "curiosity_pressure": curiosity_pressure,
+                        "adjusted_temp": adjusted_temp
+                    }
+                )
             return adjusted_temp
     
     except Exception as e:
         if logger:
-            logger.record({
-                "error": f"Temperature adjustment failed: {str(e)}",
-                "base_temp": base_temp,
-                "temperament_score": temperament_score,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            logger.log_error(
+                error_msg=f"Temperature adjustment failed: {str(e)}",
+                error_type="temperature_adjustment_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "base_temp": base_temp,
+                    "temperament_score": temperament_score
+                }
+            )
         return base_temp
 
 def synchronized(lock: Optional[Lock] = None) -> Callable:

@@ -229,15 +229,22 @@ class FileDataProvider(DataProvider):
             event_type=event_type,
             message=message,
             level=level,
-            additional_info=additional_info
+            additional_info={
+                "timestamp": time.time(),
+                **(additional_info or {})
+            }
         )
         
     def _log_error(self, error: Exception, context: str, stack_trace: Optional[str] = None) -> None:
         """Log an error with context and stack trace."""
-        self.error_handler.handle_data_error(
-            error=error,
-            context=context,
-            stack_trace=stack_trace
+        self.logger.log_error(
+            error_msg=str(error),
+            error_type="data_error",
+            stack_trace=stack_trace or traceback.format_exc(),
+            additional_info={
+                "context": context,
+                "timestamp": time.time()
+            }
         )
 
     def validate_data(self, data: List[Dict[str, Any]]) -> bool:
@@ -354,40 +361,30 @@ class FileDataProvider(DataProvider):
 
     def _log_load_success(self, source: str, entry_count: int) -> None:
         """Log successful data load event."""
-        self.logger.record_event(
-            event_type="data_loaded",
+        self._log_event(
+            event_type="data_load_success",
             message="Data loaded successfully",
             level="info",
             additional_info={
                 "source": source,
-                "entry_count": entry_count,
-                "timestamp": time.time()
+                "entry_count": entry_count
             }
         )
 
     def _log_load_error(self, source: str, error: Exception) -> None:
         """Log data load error."""
-        self.logger.record_event(
-            event_type="data_load_error",
-            message=f"Failed to load data from {source}",
-            level="error",
-            additional_info={
-                "source": source,
-                "error": str(error),
-                "stack_trace": traceback.format_exc(),
-                "timestamp": time.time()
-            }
+        self._log_error(
+            error=error,
+            context=f"Failed to load data from {source}",
+            stack_trace=traceback.format_exc()
         )
 
     def _log_validation_warning(self, message: str) -> None:
         """Log validation warning."""
-        self.logger.record_event(
+        self._log_event(
             event_type="data_validation_warning",
             message=message,
-            level="warning",
-            additional_info={
-                "timestamp": time.time()
-            }
+            level="warning"
         )
 
     def _validate_split_ratio(self, split_ratio: float) -> None:
@@ -652,15 +649,24 @@ class DataManager:
             event_type=event_type,
             message=message,
             level=level,
-            additional_info=additional_info
+            additional_info={
+                "timestamp": time.time(),
+                "conversation_id": self._get_conversation_id(),
+                **(additional_info or {})
+            }
         )
         
     def _log_error(self, error: Exception, context: str, stack_trace: Optional[str] = None) -> None:
         """Log an error with context and stack trace."""
-        self.error_handler.handle_data_error(
-            error=error,
-            context=context,
-            stack_trace=stack_trace
+        self.logger.log_error(
+            error_msg=str(error),
+            error_type="data_error",
+            stack_trace=stack_trace or traceback.format_exc(),
+            additional_info={
+                "context": context,
+                "conversation_id": self._get_conversation_id(),
+                "timestamp": time.time()
+            }
         )
 
     def set_provider(self, provider: DataProvider) -> None:

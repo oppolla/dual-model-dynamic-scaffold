@@ -78,8 +78,10 @@ class GenerationManager:
     def _log_initialization(self) -> None:
         """Log GenerationManager initialization with config values."""
         self._log_event(
-            "manager_init",
-            {
+            event_type="generation_manager_init",
+            message="GenerationManager initialized successfully",
+            level="info",
+            additional_info={
                 "controls_config": {k: self.controls_config.get(k) for k in [
                     "memory_threshold", "max_generation_retries", "scaffold_unk_id", 
                     "use_token_map_memory", "dynamic_cross_attn_mode", "conversation_history_maxlen",
@@ -98,35 +100,37 @@ class GenerationManager:
             self.generation_callbacks[stage].append(callback)
         else:
             self._log_error(
-                error=f"Invalid callback stage: {stage}",
-                context="register_callback"
+                Exception(f"Invalid callback stage: {stage}"),
+                "register_callback"
             )
 
-    def _log_event(self, event: str, data: Dict[str, Any]) -> None:
-        """Log an event with standardized metadata."""
+    def _log_event(self, event_type: str, message: str, level: str = "info", additional_info: Optional[Dict] = None) -> None:
+        """Log an event with standardized fields."""
         self.logger.record_event(
-            event_type=f"generation_{event}",
-            message=f"Generation event: {event}",
-            level="info",
+            event_type=event_type,
+            message=message,
+            level=level,
             additional_info={
-                **data,
+                "timestamp": time.time(),
                 "conversation_id": self.state.history.conversation_id,
                 "state_hash": self.state.state_hash,
-                "device": str(self.device)
+                "device": str(self.device),
+                **(additional_info or {})
             }
         )
 
-    def _log_error(self, error: str, context: str, stack_trace: Optional[str] = None) -> None:
-        """Log an error through ErrorManager with standardized metadata."""
-        self.error_manager.context.logger.log_error(
-            error_msg=error,
+    def _log_error(self, error: Exception, context: str, stack_trace: Optional[str] = None) -> None:
+        """Log an error with context and stack trace."""
+        self.logger.log_error(
+            error_msg=str(error),
             error_type=f"generation_{context}_error",
             stack_trace=stack_trace or traceback.format_exc(),
             additional_info={
                 "context": context,
                 "conversation_id": self.state.history.conversation_id,
                 "state_hash": self.state.state_hash,
-                "device": str(self.device)
+                "device": str(self.device),
+                "timestamp": time.time()
             }
         )
 
@@ -142,7 +146,8 @@ class GenerationManager:
                 "total_memory": total_memory,
                 "threshold": self.memory_threshold,
                 "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash
+                "state_hash": self.state.state_hash,
+                "timestamp": time.time()
             }
         )
 
@@ -174,9 +179,9 @@ class GenerationManager:
             return True
         except Exception as e:
             self._log_error(
-                error=f"Memory health check failed: {str(e)}",
-                context="check_memory_health",
-                stack_trace=traceback.format_exc()
+                Exception(f"Memory health check failed: {str(e)}"),
+                "check_memory_health",
+                traceback.format_exc()
             )
             return False
 
@@ -207,9 +212,9 @@ class GenerationManager:
             return response
         except Exception as e:
             self._log_error(
-                error=f"Error prompt handling failed: {str(e)}",
-                context="handle_error_prompt",
-                stack_trace=traceback.format_exc()
+                Exception(f"Error prompt handling failed: {str(e)}"),
+                "handle_error_prompt",
+                traceback.format_exc()
             )
             return "An error occurred while handling the error prompt"
 
@@ -230,9 +235,9 @@ class GenerationManager:
             return False
         except Exception as e:
             self._log_error(
-                error=f"Repetition check failed: {str(e)}",
-                context="has_repetition",
-                stack_trace=traceback.format_exc()
+                Exception(f"Repetition check failed: {str(e)}"),
+                "has_repetition",
+                traceback.format_exc()
             )
             return False
 
@@ -273,9 +278,9 @@ class GenerationManager:
             }
         except Exception as e:
             self._log_error(
-                error=f"Tokenization failed: {str(e)}",
-                context="tokenize_and_map",
-                stack_trace=traceback.format_exc()
+                Exception(f"Tokenization failed: {str(e)}"),
+                "tokenize_and_map",
+                traceback.format_exc()
             )
             raise
 
@@ -298,9 +303,9 @@ class GenerationManager:
                 return hidden_states.detach()
         except Exception as e:
             self._log_error(
-                error=f"Scaffold hidden states failed: {str(e)}",
-                context="get_scaffold_hidden_states",
-                stack_trace=traceback.format_exc()
+                Exception(f"Scaffold hidden states failed: {str(e)}"),
+                "get_scaffold_hidden_states",
+                traceback.format_exc()
             )
             raise
 
@@ -349,9 +354,9 @@ class GenerationManager:
                 )
             except Exception as e:
                 self._log_error(
-                    error=f"Failed to clear scaffold cache: {str(e)}",
-                    context="clear_scaffold_cache",
-                    stack_trace=traceback.format_exc()
+                    Exception(f"Failed to clear scaffold cache: {str(e)}"),
+                    "clear_scaffold_cache",
+                    traceback.format_exc()
                 )
 
     def _update_token_map_memory(self, prompt: str, confidence: float) -> None:
@@ -367,9 +372,9 @@ class GenerationManager:
             )
         except Exception as e:
             self._log_error(
-                error=f"Token map update failed: {str(e)}",
-                context="update_token_map_memory",
-                stack_trace=traceback.format_exc()
+                Exception(f"Token map update failed: {str(e)}"),
+                "update_token_map_memory",
+                traceback.format_exc()
             )
 
     def prepare_for_training(self, batch: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -384,9 +389,9 @@ class GenerationManager:
             }
         except Exception as e:
             self._log_error(
-                error=f"Training preparation failed: {str(e)}",
-                context="prepare_for_training",
-                stack_trace=traceback.format_exc()
+                Exception(f"Training preparation failed: {str(e)}"),
+                "prepare_for_training",
+                traceback.format_exc()
             )
             raise
 
@@ -415,9 +420,9 @@ class GenerationManager:
             return None
         except Exception as e:
             self._log_error(
-                error=f"Failed to compute dynamic factor: {str(e)}",
-                context="compute_dynamic_factor",
-                stack_trace=traceback.format_exc()
+                Exception(f"Failed to compute dynamic factor: {str(e)}"),
+                "compute_dynamic_factor",
+                traceback.format_exc()
             )
             return None
 
@@ -445,9 +450,9 @@ class GenerationManager:
             except Exception as e:
                 dream_memory_info["error"] = str(e)
                 self._log_error(
-                    error=f"Dream memory preparation failed: {str(e)}",
-                    context="prepare_dream_memory",
-                    stack_trace=traceback.format_exc()
+                    Exception(f"Dream memory preparation failed: {str(e)}"),
+                    "prepare_dream_memory",
+                    traceback.format_exc()
                 )
 
         return memory_tensors, dream_memory_info
@@ -507,9 +512,9 @@ class GenerationManager:
 
         except Exception as e:
             self._log_error(
-                error=f"Failed to update curiosity: {str(e)}",
-                context="curiosity_update",
-                stack_trace=traceback.format_exc()
+                Exception(f"Failed to update curiosity: {str(e)}"),
+                "curiosity_update",
+                traceback.format_exc()
             )
             # Don't raise the exception to prevent generation failure
             # but ensure the error is logged and handled
@@ -527,9 +532,9 @@ class GenerationManager:
             return processor.calculate_confidence(generated_ids)
         except Exception as e:
             self._log_error(
-                error=f"Confidence score calculation failed: {str(e)}",
-                context="calculate_confidence_score",
-                stack_trace=traceback.format_exc()
+                Exception(f"Confidence score calculation failed: {str(e)}"),
+                "calculate_confidence_score",
+                traceback.format_exc()
             )
             return 0.5
 
@@ -651,8 +656,8 @@ class GenerationManager:
             
         except Exception as e:
             self._log_error(
+                Exception(f"generation_error: {str(e)}"),
                 "generation_error",
-                str(e),
                 {
                     "prompt": prompt,
                     "max_length": max_length,
@@ -681,7 +686,11 @@ class GenerationManager:
                     self.scaffolds[i] = scaffold.to(self.device)
                     
         except Exception as e:
-            self._log_error("device_validation_error", str(e))
+            self._log_error(
+                Exception(f"device_validation_error: {str(e)}"),
+                "device_validation",
+                traceback.format_exc()
+            )
             raise
 
     def _store_state_metadata(self, conversation_id: Optional[str], state_hash: Optional[str]) -> None:
@@ -726,9 +735,9 @@ class GenerationManager:
                 
         except Exception as e:
             self._log_error(
-                error=f"Failed to validate curiosity state: {str(e)}",
-                context="curiosity_validation",
-                stack_trace=traceback.format_exc()
+                Exception(f"Failed to validate curiosity state: {str(e)}"),
+                "curiosity_validation",
+                traceback.format_exc()
             )
             raise
 

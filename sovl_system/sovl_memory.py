@@ -84,10 +84,13 @@ class MemoryManager:
         self.memory_threshold = self.dynamic_threshold_base
 
         # Log initialization
-        self._log_event("memory_manager_initialized", {
-            "device": str(self._device),
-            "config_device": str(config_manager.device)
-        })
+        self._logger.record_event(
+            event_type="memory_manager_initialized",
+            message="Memory manager initialized",
+            level="info",
+            device=str(self._device),
+            config_device=str(config_manager.device)
+        )
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
@@ -1035,8 +1038,21 @@ class MemoryMonitor:
             self.memory_threshold = self.config_manager.get("memory_config.memory_threshold", 0.8)
             self.check_interval = self.config_manager.get("memory_config.check_interval", 1000)
             
+            self.logger.record_event(
+                event_type="memory_monitor_initialized",
+                message="Memory monitor configuration initialized",
+                level="info",
+                max_memory_mb=self.max_memory_mb,
+                memory_threshold=self.memory_threshold,
+                check_interval=self.check_interval
+            )
+            
         except Exception as e:
-            self.logger.error(f"Failed to initialize memory configuration: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Failed to initialize memory configuration: {str(e)}",
+                error_type="memory_config_error",
+                stack_trace=traceback.format_exc()
+            )
             raise
             
     def get_memory_usage(self) -> Dict[str, Any]:
@@ -1063,7 +1079,11 @@ class MemoryMonitor:
             }
             
         except Exception as e:
-            self.logger.error(f"Failed to get memory usage: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Failed to get memory usage: {str(e)}",
+                error_type="memory_stats_error",
+                stack_trace=traceback.format_exc()
+            )
             return {
                 "allocated_mb": 0,
                 "reserved_mb": 0,
@@ -1086,33 +1106,43 @@ class MemoryMonitor:
             is_below_threshold = percentage_used < threshold
             
             if not is_below_threshold:
-                self.logger.warning(
-                    "Memory usage above threshold",
-                    extra={
-                        "percentage_used": percentage_used,
-                        "threshold": threshold,
-                        "allocated_mb": memory_stats["allocated_mb"],
-                        "max_memory_mb": memory_stats["max_memory_mb"]
-                    }
+                self.logger.record_event(
+                    event_type="memory_threshold_exceeded",
+                    message="Memory usage above threshold",
+                    level="warning",
+                    percentage_used=percentage_used,
+                    threshold=threshold,
+                    allocated_mb=memory_stats["allocated_mb"],
+                    max_memory_mb=memory_stats["max_memory_mb"]
                 )
                 
             return is_below_threshold
             
         except Exception as e:
-            self.logger.error(f"Failed to check memory usage: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Failed to check memory usage: {str(e)}",
+                error_type="memory_check_error",
+                stack_trace=traceback.format_exc()
+            )
             return True  # Default to safe state
             
     def log_memory_usage(self) -> None:
         """Log current memory usage statistics."""
         try:
             memory_stats = self.get_memory_usage()
-            self.logger.info(
-                "Memory usage statistics",
-                extra=memory_stats
+            self.logger.record_event(
+                event_type="memory_usage_stats",
+                message="Memory usage statistics",
+                level="info",
+                additional_info=memory_stats
             )
             
         except Exception as e:
-            self.logger.error(f"Failed to log memory usage: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Failed to log memory usage: {str(e)}",
+                error_type="memory_logging_error",
+                stack_trace=traceback.format_exc()
+            )
             
     def is_memory_available(self, required_mb: float) -> bool:
         """Check if required memory is available."""
@@ -1124,18 +1154,22 @@ class MemoryMonitor:
             is_available = available_mb >= required_mb
             
             if not is_available:
-                self.logger.warning(
-                    "Insufficient memory available",
-                    extra={
-                        "required_mb": required_mb,
-                        "available_mb": available_mb,
-                        "allocated_mb": memory_stats["allocated_mb"],
-                        "max_memory_mb": memory_stats["max_memory_mb"]
-                    }
+                self.logger.record_event(
+                    event_type="insufficient_memory",
+                    message="Insufficient memory available",
+                    level="warning",
+                    required_mb=required_mb,
+                    available_mb=available_mb,
+                    allocated_mb=memory_stats["allocated_mb"],
+                    max_memory_mb=memory_stats["max_memory_mb"]
                 )
                 
             return is_available
             
         except Exception as e:
-            self.logger.error(f"Failed to check memory availability: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Failed to check memory availability: {str(e)}",
+                error_type="memory_availability_error",
+                stack_trace=traceback.format_exc()
+            )
             return False  # Default to safe state

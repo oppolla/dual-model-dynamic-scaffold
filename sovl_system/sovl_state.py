@@ -228,24 +228,23 @@ class StateBase:
         self.logger = logger
         self.lock = Lock()
 
-    def _log_event(self, event: str, message: str, level: str = "info", **kwargs):
+    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs):
         """Log an event with standardized fields."""
-        self.logger.record({
-            "event": event,
-            "message": message,
-            "level": level,
-            "timestamp": time.time(),
+        self.logger.record_event(
+            event_type=event_type,
+            message=message,
+            level=level,
             **kwargs
-        })
+        )
 
-    def _log_error(self, message: str, **kwargs):
+    def _log_error(self, error_msg: str, error_type: str = None, **kwargs):
         """Log an error with stack trace."""
-        self.logger.record({
-            "error": message,
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc(),
+        self.logger.log_error(
+            error_msg=error_msg,
+            error_type=error_type or "state_error",
+            stack_trace=traceback.format_exc(),
             **kwargs
-        })
+        )
 
     def _validate_number(self, value: Any, name: str, min_value: Optional[float] = None) -> float:
         """Validate a numeric value."""
@@ -679,19 +678,35 @@ class SOVLState(StateBase):
     @synchronized("lock")
     def _initialize_state(self) -> None:
         """Initialize state components."""
-        self.seen_prompts = set()
-        self.temperament_score = 0.0
-        self.last_temperament_score = 0.0
-        self.confidence_history = deque(maxlen=self.config_manager.get("confidence_history_maxlen"))
-        self.temperament_history = deque(maxlen=self.config_manager.get("temperament_history_maxlen"))
-        self.dream_memory = deque(maxlen=self.config_manager.get("dream_memory_maxlen"))
-        self.total_dream_memory_mb = 0.0
-        self.history = ConversationHistory(
-            maxlen=self.config_manager.get("max_messages"),
-            conversation_id=str(uuid.uuid4())
-        )
-        # Initialize data stats
-        self.data_stats = DataStats()
+        try:
+            self.seen_prompts = set()
+            self.temperament_score = 0.0
+            self.last_temperament_score = 0.0
+            self.confidence_history = deque(maxlen=self.config_manager.get("confidence_history_maxlen"))
+            self.temperament_history = deque(maxlen=self.config_manager.get("temperament_history_maxlen"))
+            self.dream_memory = deque(maxlen=self.config_manager.get("dream_memory_maxlen"))
+            self.total_dream_memory_mb = 0.0
+            self.history = ConversationHistory(
+                maxlen=self.config_manager.get("max_messages"),
+                conversation_id=str(uuid.uuid4())
+            )
+            # Initialize data stats
+            self.data_stats = DataStats()
+            
+            self.logger.record_event(
+                event_type="state_initialized",
+                message="SOVL state components initialized",
+                level="info",
+                conversation_id=self.history.conversation_id,
+                state_hash=self.state_hash()
+            )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to initialize state components: {str(e)}",
+                error_type="state_component_initialization_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
 
     @synchronized("lock")
     def update_data_stats(self, 
@@ -712,15 +727,23 @@ class SOVLState(StateBase):
             )
             
             # Log the update
-            self._log_event(
-                "data_stats_updated",
+            self.logger.record_event(
+                event_type="data_stats_updated",
                 message="Data statistics updated",
                 level="info",
+                conversation_id=self.history.conversation_id,
+                state_hash=self.state_hash(),
                 additional_info=self.data_stats.to_dict()
             )
             
         except Exception as e:
-            self._log_error(f"Failed to update data stats: {str(e)}")
+            self.logger.log_error(
+                error_msg=f"Failed to update data stats: {str(e)}",
+                error_type="data_stats_update_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=self.history.conversation_id,
+                state_hash=self.state_hash()
+            )
             raise
 
     def get_data_stats(self) -> Dict[str, Any]:
@@ -878,8 +901,9 @@ class StateManager:
             
             state = SOVLState(self.config_manager, self.logger, self.device)
             state.config = sovl_config
-            self._log_event(
-                "state_initialized",
+            
+            self.logger.record_event(
+                event_type="state_initialized",
                 message="SOVL state initialized",
                 level="info",
                 state_hash=state.state_hash(),
@@ -888,9 +912,9 @@ class StateManager:
             return state
             
         except Exception as e:
-            self._log_error(
-                "state_initialization_failed",
-                message=f"Failed to initialize state: {str(e)}",
+            self.logger.log_error(
+                error_msg=f"Failed to initialize state: {str(e)}",
+                error_type="state_initialization_error",
                 stack_trace=traceback.format_exc()
             )
             raise
@@ -907,31 +931,29 @@ class StateManager:
                     if self.state is None:
                         self.state = SOVLState(self.config_manager, self.logger, self.device)
                     self.state = SOVLState.from_dict(state_data, self.config_manager, self.logger, self.device)
-                    self.logger.record({
-                        "event": "state_loaded",
-                        "message": "State loaded from file",
-                        "level": "info",
-                        "timestamp": time.time(),
-                        "state_path": state_path,
-                        "state_hash": self.state.state_hash()
-                    })
+                    self.logger.record_event(
+                        event_type="state_loaded",
+                        message="State loaded from file",
+                        level="info",
+                        state_path=state_path,
+                        state_hash=self.state.state_hash()
+                    )
                 else:
                     self.state = self.initialize_state()
-                    self.logger.record({
-                        "event": "new_state_created",
-                        "message": "New state created as file not found",
-                        "level": "info",
-                        "timestamp": time.time(),
-                        "state_path": state_path,
-                        "state_hash": self.state.state_hash()
-                    })
+                    self.logger.record_event(
+                        event_type="new_state_created",
+                        message="New state created as file not found",
+                        level="info",
+                        state_path=state_path,
+                        state_hash=self.state.state_hash()
+                    )
                 return self.state
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to load state: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.log_error(
+                error_msg=f"Failed to load state: {str(e)}",
+                error_type="state_load_error",
+                stack_trace=traceback.format_exc()
+            )
             raise StateError(f"State loading failed: {str(e)}")
 
     def save_state(self, state_path: Optional[str] = None) -> None:
@@ -946,20 +968,19 @@ class StateManager:
                 os.makedirs(os.path.dirname(state_path), exist_ok=True)
                 with open(state_path, 'w') as f:
                     json.dump(state_data, f, indent=2)
-                self.logger.record({
-                    "event": "state_saved",
-                    "message": "State saved to file",
-                    "level": "info",
-                    "timestamp": time.time(),
-                    "state_path": state_path,
-                    "state_hash": self.state.state_hash()
-                })
+                self.logger.record_event(
+                    event_type="state_saved",
+                    message="State saved to file",
+                    level="info",
+                    state_path=state_path,
+                    state_hash=self.state.state_hash()
+                )
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to save state: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.log_error(
+                error_msg=f"Failed to save state: {str(e)}",
+                error_type="state_save_error",
+                stack_trace=traceback.format_exc()
+            )
             raise StateError(f"State saving failed: {str(e)}")
 
     def get_state(self) -> SOVLState:

@@ -2,7 +2,7 @@ from typing import Optional, Dict, Any
 import torch
 from threading import Lock
 from collections import deque
-import logging
+from sovl_logger import Logger
 
 # SOVL-specific dependencies
 from sovl_state import SOVLState
@@ -34,9 +34,10 @@ Primary interface: calculate_confidence_score
 class ConfidenceCalculator:
     """Handles confidence score calculation with thread safety."""
     
-    def __init__(self):
+    def __init__(self, logger: Logger):
         """Initialize the confidence calculator with a thread lock."""
         self.lock = Lock()
+        self.logger = logger
         
     @synchronized()
     def calculate_confidence_score(
@@ -69,6 +70,20 @@ class ConfidenceCalculator:
                 base_confidence, state, context, curiosity_manager
             )
             final_confidence = __finalize_confidence(adjusted_confidence, state)
+            
+            self.logger.record_event(
+                event_type="confidence_calculated",
+                message="Confidence calculation completed successfully",
+                level="info",
+                additional_info={
+                    "base_confidence": base_confidence,
+                    "adjusted_confidence": adjusted_confidence,
+                    "final_confidence": final_confidence,
+                    "logits_shape": logits.shape,
+                    "generated_ids_shape": generated_ids.shape
+                }
+            )
+            
             return final_confidence
         except Exception as e:
             return __recover_confidence(e, state, error_manager)
@@ -142,8 +157,17 @@ def __apply_adjustments(
             "temperament_config.influence", DEFAULT_TEMPERAMENT_INFLUENCE
         )
     except Exception as e:
-        logging.warning(f"Failed to get temperament influence: {str(e)}. Using default: {DEFAULT_TEMPERAMENT_INFLUENCE}")
+        state.logger.record_event(
+            event_type="temperament_config_error",
+            message="Failed to get temperament influence, using default value",
+            level="warning",
+            additional_info={
+                "error": str(e),
+                "default_value": DEFAULT_TEMPERAMENT_INFLUENCE
+            }
+        )
         temperament_influence = DEFAULT_TEMPERAMENT_INFLUENCE
+        
     confidence *= (1.0 + state.temperament_score * temperament_influence)
     
     return confidence
@@ -160,6 +184,17 @@ def __finalize_confidence(confidence: float, state: SOVLState) -> float:
     """
     final_confidence = max(MIN_CONFIDENCE, min(MAX_CONFIDENCE, confidence))
     state.confidence_history.append(final_confidence)
+    
+    state.logger.record_event(
+        event_type="confidence_finalized",
+        message="Confidence score finalized and history updated",
+        level="info",
+        additional_info={
+            "final_confidence": final_confidence,
+            "history_length": len(state.confidence_history)
+        }
+    )
+    
     return final_confidence
 
 def __recover_confidence(error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
@@ -177,7 +212,7 @@ def __recover_confidence(error: Exception, state: SOVLState, error_manager: Erro
         # Validate confidence history
         if not hasattr(state, 'confidence_history') or not isinstance(state.confidence_history, deque):
             error_manager.logger.record_event(
-                event_type="confidence_error",
+                event_type="confidence_history_error",
                 message="Invalid confidence history structure",
                 level="error",
                 additional_info={"error": str(error)}
@@ -190,7 +225,7 @@ def __recover_confidence(error: Exception, state: SOVLState, error_manager: Erro
             # Validate history values
             if any(not isinstance(c, (int, float)) or c < MIN_CONFIDENCE or c > MAX_CONFIDENCE for c in recent_confidences):
                 error_manager.logger.record_event(
-                    event_type="confidence_error",
+                    event_type="confidence_history_invalid",
                     message="Invalid values in confidence history",
                     level="error",
                     additional_info={"history": recent_confidences}
@@ -201,7 +236,7 @@ def __recover_confidence(error: Exception, state: SOVLState, error_manager: Erro
             
             # Log recovery
             error_manager.logger.record_event(
-                event_type="confidence_recovery",
+                event_type="confidence_recovered",
                 message="Recovered confidence from history",
                 level="warning",
                 additional_info={
@@ -215,7 +250,7 @@ def __recover_confidence(error: Exception, state: SOVLState, error_manager: Erro
             
         # If recovery fails, use conservative default
         error_manager.logger.record_event(
-            event_type="confidence_default",
+            event_type="confidence_default_used",
             message="Using default confidence due to insufficient history",
             level="warning",
             additional_info={
@@ -238,7 +273,7 @@ def __recover_confidence(error: Exception, state: SOVLState, error_manager: Erro
         return DEFAULT_CONFIDENCE
 
 # Singleton instance of ConfidenceCalculator
-_confidence_calculator = ConfidenceCalculator()
+_confidence_calculator = None
 
 def calculate_confidence_score(
     logits: torch.Tensor,
@@ -261,6 +296,10 @@ def calculate_confidence_score(
     Returns:
         float: Confidence score between 0.0 and 1.0
     """
+    global _confidence_calculator
+    if _confidence_calculator is None:
+        _confidence_calculator = ConfidenceCalculator(state.logger)
+        
     return _confidence_calculator.calculate_confidence_score(
         logits=logits,
         generated_ids=generated_ids,

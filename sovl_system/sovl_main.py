@@ -67,18 +67,24 @@ class SystemContext:
     def _on_config_change(self) -> None:
         """Handle configuration changes and propagate them to affected components."""
         try:
-            # Log configuration change
             self.logger.record_event(
                 event_type="config_change",
                 message="Configuration changed",
-                level="info"
+                level="info",
+                additional_info={
+                    "timestamp": time.time(),
+                    "config_path": self.config_path
+                }
             )
         except Exception as e:
-            self.logger.record_event(
-                event_type="config_change_error",
-                message=f"Failed to handle config change: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="config_change_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_path": self.config_path,
+                    "timestamp": time.time()
+                }
             )
 
 class SystemInitializationError(Exception):
@@ -208,22 +214,32 @@ class StateTracker:
             "conversation_id": self.state.history.conversation_id
         })
         
-    def _log_event(self, event: str, data: Optional[Dict] = None) -> None:
+    def _log_event(self, event_type: str, message: str, level: str = "info", additional_info: Optional[Dict] = None) -> None:
         """Log an event with standardized fields."""
         self.context.logger.record_event(
-            event_type=f"state_{event}",
-            message=f"State event: {event}",
-            level="info",
-            additional_info=data
+            event_type=f"state_{event_type}",
+            message=message,
+            level=level,
+            additional_info={
+                "timestamp": time.time(),
+                "state_hash": self.state.state_hash if self.state else None,
+                "conversation_id": self.state.history.conversation_id if self.state else None,
+                **(additional_info or {})
+            }
         )
         
-    def _log_error(self, message: str, error: Exception) -> None:
-        """Log an error with stack trace."""
+    def _log_error(self, error: Exception, context: str, stack_trace: Optional[str] = None) -> None:
+        """Log an error with context and stack trace."""
         self.context.logger.log_error(
-            error_msg=message,
-            error_type="state_error",
-            stack_trace=traceback.format_exc(),
-            additional_info={"error": str(error)}
+            error_msg=str(error),
+            error_type=f"state_{context}_error",
+            stack_trace=stack_trace or traceback.format_exc(),
+            additional_info={
+                "context": context,
+                "state_hash": self.state.state_hash if self.state else None,
+                "conversation_id": self.state.history.conversation_id if self.state else None,
+                "timestamp": time.time()
+            }
         )
         
     def load_state(self) -> None:
@@ -245,7 +261,7 @@ class StateTracker:
                     "conversation_id": self.state.history.conversation_id
                 })
         except Exception as e:
-            self._log_error("State loading failed", e)
+            self._log_error(e, "state_loading")
             raise StateError(f"Failed to load state: {str(e)}")
             
     def save_state(self) -> None:
@@ -260,7 +276,7 @@ class StateTracker:
                         "state_hash": self.state.state_hash
                     })
         except Exception as e:
-            self._log_error("State saving failed", e)
+            self._log_error(e, "state_saving")
             raise StateError(f"Failed to save state: {str(e)}")
             
     def get_state(self) -> SOVLState:
@@ -325,26 +341,23 @@ class ErrorManager:
         try:
             error_key = f"training:{type(error).__name__}"
             
-            # Check for duplicate error
             if self._is_duplicate_error(error, "training"):
-                self.logger.record_event(
+                self._log_event(
                     event_type="duplicate_training_error",
                     message=f"Duplicate training error detected: {error_key}",
                     level="warning",
                     additional_info={
-                        "error": str(error),
+                        "error_key": error_key,
                         "batch_size": batch_size
                     }
                 )
                 return
                 
-            # Increment error count
             self.error_counts[error_key] += 1
             
-            # Log error
-            self.logger.record_event(
-                event_type="training_error",
-                message=f"Training error: {str(error)}",
+            self._log_error(
+                error=error,
+                context="training",
                 level="error",
                 additional_info={
                     "error_key": error_key,
@@ -353,16 +366,15 @@ class ErrorManager:
                 }
             )
             
-            # Determine severity and take action using safe_compare
             if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
                 self._recover_training(error_key)
             elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
                 self._adjust_training_parameters(batch_size)
                 
         except Exception as e:
-            self.logger.record_event(
-                event_type="error_handling_failed",
-                message=f"Failed to handle training error: {str(e)}",
+            self._log_error(
+                error=e,
+                context="error_handling",
                 level="critical",
                 additional_info={
                     "original_error": str(error),
@@ -375,26 +387,23 @@ class ErrorManager:
         try:
             error_key = f"curiosity:{type(error).__name__}"
             
-            # Check for duplicate error
             if self._is_duplicate_error(error, "curiosity"):
-                self.logger.record_event(
+                self._log_event(
                     event_type="duplicate_curiosity_error",
                     message=f"Duplicate curiosity error detected: {error_key}",
                     level="warning",
                     additional_info={
-                        "error": str(error),
+                        "error_key": error_key,
                         "pressure": pressure
                     }
                 )
                 return
                 
-            # Increment error count
             self.error_counts[error_key] += 1
             
-            # Log error
-            self.logger.record_event(
-                event_type="curiosity_error",
-                message=f"Curiosity error: {str(error)}",
+            self._log_error(
+                error=error,
+                context="curiosity",
                 level="error",
                 additional_info={
                     "error_key": error_key,
@@ -403,16 +412,15 @@ class ErrorManager:
                 }
             )
             
-            # Determine severity and take action using safe_compare
             if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
                 self._recover_curiosity(error_key)
             elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
                 self._adjust_curiosity_parameters(pressure)
                 
         except Exception as e:
-            self.logger.record_event(
-                event_type="error_handling_failed",
-                message=f"Failed to handle curiosity error: {str(e)}",
+            self._log_error(
+                error=e,
+                context="error_handling",
                 level="critical",
                 additional_info={
                     "original_error": str(error),
@@ -425,26 +433,23 @@ class ErrorManager:
         try:
             error_key = f"memory:{type(error).__name__}"
             
-            # Check for duplicate error
             if self._is_duplicate_error(error, "memory"):
-                self.logger.record_event(
+                self._log_event(
                     event_type="duplicate_memory_error",
                     message=f"Duplicate memory error detected: {error_key}",
                     level="warning",
                     additional_info={
-                        "error": str(error),
+                        "error_key": error_key,
                         "memory_usage": memory_usage
                     }
                 )
                 return
                 
-            # Increment error count
             self.error_counts[error_key] += 1
             
-            # Log error
-            self.logger.record_event(
-                event_type="memory_error",
-                message=f"Memory error: {str(error)}",
+            self._log_error(
+                error=error,
+                context="memory",
                 level="error",
                 additional_info={
                     "error_key": error_key,
@@ -453,16 +458,15 @@ class ErrorManager:
                 }
             )
             
-            # Determine severity and take action using safe_compare
             if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
                 self._recover_memory(error_key)
             elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
                 self._adjust_memory_parameters(memory_usage)
                 
         except Exception as e:
-            self.logger.record_event(
-                event_type="error_handling_failed",
-                message=f"Failed to handle memory error: {str(e)}",
+            self._log_error(
+                error=e,
+                context="error_handling",
                 level="critical",
                 additional_info={
                     "original_error": str(error),
@@ -475,26 +479,23 @@ class ErrorManager:
         try:
             error_key = f"generation:{type(error).__name__}"
             
-            # Check for duplicate error
             if self._is_duplicate_error(error, "generation"):
-                self.logger.record_event(
+                self._log_event(
                     event_type="duplicate_generation_error",
                     message=f"Duplicate generation error detected: {error_key}",
                     level="warning",
                     additional_info={
-                        "error": str(error),
+                        "error_key": error_key,
                         "temperature": temperature
                     }
                 )
                 return
                 
-            # Increment error count
             self.error_counts[error_key] += 1
             
-            # Log error
-            self.logger.record_event(
-                event_type="generation_error",
-                message=f"Generation error: {str(error)}",
+            self._log_error(
+                error=error,
+                context="generation",
                 level="error",
                 additional_info={
                     "error_key": error_key,
@@ -503,16 +504,15 @@ class ErrorManager:
                 }
             )
             
-            # Determine severity and take action using safe_compare
             if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
                 self._recover_generation(error_key)
             elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
                 self._adjust_generation_parameters(temperature)
                 
         except Exception as e:
-            self.logger.record_event(
-                event_type="error_handling_failed",
-                message=f"Failed to handle generation error: {str(e)}",
+            self._log_error(
+                error=e,
+                context="error_handling",
                 level="critical",
                 additional_info={
                     "original_error": str(error),
@@ -525,27 +525,24 @@ class ErrorManager:
         try:
             error_key = f"data:{type(error).__name__}"
             
-            # Check for duplicate error
             if self._is_duplicate_error(error, "data"):
-                self.logger.record_event(
+                self._log_event(
                     event_type="duplicate_data_error",
                     message=f"Duplicate data error detected: {error_key}",
                     level="warning",
                     additional_info={
-                        "error": str(error),
+                        "error_key": error_key,
                         "context": context,
                         "conversation_id": conversation_id
                     }
                 )
                 return
                 
-            # Increment error count
             self.error_counts[error_key] += 1
             
-            # Log error
-            self.logger.record_event(
-                event_type="data_error",
-                message=f"Data error: {str(error)}",
+            self._log_error(
+                error=error,
+                context="data",
                 level="error",
                 additional_info={
                     "error_key": error_key,
@@ -555,16 +552,15 @@ class ErrorManager:
                 }
             )
             
-            # Determine severity and take action using safe_compare
             if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
                 self._recover_data(error_key)
             elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
                 self._adjust_data_parameters(context)
                 
         except Exception as e:
-            self.logger.record_event(
-                event_type="error_handling_failed",
-                message=f"Failed to handle data error: {str(e)}",
+            self._log_error(
+                error=e,
+                context="error_handling",
                 level="critical",
                 additional_info={
                     "original_error": str(error),
@@ -583,7 +579,7 @@ class ErrorManager:
             self.context.config_handler.config_manager.update("training_config.batch_size", 1)
             self.context.config_handler.config_manager.update("training_config.learning_rate", 1e-5)
             
-            self.logger.record_event(
+            self._log_event(
                 event_type="training_recovery",
                 message="Recovered from critical training error",
                 level="info",
@@ -591,9 +587,9 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from training error: {str(e)}",
+            self._log_error(
+                error=e,
+                context="recovery",
                 level="critical",
                 additional_info={"error_key": error_key}
             )
@@ -605,7 +601,7 @@ class ErrorManager:
             new_batch_size = max(1, batch_size // 2)
             self.context.config_handler.config_manager.update("training_config.batch_size", new_batch_size)
             
-            self.logger.record_event(
+            self._log_event(
                 event_type="training_adjustment",
                 message="Adjusted training parameters",
                 level="info",
@@ -616,9 +612,9 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="adjustment_failed",
-                message=f"Failed to adjust training parameters: {str(e)}",
+            self._log_error(
+                error=e,
+                context="adjustment",
                 level="error"
             )
             
