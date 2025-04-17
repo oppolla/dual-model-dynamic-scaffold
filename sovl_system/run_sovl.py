@@ -67,6 +67,7 @@ class SOVLRunner:
         self.model_manager = None
         self.optimizer = None
         self.scheduler = None
+        self.tokenizer = None  # Initialize tokenizer
         self.last_checkpoint_time = None
         self.checkpoint_interval = CHECKPOINT_INTERVAL
         self.metrics_history = []
@@ -197,48 +198,40 @@ class SOVLRunner:
 
     def _initialize_context(self, args: argparse.Namespace) -> SystemContext:
         """Initialize system context with validation and error handling."""
-        if not os.path.exists(args.config):
-            self.logger.log_error(
-                error_msg=f"Configuration file not found: {args.config}",
-                error_type="config_validation_error"
-            )
-            sys.exit(1)
-            
-        config_manager = ConfigManager(args.config, self.logger)
-        
-        # Subscribe to configuration changes
-        config_manager.subscribe(self._on_config_change)
-        
-        # Validate configuration using ConfigManager
         try:
-            config_manager.validate_or_raise()
-        except ValueError as e:
-            self.logger.log_error(
-                error_msg=f"Configuration validation failed: {str(e)}",
-                error_type="config_validation_error"
-            )
-            sys.exit(1)
-        
-        if args.device == "cuda" and not torch.cuda.is_available():
-            self.logger.log_error(
-                error_msg="CUDA is not available. Please use --device cpu",
-                error_type="device_validation_error"
-            )
-            sys.exit(1)
+            if not os.path.exists(args.config):
+                raise FileNotFoundError(f"Configuration file not found: {args.config}")
             
-        self.logger.log_event(
-            event_type="device_selected",
-            message=f"Using {'CUDA device: ' + torch.cuda.get_device_name(0) if args.device == 'cuda' else 'CPU device'}",
-            level="info"
-        )
-        
-        Path("output").mkdir(exist_ok=True)
-        
-        return SystemContext(
-            config_path=args.config,
-            device=args.device,
-            config_manager=config_manager
-        )
+            config_manager = ConfigManager(args.config, self.logger)
+            config_manager.subscribe(self._on_config_change)
+            
+            try:
+                config_manager.validate_or_raise()
+            except ValueError as e:
+                raise ValueError(f"Configuration validation failed: {str(e)}")
+            
+            if args.device == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError("CUDA is not available. Please use --device cpu")
+            
+            self.logger.log_event(
+                event_type="device_selected",
+                message=f"Using {'CUDA device: ' + torch.cuda.get_device_name(0) if args.device == 'cuda' else 'CPU device'}",
+                level="info"
+            )
+            
+            Path("output").mkdir(exist_ok=True)
+            
+            return SystemContext(
+                config_path=args.config,
+                device=args.device,
+                config_manager=config_manager
+            )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="context_initialization_error"
+            )
+            raise
     
     def _initialize_scaffold_components(self) -> None:
         """Initialize scaffold-related components."""
@@ -294,6 +287,7 @@ class SOVLRunner:
                 # Use ModelManager to load models
                 self.model_manager.load_models()
                 self.model = self.model_manager.get_base_model()
+                self.tokenizer = self.model_manager.get_tokenizer()  # Set tokenizer
                 components.append(self.model)
                 
                 # Initialize optimizer and scheduler
@@ -410,19 +404,39 @@ class SOVLRunner:
             if self.context and self.context.config_manager:
                 self.context.config_manager.unsubscribe(self._on_config_change)
             
-            # Use ModelManager cleanup
+            # Cleanup model manager and model
             if self.model_manager:
                 self.model_manager.cleanup()
+                self.model = None
+                self.tokenizer = None
             
+            # Cleanup optimizer and scheduler
+            if self.optimizer:
+                self.optimizer = None
+            if self.scheduler:
+                self.scheduler = None
+            
+            # Cleanup scaffold components
+            if self.scaffold_provider:
+                self.scaffold_provider = None
+            if self.scaffold_token_mapper:
+                self.scaffold_token_mapper = None
+            if self.cross_attention_injector:
+                self.cross_attention_injector = None
+            if self.scaffold_model:
+                self.scaffold_model = None
+            
+            # Cleanup context and components
             if self.context:
-                self.logger.log_event(
-                    event_type="cleanup",
-                    message="Cleaning up context...",
-                    level="info"
-                )
                 self.context.cleanup()
                 self.context = None
-                
+            if self.components:
+                self.components = None
+            
+            # Clear CUDA cache if using GPU
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             self.logger.log_event(
                 event_type="cleanup",
                 message="Cleanup completed successfully",
@@ -619,6 +633,14 @@ class SOVLRunner:
 
     def _run_validation(self, valid_data: List[Dict[str, Any]], batch_size: int) -> Dict[str, float]:
         """Run validation loop and compute metrics."""
+        if not valid_data:
+            self.logger.log_event(
+                event_type="validation",
+                message="No validation data provided",
+                level="warning"
+            )
+            return {}
+            
         try:
             self.logger.log_event(
                 event_type="validation_start",
@@ -638,18 +660,13 @@ class SOVLRunner:
                         if not batch:
                             continue
                             
-                        # Prepare batch
                         inputs = self._prepare_batch(batch)
-                        
-                        # Forward pass
                         outputs = self.model(**inputs)
                         loss = self._calculate_loss(outputs, inputs)
                         
-                        # Update metrics
                         total_loss += loss.item()
                         total_batches += 1
                         
-                        # Calculate additional metrics
                         if "accuracy" in metrics:
                             preds = outputs.logits.argmax(dim=-1)
                             mask = inputs["labels"] != -100
@@ -666,61 +683,26 @@ class SOVLRunner:
                             metrics["confidence"] += max_probs[mask].mean().item()
                             
                     except Exception as e:
-                        error_context = ErrorContext(
-                            error_type="validation_error",
-                            error_message=str(e),
-                            stack_trace=traceback.format_exc(),
-                            timestamp=datetime.now(),
-                            additional_info={
-                                "batch_index": i,
-                                "batch_size": batch_size,
-                                "total_batches": total_batches
-                            }
-                        )
-                        self.error_manager.handle_error(
-                            error=e,
-                            error_type="validation",
-                            context=error_context
+                        self.logger.log_error(
+                            error_msg=f"Error processing batch {i}: {str(e)}",
+                            error_type="validation_batch_error"
                         )
                         continue
             
-            # Average metrics
             if total_batches > 0:
                 metrics["loss"] = total_loss / total_batches
                 for metric in metrics:
                     if metric != "loss":
                         metrics[metric] /= total_batches
             
-            # Log validation results
-            self.logger.log_event(
-                event_type="validation_complete",
-                message="Validation completed",
-                level="info",
-                additional_info={
-                    "metrics": metrics,
-                    "total_batches": total_batches
-                }
-            )
-            
             return metrics
             
         except Exception as e:
-            error_context = ErrorContext(
-                error_type="critical_validation_error",
-                error_message=str(e),
-                stack_trace=traceback.format_exc(),
-                timestamp=datetime.now(),
-                additional_info={
-                    "total_batches": total_batches,
-                    "metrics": metrics
-                }
+            self.logger.log_error(
+                error_msg=f"Validation error: {str(e)}",
+                error_type="validation_error"
             )
-            self.error_manager.handle_error(
-                error=e,
-                error_type="validation",
-                context=error_context
-            )
-            raise
+            return {}
 
     def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Prepare batch for model input."""
