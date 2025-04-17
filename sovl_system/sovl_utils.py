@@ -10,6 +10,7 @@ import traceback
 from functools import wraps
 
 from sovl_logger import Logger
+from sovl_config import ConfigManager
 
 class NumericalGuard:
     """Context manager for numerical stability."""
@@ -48,35 +49,64 @@ def float_gt(a: float, b: float, tolerance: float = 1e-6) -> bool:
     except Exception:
         return False
 
-def validate_quantization_mode(mode: str, logger: Optional[Logger] = None) -> str:
+def validate_quantization_mode(mode: str, config_manager: ConfigManager, logger: Optional[Logger] = None) -> str:
     """Validate and handle quantization mode."""
-    valid_modes = {'fp16', 'int8', 'int4'}
+    valid_modes = config_manager.get("core_config.valid_quantization_modes", ['fp16', 'int8', 'int4'])
     if mode not in valid_modes:
         if logger:
             logger.log_training_event(
                 event_type="invalid_quantization_mode",
                 message=f"Invalid quantization mode: {mode}",
                 level="warning",
-                additional_info={"defaulting_to": "fp16"}
+                additional_info={
+                    "defaulting_to": "fp16",
+                    "valid_modes": valid_modes
+                }
             )
         return 'fp16'
     return mode
 
-def memory_usage(device: torch.device = None) -> Dict[str, float]:
+def memory_usage(device: torch.device = None, config_manager: Optional[ConfigManager] = None) -> Dict[str, float]:
     """Get memory usage statistics in GB."""
     if device is None or device.type != 'cuda':
         return {}
     
-    return {
-        'allocated': torch.cuda.memory_allocated(device) / (1024 ** 3),
-        'reserved': torch.cuda.memory_reserved(device) / (1024 ** 3),
-        'max_allocated': torch.cuda.max_memory_allocated(device) / (1024 ** 3)
-    }
+    try:
+        stats = {
+            'allocated': torch.cuda.memory_allocated(device) / (1024 ** 3),
+            'reserved': torch.cuda.memory_reserved(device) / (1024 ** 3),
+            'max_allocated': torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+        }
+        
+        if config_manager:
+            memory_threshold = config_manager.get("memory_config.memory_threshold", 0.85)
+            if stats['allocated'] / stats['reserved'] > memory_threshold:
+                if hasattr(config_manager, 'logger'):
+                    config_manager.logger.record_event(
+                        event_type="memory_threshold_exceeded",
+                        message="Memory usage exceeded threshold",
+                        level="warning",
+                        additional_info={
+                            "allocated": stats['allocated'],
+                            "reserved": stats['reserved'],
+                            "threshold": memory_threshold
+                        }
+                    )
+        
+        return stats
+    except Exception as e:
+        if config_manager and hasattr(config_manager, 'logger'):
+            config_manager.logger.log_error(
+                error_msg=f"Failed to get memory usage: {str(e)}",
+                error_type="memory_usage_error",
+                stack_trace=traceback.format_exc()
+            )
+        return {}
 
-def log_memory_usage(label: str = "", device: torch.device = None, logger: Optional[Logger] = None):
+def log_memory_usage(label: str = "", device: torch.device = None, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None):
     """Log memory usage statistics."""
     if logger:
-        stats = memory_usage(device)
+        stats = memory_usage(device, config_manager)
         if stats:
             logger.log_memory_usage(
                 phase=label,
@@ -89,8 +119,7 @@ def log_memory_usage(label: str = "", device: torch.device = None, logger: Optio
 
 def dynamic_batch_size(
     base_size: int,
-    memory_threshold: float = 0.8,
-    safety_factor: float = 0.9,
+    config_manager: ConfigManager,
     logger: Optional[Logger] = None
 ) -> int:
     """
@@ -98,8 +127,7 @@ def dynamic_batch_size(
     
     Args:
         base_size: Base batch size
-        memory_threshold: Memory usage threshold (0 to 1)
-        safety_factor: Safety margin for memory allocation
+        config_manager: Configuration manager instance
         logger: Optional logger for debugging
     
     Returns:
@@ -109,6 +137,9 @@ def dynamic_batch_size(
         return base_size
     
     try:
+        memory_threshold = config_manager.get("memory_config.memory_threshold", 0.8)
+        safety_factor = config_manager.get("memory_config.safety_factor", 0.9)
+        
         total_mem = torch.cuda.get_device_properties(0).total_memory
         allocated = torch.cuda.memory_allocated()
         available = (total_mem * memory_threshold * safety_factor) - allocated
@@ -128,7 +159,9 @@ def dynamic_batch_size(
                 additional_info={
                     "base_size": base_size,
                     "adjusted_size": adjusted,
-                    "available_memory": available / (1024 ** 3)
+                    "available_memory": available / (1024 ** 3),
+                    "memory_threshold": memory_threshold,
+                    "safety_factor": safety_factor
                 }
             )
         return adjusted
@@ -149,8 +182,7 @@ def dynamic_batch_size(
 def detect_repetitions(
     token_ids: List[int],
     special_ids: Set[int],
-    min_rep_length: int = 3,
-    max_scan: int = 100,
+    config_manager: ConfigManager,
     logger: Optional[Logger] = None
 ) -> Optional[Tuple[int, int]]:
     """
@@ -159,14 +191,16 @@ def detect_repetitions(
     Args:
         token_ids: List of token IDs
         special_ids: Set of special token IDs to ignore
-        min_rep_length: Minimum sequence length to check
-        max_scan: Maximum number of tokens to scan
+        config_manager: Configuration manager instance
         logger: Optional logger for debugging
     
     Returns:
         (start_idx, end_idx) of first repetition found or None
     """
     try:
+        min_rep_length = config_manager.get("processor_config.min_rep_length", 3)
+        max_scan = config_manager.get("processor_config.max_rep_scan", 100)
+        
         filtered = [i for i in token_ids if i not in special_ids]
         scan_range = min(len(filtered), max_scan)
         
@@ -204,10 +238,7 @@ def detect_repetitions(
 def adjust_temperature(
     base_temp: float,
     temperament_score: float,
-    mood_influence: float = 0.3,
-    min_temp: float = 0.5,
-    max_temp: float = 1.5,
-    curiosity_pressure: Optional[float] = None,
+    config_manager: ConfigManager,
     logger: Optional[Logger] = None
 ) -> float:
     """
@@ -216,10 +247,7 @@ def adjust_temperature(
     Args:
         base_temp: Base temperature from config
         temperament_score: Current temperament (-1 to 1)
-        mood_influence: Mood effect strength
-        min_temp: Minimum temperature allowed
-        max_temp: Maximum temperature allowed
-        curiosity_pressure: Optional curiosity pressure (0 to 1)
+        config_manager: Configuration manager instance
         logger: Optional logger for debugging
     
     Returns:
@@ -227,6 +255,12 @@ def adjust_temperature(
     """
     try:
         with NumericalGuard():
+            # Get configuration values
+            mood_influence = config_manager.get("controls_config.temp_mood_influence", 0.3)
+            min_temp = config_manager.get("controls_config.min_temperature", 0.5)
+            max_temp = config_manager.get("controls_config.max_temperature", 1.5)
+            curiosity_pressure = config_manager.get("curiosity_config.curiosity_pressure", None)
+            
             # Clamp input values
             base_temp = max(min_temp, min(max_temp, base_temp))
             temperament_score = max(-1.0, min(1.0, temperament_score))
