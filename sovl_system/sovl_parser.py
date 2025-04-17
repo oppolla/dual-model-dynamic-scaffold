@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 from sovl_logger import Logger
 from sovl_error import ErrorHandler
 from sovl_events import EventDispatcher
+from sovl_processor import SoulLogitsProcessor
 import traceback
 
 class SoulParser(NodeVisitor):
@@ -19,6 +20,7 @@ class SoulParser(NodeVisitor):
         self.data = {"metadata": {}, "sections": {}, "unparsed": {}}
         self.current_section = None
         self.line_number = 0
+        self.keywords = {}  # Store keywords and their weights
 
     def visit_section(self, node, visited_children):
         self.current_section = node.text.strip("[]")
@@ -78,6 +80,109 @@ class SoulParser(NodeVisitor):
         if node.expr_name == "comment":
             self.line_number += 1
         return node
+
+    def extract_keywords(self) -> Dict[str, float]:
+        """Extract keywords and their weights from parsed soul data.
+        
+        Returns:
+            Dictionary mapping keywords to their weights.
+        """
+        try:
+            # Extract from Voice section
+            if "Voice" in self.data["sections"]:
+                voice_data = self.data["sections"]["Voice"]
+                if "Description" in voice_data:
+                    keywords = voice_data["Description"].split(",")
+                    for keyword in keywords:
+                        self.keywords[keyword.strip()] = 0.8  # High weight for voice characteristics
+                
+                if "Summary" in voice_data:
+                    keywords = voice_data["Summary"].split()
+                    for keyword in keywords:
+                        self.keywords[keyword.strip()] = 0.7  # Medium weight for summary words
+
+            # Extract from Heartbeat section
+            if "Heartbeat" in self.data["sections"]:
+                heartbeat_data = self.data["sections"]["Heartbeat"]
+                if "Tendencies" in heartbeat_data:
+                    tendencies = heartbeat_data["Tendencies"].split(",")
+                    for tendency in tendencies:
+                        self.keywords[tendency.strip()] = 0.9  # Very high weight for tendencies
+
+            # Extract from Echoes section
+            if "Echoes" in self.data["sections"]:
+                echoes_data = self.data["sections"]["Echoes"]
+                if "Memory" in echoes_data:
+                    for memory in echoes_data["Memory"]:
+                        if isinstance(memory, dict) and "Scene" in memory:
+                            words = memory["Scene"].split()
+                            for word in words:
+                                if len(word) > 4:  # Only consider longer words
+                                    self.keywords[word.strip()] = 0.6  # Medium weight for memory words
+
+            self.logger.record_event(
+                event_type="keywords_extracted",
+                message="Successfully extracted keywords from soul data",
+                level="info",
+                additional_info={"keyword_count": len(self.keywords)}
+            )
+            
+            return self.keywords
+
+        except Exception as e:
+            self.error_handler.handle_data_error(
+                e,
+                {"operation": "keyword_extraction"},
+                "soul_keyword_extraction"
+            )
+            return {}
+
+    def create_logits_processor(self, tokenizer) -> Optional['SoulLogitsProcessor']:
+        """Create a SoulLogitsProcessor instance using extracted keywords.
+        
+        Args:
+            tokenizer: The tokenizer to use for processing.
+            
+        Returns:
+            SoulLogitsProcessor instance or None if creation fails.
+        """
+        try:
+            from sovl_processor import SoulLogitsProcessor
+            
+            # Extract keywords if not already done
+            if not self.keywords:
+                self.extract_keywords()
+            
+            if not self.keywords:
+                self.logger.record_event(
+                    event_type="processor_creation",
+                    message="No keywords available for logits processor",
+                    level="warning"
+                )
+                return None
+            
+            processor = SoulLogitsProcessor(
+                soul_keywords=self.keywords,
+                tokenizer=tokenizer,
+                logger=self.logger
+            )
+            
+            self.logger.record_event(
+                event_type="processor_created",
+                message="Successfully created SoulLogitsProcessor",
+                level="info",
+                additional_info={"keyword_count": len(self.keywords)}
+            )
+            
+            return processor
+            
+        except Exception as e:
+            self.error_handler.handle_data_error(
+                e,
+                {"operation": "processor_creation"},
+                "soul_processor_creation"
+            )
+            return None
 
 def parse_soul_file(
     file_path: str,
