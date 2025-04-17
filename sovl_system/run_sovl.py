@@ -57,6 +57,9 @@ class SOVLRunner:
         self.orchestrator = None
         self.state_manager = None
         self.error_manager = None  # Add error manager
+        self.tokenizer = None  # Add tokenizer
+        self.optimizer = None  # Add optimizer
+        self.scheduler = None  # Add scheduler
         self.last_checkpoint_time = None
         self.checkpoint_interval = CHECKPOINT_INTERVAL
         self.metrics_history = []
