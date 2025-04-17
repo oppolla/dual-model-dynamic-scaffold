@@ -70,7 +70,7 @@
 - 8.1 Partial Soulprints
 - 8.2 Multi-Agent Merging
 
-### 9. Appendices
+### 9. Example File
 
 ## Overview
 
