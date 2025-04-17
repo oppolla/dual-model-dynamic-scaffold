@@ -29,6 +29,13 @@ from sovl_memory import MemoryManager
 from sovl_state import StateManager, SOVLState
 from sovl_error import ErrorManager, ErrorContext
 from sovl_manager import ModelManager
+from sovl_scaffold import (
+    ScaffoldTokenMapper,
+    CrossAttentionLayer,
+    CrossAttentionInjector,
+    ScaffoldProvider,
+    build_scaffold_token_mapping
+)
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -67,6 +74,12 @@ class SOVLRunner:
         self.best_validation_loss = float('inf')
         self.patience = 0
         self.max_patience = 3
+        
+        # Scaffold-related attributes
+        self.scaffold_provider = None
+        self.scaffold_token_mapper = None
+        self.cross_attention_injector = None
+        self.scaffold_model = None
         
     @staticmethod
     def _setup_logger() -> Logger:
@@ -183,6 +196,30 @@ class SOVLRunner:
             config_manager=config_manager
         )
     
+    def _initialize_scaffold_components(self) -> None:
+        """Initialize scaffold-related components."""
+        try:
+            # Initialize scaffold provider
+            self.scaffold_provider = ScaffoldProvider()
+            self.logger.log_event("Initialized scaffold provider", level="info")
+            
+            # Initialize token mapper
+            self.scaffold_token_mapper = ScaffoldTokenMapper()
+            self.logger.log_event("Initialized scaffold token mapper", level="info")
+            
+            # Initialize cross-attention injector
+            self.cross_attention_injector = CrossAttentionInjector()
+            self.logger.log_event("Initialized cross-attention injector", level="info")
+            
+            # Build token mapping
+            mapping = build_scaffold_token_mapping()
+            self.scaffold_token_mapper.update_mapping(mapping)
+            self.logger.log_event("Built scaffold token mapping", level="info")
+            
+        except Exception as e:
+            self.logger.log_error(f"Failed to initialize scaffold components: {str(e)}")
+            raise
+
     def _initialize_components(self, context: SystemContext) -> Tuple:
         """Initialize core SOVL components with progress tracking."""
         components = []
@@ -719,6 +756,25 @@ class SOVLRunner:
                 error_type="metrics_update_error"
             )
             raise
+
+    def _validate_component_serialization(self, component: Any, name: str) -> bool:
+        """Validate that a component has required serialization methods."""
+        try:
+            if not hasattr(component, 'to_dict') or not hasattr(component, 'from_dict'):
+                raise ValueError(f"Component {name} missing required serialization methods")
+            
+            # Validate scaffold components
+            if name in ["scaffold_provider", "scaffold_token_mapper", "cross_attention_injector"]:
+                if component is not None and (not hasattr(component, 'to_dict') or not hasattr(component, 'from_dict')):
+                    raise ValueError(f"Scaffold component {name} missing required serialization methods")
+            
+            self.logger.log_event(f"Validated component {name} serialization", level="info")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.log_error(f"Component {name} serialization validation failed: {str(e)}")
+            return False
 
     def run(self):
         """Main execution method with enhanced argument parsing."""
