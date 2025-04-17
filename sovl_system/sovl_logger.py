@@ -280,9 +280,33 @@ class Logger:
                     stack_trace=traceback.format_exc()
                 )
 
-    def _get_memory_usage(self) -> float:
-        """Get current memory usage in MB."""
-        return psutil.Process().memory_info().rss / (1024 * 1024)
+    def _get_memory_stats(self) -> Dict[str, Any]:
+        """Get current memory statistics."""
+        stats = {
+            "gpu_allocated": None,
+            "gpu_reserved": None,
+            "gpu_memory_percent": None
+        }
+        
+        if torch.cuda.is_available():
+            try:
+                allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+                reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # Convert to GB
+                total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
+                
+                stats.update({
+                    "gpu_allocated": allocated,
+                    "gpu_reserved": reserved,
+                    "gpu_memory_percent": (allocated / total) * 100 if total > 0 else None
+                })
+            except Exception as e:
+                self.fallback_logger.log_event(
+                    "memory_stats_failed",
+                    message=f"Failed to get GPU memory stats: {str(e)}",
+                    level="warning"
+                )
+        
+        return stats
 
     def _should_prune(self) -> bool:
         """Check if logs should be pruned."""
@@ -290,8 +314,8 @@ class Logger:
         if current_time - self._last_prune_time < self.config.prune_interval_hours * 3600:
             return False
             
-        memory_usage = self._get_memory_usage()
-        if memory_usage > self.config.memory_threshold_mb:
+        memory_usage = self._get_memory_stats()
+        if memory_usage['gpu_memory_percent'] > self.config.memory_threshold_mb:
             return True
             
         return False
@@ -305,7 +329,7 @@ class Logger:
                 if current_time - entry.get('timestamp', 0) < self.config.max_log_age_days * 86400
             ]
             
-            if self._get_memory_usage() > self.config.memory_threshold_mb:
+            if self._get_memory_stats()['gpu_memory_percent'] > self.config.memory_threshold_mb:
                 self._log_buffer = self._log_buffer[-self.config.max_in_memory_logs:]
                 
             self._last_prune_time = current_time
@@ -431,7 +455,7 @@ class Logger:
             'level': 'info',
             'phase': phase,
             'device': str(device),
-            'memory_stats': memory_usage(device),
+            'memory_stats': self._get_memory_stats(),
             **kwargs
         }
         
@@ -591,7 +615,7 @@ class Logger:
         return {
             'log_buffer_size': len(self._log_buffer),
             'cache_size': len(self._log_cache),
-            'memory_usage_mb': self._get_memory_usage(),
+            'memory_usage_mb': self._get_memory_stats()['gpu_memory_percent'],
             'last_prune_time': self._last_prune_time
         }
 
@@ -610,6 +634,36 @@ class Logger:
                 self.fallback_logger.log_error(
                     error_msg=f"Failed to cleanup logger: {str(e)}",
                     error_type="logger_cleanup_error",
+                    stack_trace=traceback.format_exc()
+                )
+
+    def record(self, data: Dict[str, Any]) -> None:
+        """Record a log entry with memory statistics."""
+        try:
+            # Add memory stats to the log entry
+            memory_stats = self._get_memory_stats()
+            data.update(memory_stats)
+            
+            # Add timestamp if not present
+            if "timestamp" not in data:
+                data["timestamp"] = time.time()
+            
+            # Add event type if not present
+            if "event" not in data:
+                data["event"] = "log_entry"
+            
+            # Add to buffer
+            self._log_buffer.append(data)
+            
+            # Write to file if buffer is full
+            if len(self._log_buffer) >= self.config.max_in_memory_logs:
+                self._write_batch()
+                
+        except Exception as e:
+            if self.fallback_logger:
+                self.fallback_logger.log_error(
+                    error_msg=f"Failed to record log entry: {str(e)}",
+                    error_type="record_error",
                     stack_trace=traceback.format_exc()
                 )
 

@@ -14,6 +14,7 @@ import json
 import os
 import threading
 import collections
+from datetime import datetime
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -873,19 +874,59 @@ class SOVLState(StateBase):
                 stack_trace=traceback.format_exc()
             )
 
+    def _get_memory_stats(self) -> Dict[str, Any]:
+        """Get current memory statistics."""
+        stats = {
+            "gpu_allocated": None,
+            "gpu_reserved": None,
+            "gpu_memory_percent": None
+        }
+        
+        if torch.cuda.is_available():
+            try:
+                allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+                reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # Convert to GB
+                total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
+                
+                stats.update({
+                    "gpu_allocated": allocated,
+                    "gpu_reserved": reserved,
+                    "gpu_memory_percent": (allocated / total) * 100 if total > 0 else None
+                })
+            except Exception as e:
+                self.logger.record_event(
+                    "memory_stats_failed",
+                    message=f"Failed to get GPU memory stats: {str(e)}",
+                    level="warning"
+                )
+        
+        return stats
+
     def _update_memory_usage(self) -> None:
         """Update memory usage statistics."""
-        self.total_dream_memory_mb = self._calculate_memory_usage()
-        if self.total_dream_memory_mb > self.config_manager.get("memory_config.max_dream_memory_mb", 512.0):
-            self._prune_dream_memory()
+        try:
+            memory_stats = self._get_memory_stats()
+            self.memory_usage = memory_stats
+            self.last_memory_update = time.time()
+        except Exception as e:
+            self.logger.record_event(
+                "memory_update_failed",
+                message=f"Failed to update memory stats: {str(e)}",
+                level="warning"
+            )
 
     def _calculate_memory_usage(self) -> float:
-        """Calculate current memory usage in MB."""
-        total_bytes = 0
-        for memory in self.dream_memory:
-            if isinstance(memory["tensor"], torch.Tensor):
-                total_bytes += memory["tensor"].element_size() * memory["tensor"].nelement()
-        return total_bytes / (1024 * 1024)  # Convert to MB
+        """Calculate current memory usage percentage."""
+        try:
+            memory_stats = self._get_memory_stats()
+            return memory_stats.get("gpu_memory_percent", 0.0)
+        except Exception as e:
+            self.logger.record_event(
+                "memory_calculation_failed",
+                message=f"Failed to calculate memory usage: {str(e)}",
+                level="warning"
+            )
+            return 0.0
 
     def _compress_tensor(self, tensor: torch.Tensor) -> Dict[str, Any]:
         """Compress tensor for storage."""

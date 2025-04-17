@@ -10,7 +10,6 @@ from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import memory_usage, safe_divide
 import threading
-import psutil
 import logging
 from sovl_config import ConfigManager
 import gc
@@ -419,15 +418,24 @@ class MemoryManager:
         """Retrieve GPU memory statistics."""
         if not torch.cuda.is_available():
             return None
-        mem_stats = memory_usage(self._device)
-        if not mem_stats:
+        try:
+            allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+            reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # Convert to GB
+            total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
+            
+            return {
+                "allocated": allocated,
+                "reserved": reserved,
+                "total": total,
+                "available": total - allocated
+            }
+        except Exception as e:
             self._log_event(
                 "memory_stats_failed",
                 message="Failed to retrieve memory stats",
                 level="warning"
             )
             return None
-        return mem_stats
 
     def check_memory_health(self, model_size: int, trainer: Optional[Any] = None):
         """Autonomically reduce GPU memory usage if approaching capacity."""
@@ -867,7 +875,7 @@ class MemoryManager:
             raise
 
     def log_memory_stats(self, label: str = "", verbose: bool = False) -> None:
-        """Log detailed memory statistics, including CPU memory if available."""
+        """Log detailed memory statistics."""
         stats = {
             "timestamp": time.time(),
             "event": "memory_stats",
@@ -875,7 +883,6 @@ class MemoryManager:
             "gpu_allocated": None,
             "gpu_reserved": None,
             "gpu_memory_percent": None,
-            "cpu_available": None,
             "dream_memory_len": len(self._dream_memory),
             "token_map_size": len(self._token_map),
             "conversation_history_len": len(self._conversation_history),
@@ -888,8 +895,7 @@ class MemoryManager:
             try:
                 stats["gpu_allocated"] = mem_stats['allocated']
                 stats["gpu_reserved"] = mem_stats['reserved']
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                stats["gpu_memory_percent"] = (stats["gpu_allocated"] * (1024 ** 3) / total_memory * 100) if total_memory > 0 else None
+                stats["gpu_memory_percent"] = (mem_stats['allocated'] / mem_stats['total']) * 100 if mem_stats['total'] > 0 else None
             except Exception as e:
                 self._log_event(
                     "memory_stats_calculation_failed",
@@ -897,17 +903,11 @@ class MemoryManager:
                     level="warning"
                 )
 
-        try:
-            stats["cpu_available"] = psutil.virtual_memory().available / (1024 ** 3)
-        except ImportError:
-            pass
-
         self._logger.record(stats)
         if verbose and stats["gpu_allocated"] is not None:
             print(f"\n--- Memory Stats ({label}) ---")
             print(f"Allocated: {stats['gpu_allocated']:.2f} GB")
             print(f"Reserved:  {stats['gpu_reserved']:.2f} GB")
-            print(f"CPU Available: {stats['cpu_available']:.2f} GB" if stats['cpu_available'] else "CPU stats unavailable")
             print(f"Dream Memory: {stats['dream_memory_len']} items")
             print(f"Token Map: {stats['token_map_size']} entries")
             print(f"Conversation History: {stats['conversation_history_len']} messages")
