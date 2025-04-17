@@ -5,7 +5,6 @@ import traceback
 import json
 import threading
 import math
-
 import torch
 from torch import nn
 
@@ -20,15 +19,27 @@ class Curiosity:
         weight_ignorance: float = 0.7,
         weight_novelty: float = 0.3,
         metrics_maxlen: int = 1000,
-        logger: Optional[Any] = None
+        logger: Optional[Any] = None,
+        max_memory_mb: float = 512.0,
+        batch_size: int = 32
     ):
         self._validate_weights(weight_ignorance, weight_novelty)
         self.weight_ignorance = weight_ignorance
         self.weight_novelty = weight_novelty
         self.metrics_maxlen = metrics_maxlen
         self.logger = logger
+        self.max_memory_mb = max_memory_mb
+        self.batch_size = batch_size
+        
+        # Initialize components
         self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
         self.metrics = deque(maxlen=metrics_maxlen)
+        self.embedding_cache = {}
+        self.lock = threading.Lock()
+        self.memory_usage = 0.0
+        
+        # Initialize memory tracking
+        self._update_memory_usage()
 
     def _validate_weights(self, ignorance: float, novelty: float) -> None:
         """Validate weight parameters."""
@@ -36,6 +47,44 @@ class Curiosity:
             raise ValueError("Weights must be between 0.0 and 1.0")
         if abs(ignorance + novelty - 1.0) > 1e-6:
             raise ValueError("Weights must sum to 1.0")
+
+    def _update_memory_usage(self) -> None:
+        """Update memory usage tracking."""
+        try:
+            with self.lock:
+                self.memory_usage = sum(
+                    tensor.element_size() * tensor.nelement() / (1024 * 1024)
+                    for tensor in self.embedding_cache.values()
+                )
+        except Exception as e:
+            self._log_error(f"Memory usage tracking failed: {str(e)}")
+
+    def _prune_cache(self) -> None:
+        """Prune cache if memory usage exceeds threshold."""
+        try:
+            with self.lock:
+                if self.memory_usage > self.max_memory_mb:
+                    # Sort by last access time and remove oldest entries
+                    sorted_cache = sorted(
+                        self.embedding_cache.items(),
+                        key=lambda x: x[1].get('last_access', 0)
+                    )
+                    while self.memory_usage > self.max_memory_mb * 0.8 and sorted_cache:
+                        key, _ = sorted_cache.pop(0)
+                        del self.embedding_cache[key]
+                        self._update_memory_usage()
+        except Exception as e:
+            self._log_error(f"Cache pruning failed: {str(e)}")
+
+    def _compress_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Compress tensor to reduce memory usage."""
+        try:
+            if tensor.dtype == torch.float32:
+                return tensor.half()  # Convert to float16
+            return tensor
+        except Exception as e:
+            self._log_error(f"Tensor compression failed: {str(e)}")
+            return tensor
 
     def compute_curiosity(
         self,
@@ -47,14 +96,30 @@ class Curiosity:
     ) -> float:
         """Compute curiosity score based on confidence and embeddings."""
         try:
+            # Compress and cache query embedding
+            query_embedding = self._compress_tensor(query_embedding)
+            query_key = hash(query_embedding.cpu().numpy().tobytes())
+            
+            with self.lock:
+                if query_key not in self.embedding_cache:
+                    self.embedding_cache[query_key] = {
+                        'tensor': query_embedding,
+                        'last_access': time.time()
+                    }
+                    self._update_memory_usage()
+                    self._prune_cache()
+            
+            # Compute scores
             ignorance = self._compute_ignorance_score(base_conf, scaf_conf)
             novelty = (
                 self._compute_novelty_score(memory_embeddings, query_embedding, device)
                 if memory_embeddings and query_embedding is not None
                 else 0.0
             )
+            
             score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
             return self._clamp_score(score)
+            
         except Exception as e:
             self._log_error(f"Curiosity computation failed: {str(e)}")
             return 0.5
@@ -69,13 +134,29 @@ class Curiosity:
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
-        """Compute novelty component of curiosity score."""
-        query_embedding = query_embedding.to(device)
-        similarities = [
-            self.cosine_similarity(query_embedding, emb.to(device)).item()
-            for emb in memory_embeddings
-        ]
-        return self._clamp_score(1.0 - max(similarities, default=0.0))
+        """Compute novelty component of curiosity score using batched processing."""
+        try:
+            query_embedding = query_embedding.to(device)
+            
+            # Process embeddings in batches
+            max_similarity = 0.0
+            for i in range(0, len(memory_embeddings), self.batch_size):
+                batch = memory_embeddings[i:i + self.batch_size]
+                batch_tensors = torch.stack([emb.to(device) for emb in batch])
+                
+                # Compute similarities in parallel
+                similarities = self.cosine_similarity(
+                    query_embedding.unsqueeze(0),
+                    batch_tensors
+                )
+                
+                max_similarity = max(max_similarity, similarities.max().item())
+            
+            return self._clamp_score(1.0 - max_similarity)
+            
+        except Exception as e:
+            self._log_error(f"Novelty score computation failed: {str(e)}")
+            return 0.0
 
     def _clamp_score(self, score: float) -> float:
         """Clamp score between 0.0 and 1.0."""
