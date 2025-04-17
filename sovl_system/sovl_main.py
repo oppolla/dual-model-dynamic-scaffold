@@ -42,58 +42,12 @@ import sys
 import math
 from sovl_utils import NumericalGuard
 from sovl_confidence import calculate_confidence_score
+from sovl_events import EventDispatcher
 
 # Remove sovl_conductor import and use TYPE_CHECKING for type hints
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sovl_conductor import SOVLOrchestrator
-
-class EventDispatcher:
-    """Manages event subscriptions and notifications."""
-    
-    def __init__(self):
-        """Initialize the event dispatcher."""
-        self._subscribers = defaultdict(list)
-        
-    def subscribe(self, event_type: str, callback: callable) -> None:
-        """
-        Subscribe to an event type.
-        
-        Args:
-            event_type: Type of event to subscribe to
-            callback: Function to call when event occurs
-        """
-        self._subscribers[event_type].append(callback)
-        
-    def unsubscribe(self, event_type: str, callback: callable) -> None:
-        """
-        Unsubscribe from an event type.
-        
-        Args:
-            event_type: Type of event to unsubscribe from
-            callback: Function to remove from subscribers
-        """
-        if event_type in self._subscribers:
-            self._subscribers[event_type] = [
-                cb for cb in self._subscribers[event_type]
-                if cb != callback
-            ]
-            
-    def notify(self, event_type: str, *args, **kwargs) -> None:
-        """
-        Notify all subscribers of an event.
-        
-        Args:
-            event_type: Type of event to notify
-            *args: Positional arguments to pass to callbacks
-            **kwargs: Keyword arguments to pass to callbacks
-        """
-        for callback in self._subscribers.get(event_type, []):
-            try:
-                callback(*args, **kwargs)
-            except Exception as e:
-                # Log error but don't break the notification chain
-                logging.error(f"Error in event handler for {event_type}: {str(e)}")
 
 class SystemContext:
     """Manages system-wide context and resources."""
@@ -109,7 +63,7 @@ class SystemContext:
         self.config_path = config_path
         self.device = device
         self.logger = Logger()
-        self.event_dispatcher = EventDispatcher()
+        self.event_dispatcher = EventDispatcher(self.logger)
         
         # Initialize config manager with event dispatcher
         self.config_handler = ConfigHandler(config_path, self.logger, self.event_dispatcher)
