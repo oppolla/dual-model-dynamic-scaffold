@@ -44,7 +44,6 @@ from sovl_grafter import PluginManager
 from sovl_confidence import calculate_confidence_score
 from sovl_events import EventDispatcher
 
-# Remove sovl_conductor import and use TYPE_CHECKING for type hints
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from sovl_conductor import SOVLOrchestrator
