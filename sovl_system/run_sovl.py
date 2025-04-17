@@ -56,7 +56,10 @@ class SOVLRunner:
         self.components = None
         self.orchestrator = None
         self.state_manager = None
-        self.error_manager = None  # Add error manager
+        self.error_manager = None
+        self.tokenizer = None
+        self.optimizer = None  # Add optimizer attribute
+        self.scheduler = None  # Add scheduler attribute
         self.last_checkpoint_time = None
         self.checkpoint_interval = CHECKPOINT_INTERVAL
         self.metrics_history = []
@@ -201,6 +204,27 @@ class SOVLRunner:
                 )
                 model = components[0].load_model()
                 components.append(model)
+                
+                # Initialize tokenizer after model is loaded
+                try:
+                    from transformers import AutoTokenizer
+                    model_name = context.config_manager.get("model.name", "gpt2")
+                    self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    self.logger.log_event(
+                        event_type="tokenizer_initialization",
+                        message=f"Tokenizer initialized from {model_name}",
+                        level="info"
+                    )
+                    
+                    # Initialize optimizer and scheduler
+                    self._initialize_optimizer(model)
+                    
+                except Exception as e:
+                    self.logger.log_error(
+                        error_msg=f"Failed to initialize model components: {str(e)}",
+                        error_type="model_initialization_error"
+                    )
+                    raise
             else:
                 self.logger.log_event(
                     event_type="component_initialization",
@@ -244,6 +268,60 @@ class SOVLRunner:
             level="info"
         )
         return tuple(components)
+    
+    def _initialize_optimizer(self, model: torch.nn.Module) -> None:
+        """Initialize optimizer and learning rate scheduler."""
+        try:
+            # Get optimizer configuration from config manager
+            optimizer_config = self.context.config_manager.get("training.optimizer", {})
+            optimizer_type = optimizer_config.get("type", "adamw")
+            learning_rate = optimizer_config.get("learning_rate", 5e-5)
+            weight_decay = optimizer_config.get("weight_decay", 0.01)
+            
+            # Initialize optimizer
+            if optimizer_type.lower() == "adamw":
+                self.optimizer = torch.optim.AdamW(
+                    model.parameters(),
+                    lr=learning_rate,
+                    weight_decay=weight_decay
+                )
+            else:
+                raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
+            
+            # Initialize scheduler
+            scheduler_config = self.context.config_manager.get("training.scheduler", {})
+            scheduler_type = scheduler_config.get("type", "linear")
+            num_warmup_steps = scheduler_config.get("num_warmup_steps", 0)
+            num_training_steps = scheduler_config.get("num_training_steps", 1000)
+            
+            if scheduler_type.lower() == "linear":
+                from transformers import get_linear_schedule_with_warmup
+                self.scheduler = get_linear_schedule_with_warmup(
+                    self.optimizer,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps
+                )
+            else:
+                raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+            
+            self.logger.log_event(
+                event_type="optimizer_initialization",
+                message=f"Initialized {optimizer_type} optimizer and {scheduler_type} scheduler",
+                level="info",
+                additional_info={
+                    "learning_rate": learning_rate,
+                    "weight_decay": weight_decay,
+                    "num_warmup_steps": num_warmup_steps,
+                    "num_training_steps": num_training_steps
+                }
+            )
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to initialize optimizer: {str(e)}",
+                error_type="optimizer_initialization_error"
+            )
+            raise
     
     def cleanup(self):
         """Release system resources with logging and error handling."""
@@ -302,7 +380,9 @@ class SOVLRunner:
             
             self.orchestrator = SOVLOrchestrator(
                 config_path=args.config,
-                log_file=self.logger.config.log_file
+                log_file=self.logger.config.log_file,
+                optimizer=self.optimizer,  # Pass optimizer to orchestrator
+                scheduler=self.scheduler   # Pass scheduler to orchestrator
             )
             self.orchestrator.initialize_system()
             self.orchestrator.run()
@@ -328,15 +408,52 @@ class SOVLRunner:
             print(f"Error: {str(e)}")
             return False
     
-    def save_checkpoint(self, force: bool = False) -> bool:
-        """Save system state checkpoint.
-        
-        Args:
-            force: If True, save checkpoint regardless of interval
+    def _validate_component_serialization(self, component: Any, component_name: str) -> bool:
+        """Validate that a component has required serialization methods."""
+        try:
+            # Check for to_dict method
+            if not hasattr(component, 'to_dict'):
+                self.logger.log_error(
+                    error_msg=f"Component {component_name} missing to_dict method",
+                    error_type="serialization_error"
+                )
+                return False
+                
+            # Check for from_dict method
+            if not hasattr(component, 'from_dict'):
+                self.logger.log_error(
+                    error_msg=f"Component {component_name} missing from_dict method",
+                    error_type="serialization_error"
+                )
+                return False
+                
+            # Test serialization
+            try:
+                state_dict = component.to_dict()
+                if not isinstance(state_dict, dict):
+                    self.logger.log_error(
+                        error_msg=f"Component {component_name} to_dict did not return a dictionary",
+                        error_type="serialization_error"
+                    )
+                    return False
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"Component {component_name} to_dict failed: {str(e)}",
+                    error_type="serialization_error"
+                )
+                return False
+                
+            return True
             
-        Returns:
-            bool: True if checkpoint was saved, False otherwise
-        """
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Error validating component {component_name}: {str(e)}",
+                error_type="serialization_error"
+            )
+            return False
+
+    def save_checkpoint(self, force: bool = False) -> bool:
+        """Save system state checkpoint."""
         current_time = time.time()
         if not force and self.last_checkpoint_time is not None:
             if current_time - self.last_checkpoint_time < self.checkpoint_interval:
@@ -349,6 +466,15 @@ class SOVLRunner:
                 level="info"
             )
             
+            # Validate component serialization before saving
+            for idx, component in enumerate(self.components):
+                if not self._validate_component_serialization(component, f"component_{idx}"):
+                    self.logger.log_error(
+                        error_msg=f"Cannot save checkpoint: Component at index {idx} serialization validation failed",
+                        error_type="checkpoint_error"
+                    )
+                    return False
+            
             # Save model state
             if self.model is not None:
                 model_path = Path("checkpoints") / f"model_{int(current_time)}.pt"
@@ -360,7 +486,11 @@ class SOVLRunner:
             state_data = {
                 "timestamp": current_time,
                 "model_path": str(model_path) if self.model is not None else None,
-                "components": {name: component.to_dict() for name, component in self.components.items()}
+                "components": {
+                    str(idx): component.to_dict() 
+                    for idx, component in enumerate(self.components)
+                    if self._validate_component_serialization(component, f"component_{idx}")
+                }
             }
             
             with open(state_path, 'w') as f:
@@ -382,14 +512,7 @@ class SOVLRunner:
             return False
             
     def load_checkpoint(self, checkpoint_path: str) -> bool:
-        """Load system state from checkpoint.
-        
-        Args:
-            checkpoint_path: Path to checkpoint file
-            
-        Returns:
-            bool: True if checkpoint was loaded successfully, False otherwise
-        """
+        """Load system state from checkpoint."""
         try:
             self.logger.log_event(
                 event_type="checkpoint",
@@ -407,9 +530,38 @@ class SOVLRunner:
                     self.model.load_state_dict(torch.load(model_path))
                     
             # Load component states
-            for name, component_data in state_data["components"].items():
-                if name in self.components:
-                    self.components[name].from_dict(component_data)
+            for idx_str, component_data in state_data["components"].items():
+                try:
+                    idx = int(idx_str)
+                    if 0 <= idx < len(self.components):
+                        component = self.components[idx]
+                        if self._validate_component_serialization(component, f"component_{idx}"):
+                            try:
+                                component.from_dict(component_data)
+                            except Exception as e:
+                                self.logger.log_error(
+                                    error_msg=f"Failed to load state for component at index {idx}: {str(e)}",
+                                    error_type="checkpoint_error"
+                                )
+                                return False
+                        else:
+                            self.logger.log_error(
+                                error_msg=f"Cannot load state for component at index {idx}: Serialization validation failed",
+                                error_type="checkpoint_error"
+                            )
+                            return False
+                    else:
+                        self.logger.log_error(
+                            error_msg=f"Invalid component index {idx} in checkpoint",
+                            error_type="checkpoint_error"
+                        )
+                        return False
+                except ValueError:
+                    self.logger.log_error(
+                        error_msg=f"Invalid component index format: {idx_str}",
+                        error_type="checkpoint_error"
+                    )
+                    return False
                     
             self.last_checkpoint_time = state_data["timestamp"]
             self.logger.log_event(
@@ -536,9 +688,12 @@ class SOVLRunner:
     def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Prepare batch for model input."""
         try:
+            if self.tokenizer is None:
+                raise ValueError("Tokenizer not initialized")
+                
             # Tokenize and prepare inputs
             texts = [item["text"] for item in batch]
-            inputs = self.context.tokenizer(
+            inputs = self.tokenizer(
                 texts,
                 padding=True,
                 truncation=True,
@@ -551,7 +706,7 @@ class SOVLRunner:
             
             # Prepare labels
             inputs["labels"] = inputs["input_ids"].clone()
-            inputs["labels"][inputs["labels"] == self.context.tokenizer.pad_token_id] = -100
+            inputs["labels"][inputs["labels"] == self.tokenizer.pad_token_id] = -100
             
             return inputs
             
