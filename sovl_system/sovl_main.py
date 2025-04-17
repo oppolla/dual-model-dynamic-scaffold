@@ -17,7 +17,7 @@ from sovl_curiosity import CuriosityManager, CuriosityState
 from sovl_logger import Logger
 from sovl_io import load_training_data, validate_quantization_mode, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
-from sovl_trainer import TrainingConfig, SOVLTrainer
+from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
 from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
 from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
 from sovl_processor import LogitsProcessor, SOVLProcessor
@@ -35,11 +35,7 @@ from sovl_tuner import SOVLTuner
 from sovl_error import ErrorHandler
 from sovl_state_manager import StateManager
 from sovl_logging import LoggingManager
-import logging
-from sovl_training_cycle import TrainingCycleManager
 from sovl_plugin import PluginManager
-import sys
-import math
 from sovl_utils import NumericalGuard
 from sovl_confidence import calculate_confidence_score
 from sovl_events import EventDispatcher
