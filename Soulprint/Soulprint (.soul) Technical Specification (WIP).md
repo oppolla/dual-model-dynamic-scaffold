@@ -424,7 +424,7 @@ Iteration Limits: Follow-up is capped at two iterations, and consent retries at 
 
 Determinism: All processing steps (e.g., TF-IDF, regex) are deterministic, avoiding biases from generative natural language processing.
 
-Error Handling: Invalid responses, syntax errors, or consent failures are logged, with reprompts attempted before defaulting to Name: VOID. Malformed outputs are corrected by the PEG parser.
+Error Handling: Invalid responses, syntax errors, or consent failures are logged, with reprompts attempted before defaulting to Name: NAMELESS. Malformed outputs are corrected by the PEG parser.
 
 #### Constraints
 
