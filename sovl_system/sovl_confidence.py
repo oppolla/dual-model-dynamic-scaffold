@@ -4,8 +4,6 @@ from threading import Lock
 from collections import deque
 from sovl_logger import Logger
 import traceback
-
-# SOVL-specific dependencies
 from sovl_state import SOVLState
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
