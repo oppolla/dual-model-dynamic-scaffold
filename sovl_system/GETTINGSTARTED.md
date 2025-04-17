@@ -1,6 +1,6 @@
-Step-by-Step Guide to Loading a Local Model and Running SOVL
+# Step-by-Step Guide to Loading a Local Model and Running SOVL
 
-Prerequisites
+## Prerequisites
 
 Python Environment: Ensure you have Python 3.8+ installed.
 
@@ -10,7 +10,7 @@ Dependencies: Install the required packages:
 
 Local Model: Have a Hugging Face model (e.g., `Llama-2-7b`) downloaded locally.
 
-Step 1: Prepare the Configuration File
+## Step 1: Prepare the Configuration File
 
 Create a `sovl_config.json` file in your workspace with the following structure:
 
@@ -37,7 +37,7 @@ Create a `sovl_config.json` file in your workspace with the following structure:
 
 Replace `/path/to/your/local/model` with the actual path to your model.
 
-Step 2: Initialize the System
+## Step 2: Initialize the System
 
 Create a Python script (e.g., `run_sovl.py`) with the following code:
 
@@ -90,13 +90,13 @@ if __name__ == "__main__":
     main()
 ```
 
-### Step 3: Run the Script
+## Step 3: Run the Script
 
 Execute the script:
 
 `python run_sovl.py`
 
-Step 4: Verify the System
+## Step 4: Verify the System
 
 Check Logs: The system will log events to the console and/or a log file (if configured).
 
@@ -112,21 +112,26 @@ CLI Interaction: If you've integrated the CLI (`sovl_cli.py`), you can interact 
 ## Troubleshooting
 
 Model Loading Errors:
+
 Ensure the model path in `sovl_config.json` is correct.
 
 Verify the model is compatible with `transformers` (e.g., it should have a config.json file).
+
 CUDA Errors:
+
 Ensure you have a compatible GPU and CUDA installed.
+
 Fall back to CPU by setting `device="cpu"` in `SystemContext`.
 
 Configuration Issues:
+
 Validate `sovl_config.json` using the `ConfigHandler` in `sovl_main.py`.
 
 ## Step 5: Integrate the CLI for Interactive Control
 
 Now that the SOVL system is running, you can interact with it using the Command Line Interface (CLI) from `sovl_cli.py`. Here's how to set it up:
 
-1. Update the `run_sovl.py` Script
+## 1. Update the `run_sovl.py` Script
    
 Modify your `run_sovl.py` to include the CLI initialization:
 
@@ -149,8 +154,8 @@ def main():
 if __name__ == "__main__":
     main()
 ```
-2. Key CLI Commands
-3. 
+## 2. Key CLI Commands
+   
 Once the CLI is active, you can use these commands:
 
 System Control:
@@ -173,8 +178,8 @@ Debugging:
 
 `panic:` Force a system reset if errors occur.
 
-4. Example Workflow
-5. 
+## Example Workflow
+   
 Start the CLI:
 
 `python run_sovl.py`
@@ -199,48 +204,6 @@ Output:
 Run Training:
 
 `Enter command: train 5`
-
-## Common Issues
-
-### Configuration Errors
-
-Symptoms:
-SystemInitializationError or ConfigValidationError on startup.
-Missing metrics in monitoring or unexpected default values.
-Likely Causes:
-Invalid paths in sovl_config.json (e.g., model path typo).
-Missing required fields (e.g., model_type, quantization_mode).
-Invalid values (e.g., quantization_mode="5bit" instead of "4bit").
-How to Fix:
-Validate your sovl_config.json against the schema in sovl_config.py.
-Use the ConfigHandler.validate() method to check for errors:
-```
-  from sovl_config import ConfigHandler
-  handler = ConfigHandler("sovl_config.json")
-  if not handler.validate():
-      print("Configuration errors:", handler.get_validation_errors())
-```
-
-### Model Loading Failures
-
-Symptoms:
-ModelLoadingError or CUDA out-of-memory errors.
-The system hangs during initialization.
-Likely Causes:
-Incorrect model path or incompatible model format.
-Insufficient GPU memory for the specified quantization_mode.
-Missing dependencies (e.g., bitsandbytes for 4-bit quantization).
-How to Fix:
-Verify the model directory contains:
-config.json
-pytorch_model.bin (or .safetensors)
-Tokenizer files.
-Reduce quantization (e.g., switch from 4bit to 8bit in config).
-Test loading the model directly with transformers:
-```
-  from transformers import AutoModelForCausalLM
-  model = AutoModelForCausalLM.from_pretrained("/your/model/path")
-```
 
 
 
