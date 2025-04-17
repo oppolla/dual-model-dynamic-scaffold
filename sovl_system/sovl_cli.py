@@ -16,7 +16,7 @@ TRAIN_DATA = None
 VALID_DATA = None
 
 COMMAND_CATEGORIES = {
-    "System": ["quit", "exit", "save", "load", "reset", "status", "help"],
+    "System": ["quit", "exit", "save", "load", "reset", "status", "help", "monitor"],
     "Training": ["train", "dream"],
     "Generation": ["generate", "echo", "mimic"],
     "Memory": ["memory", "recall", "forget", "recap"],
@@ -66,7 +66,8 @@ class CommandHandler:
             'rewind': self.cmd_rewind, 'mimic': self.cmd_mimic,
             'panic': self.cmd_panic, 'recap': self.cmd_recap,
             'recall': self.cmd_recall, 'forget': self.cmd_forget,
-            'history': self.cmd_history, 'help': self.cmd_help
+            'history': self.cmd_history, 'help': self.cmd_help,
+            'monitor': self.cmd_monitor
         }
 
     def execute(self, cmd: str, args: List[str]) -> bool:
@@ -491,6 +492,24 @@ class CommandHandler:
                     print(f"  Total Memory: {dream_stats['total_memory_mb']:.2f} MB")
                     print(f"  Average Weight: {dream_stats['average_weight']:.2f}")
                 
+                # Add monitoring status if available
+                if hasattr(self.system, 'monitor'):
+                    monitor = self.system.monitor
+                    print("\nMonitoring Status:")
+                    print(f"  Active: {'Yes' if monitor._monitor_thread and monitor._monitor_thread.is_alive() else 'No'}")
+                    print(f"  Update Interval: {monitor.update_interval}s")
+                    enabled_metrics = monitor.config_manager.get("monitor.enabled_metrics", ["memory", "training", "curiosity"])
+                    print(f"  Enabled Metrics: {', '.join(enabled_metrics)}")
+                    if monitor._metrics_history:
+                        latest = list(monitor._metrics_history)[-1]
+                        print("\n  Latest Metrics:")
+                        if "memory" in latest:
+                            print(f"    Memory: {latest['memory']['allocated_mb']:.1f}MB / {latest['memory']['total_memory_mb']:.1f}MB")
+                        if "training" in latest:
+                            print(f"    Training Progress: {latest['training']['progress']:.1f}%")
+                        if "curiosity" in latest:
+                            print(f"    Curiosity Score: {latest['curiosity']['score']:.1f}")
+                
                 self.system.logger.record_event(
                     event_type="cli_status",
                     message="System status retrieved successfully",
@@ -589,6 +608,26 @@ class CommandHandler:
             # Set value for specific key
             key, new_value = args
             try:
+                # Special handling for monitor-related configurations
+                if key.startswith("monitor."):
+                    if key == "monitor.update_interval":
+                        try:
+                            new_value = float(new_value)
+                            if new_value <= 0:
+                                raise ValueError("Update interval must be positive")
+                        except ValueError as e:
+                            print(f"Invalid update interval: {str(e)}")
+                            return
+                    elif key == "monitor.enabled_metrics":
+                        try:
+                            metrics = [m.strip() for m in new_value.split(",")]
+                            valid_metrics = ["memory", "training", "curiosity"]
+                            if not all(m in valid_metrics for m in metrics):
+                                raise ValueError(f"Valid metrics are: {', '.join(valid_metrics)}")
+                        except ValueError as e:
+                            print(f"Invalid metrics: {str(e)}")
+                            return
+
                 # Convert value to appropriate type based on schema
                 schema = next((s for s in self.system.config_manager.DEFAULT_SCHEMA if s.field == key), None)
                 if schema:
@@ -630,6 +669,15 @@ class CommandHandler:
                         # Notify subscribers and check for errors
                         self.system.config_manager._notify_subscribers()
                         print(f"Updated {key} to {new_value}")
+                        
+                        # If monitor configuration changed, restart monitoring if active
+                        if key.startswith("monitor.") and hasattr(self.system, 'monitor'):
+                            monitor = self.system.monitor
+                            was_active = monitor._monitor_thread and monitor._monitor_thread.is_alive()
+                            if was_active:
+                                monitor.stop_monitoring()
+                                monitor.start_monitoring()
+                                print("Monitoring restarted with new configuration")
                         
                         # Log any warnings or errors from the change
                         if hasattr(self.system, 'context') and hasattr(self.system.context, 'config_handler'):
@@ -1139,6 +1187,64 @@ class CommandHandler:
                 }
             )
             print(f"Error during mimic generation: {str(e)}")
+            return False
+
+    def cmd_monitor(self, args: List[str]) -> bool:
+        """Control system monitoring. Usage: monitor [start|stop|status|history]"""
+        try:
+            if not args:
+                print("Monitoring commands: start, stop, status, history")
+                return False
+                
+            action = args[0].lower()
+            if not hasattr(self.system, 'monitor'):
+                print("Error: System monitor not initialized")
+                return False
+                
+            monitor = self.system.monitor
+            
+            if action == "start":
+                monitor.start_monitoring()
+                print("Monitoring started")
+            elif action == "stop":
+                monitor.stop_monitoring()
+                print("Monitoring stopped")
+            elif action == "status":
+                print("\n--- Monitoring Status ---")
+                print(f"Active: {'Yes' if monitor._monitor_thread and monitor._monitor_thread.is_alive() else 'No'}")
+                print(f"Update Interval: {monitor.update_interval}s")
+                enabled_metrics = monitor.config_manager.get("monitor.enabled_metrics", ["memory", "training", "curiosity"])
+                print(f"Enabled Metrics: {', '.join(enabled_metrics)}")
+                print("------------------------")
+            elif action == "history":
+                if not monitor._metrics_history:
+                    print("No monitoring history available")
+                    return False
+                    
+                print("\n--- Last 10 Metrics Snapshots ---")
+                for i, metric in enumerate(list(monitor._metrics_history)[-10:]):
+                    print(f"\nSnapshot {i+1}:")
+                    if "memory" in metric:
+                        print(f"  Memory: {metric['memory']['allocated_mb']:.1f}MB / {metric['memory']['total_memory_mb']:.1f}MB")
+                    if "training" in metric:
+                        print(f"  Training Progress: {metric['training']['progress']:.1f}%")
+                    if "curiosity" in metric:
+                        print(f"  Curiosity Score: {metric['curiosity']['score']:.1f}")
+                print("\n------------------------")
+            else:
+                print(f"Invalid monitor command: {action}")
+                print("Valid commands: start, stop, status, history")
+                
+            return True
+        except Exception as e:
+            self.system.error_manager.handle_monitoring_error(e)
+            self.system.logger.log_error(
+                error_msg="Error during monitor command execution",
+                error_type="monitor_command_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"action": action if 'action' in locals() else None}
+            )
+            print(f"Error during monitor command: {str(e)}")
             return False
 
 class SystemInitializationError(Exception):
