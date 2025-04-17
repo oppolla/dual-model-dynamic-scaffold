@@ -176,27 +176,49 @@ class CuriosityManager:
         device: torch.device,
         state_manager=None
     ):
+        """Initialize the CuriosityManager with configuration and dependencies.
+        
+        Args:
+            config_manager: ConfigManager instance for configuration handling
+            logger: Logger instance for logging
+            error_manager: ErrorHandler instance for error handling
+            device: torch.device for tensor operations
+            state_manager: Optional state manager instance
+            
+        Raises:
+            ValueError: If config_manager, logger, or error_manager is None
+            TypeError: If config_manager is not a ConfigManager instance
+        """
+        if not config_manager:
+            raise ValueError("config_manager cannot be None")
+        if not logger:
+            raise ValueError("logger cannot be None")
+        if not error_manager:
+            raise ValueError("error_manager cannot be None")
+        if not isinstance(config_manager, ConfigManager):
+            raise TypeError("config_manager must be a ConfigManager instance")
+            
         self.config_manager = config_manager
         self.logger = logger
         self.error_manager = error_manager
         self.state_manager = state_manager
         self.device = device
         self.metrics = defaultdict(list)
-        self.curiosity_queue = deque(maxlen=config_manager.get("curiosity_queue_maxlen"))
         self._initialized = False
-        self.state = None  # Will be set by SOVLState
+        self.state = None
         self.pressure = 0.0
         self.last_update = time.time()
         self.conversation_id = None
         self.state_hash = None
         self.pressure_mgr = CuriosityPressure()
         self.lock = threading.Lock()
-        self._pressure_history = deque(maxlen=100)  # Track pressure changes
+        self._pressure_history = deque(maxlen=100)
         self._last_pressure_change = 0.0
-        self._pressure_change_cooldown = 1.0  # Minimum seconds between pressure changes
-        self._min_pressure = 0.1  # Minimum pressure to maintain
-        self._max_pressure = 0.9  # Maximum pressure to allow
-        self._pressure_decay_rate = 0.95  # Rate at which pressure naturally decays
+        
+        # Initialize configuration
+        self._initialize_config()
+        
+        # Initialize components
         self._initialize_components()
         
         # Log device initialization
@@ -208,21 +230,141 @@ class CuriosityManager:
             device_type=self.device.type
         )
         
-        # Add memory tracking
-        self.total_memory_mb = 0.0
-        self.max_memory_mb = config_manager.get("max_dream_memory_mb", 512.0)
-
+    def _initialize_config(self) -> None:
+        """Initialize and validate configuration from ConfigManager."""
+        try:
+            # Load curiosity configuration
+            curiosity_config = self.config_manager.get_section("curiosity_config")
+            
+            # Set configuration parameters with validation
+            self._pressure_change_cooldown = float(curiosity_config.get("pressure_change_cooldown", 1.0))
+            self._min_pressure = float(curiosity_config.get("min_pressure", 0.1))
+            self._max_pressure = float(curiosity_config.get("max_pressure", 0.9))
+            self._pressure_decay_rate = float(curiosity_config.get("pressure_decay_rate", 0.95))
+            self.curiosity_queue = deque(maxlen=int(curiosity_config.get("curiosity_queue_maxlen", 100)))
+            self.max_memory_mb = float(curiosity_config.get("max_dream_memory_mb", 512.0))
+            
+            # Validate configuration values
+            self._validate_config_values()
+            
+            # Subscribe to configuration changes
+            self.config_manager.subscribe(self._on_config_change)
+            
+            self.logger.record_event(
+                event_type="curiosity_config_initialized",
+                message="Curiosity configuration initialized successfully",
+                level="info",
+                additional_info={
+                    "pressure_change_cooldown": self._pressure_change_cooldown,
+                    "min_pressure": self._min_pressure,
+                    "max_pressure": self._max_pressure,
+                    "pressure_decay_rate": self._pressure_decay_rate,
+                    "queue_maxlen": self.curiosity_queue.maxlen,
+                    "max_memory_mb": self.max_memory_mb
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="curiosity_config_initialization_failed",
+                message=f"Failed to initialize curiosity configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
+    def _validate_config_values(self) -> None:
+        """Validate configuration values against defined ranges."""
+        try:
+            # Validate pressure-related parameters
+            if not 0.0 <= self._min_pressure <= 1.0:
+                raise ValueError(f"Invalid min_pressure: {self._min_pressure}. Must be between 0.0 and 1.0.")
+                
+            if not 0.0 <= self._max_pressure <= 1.0:
+                raise ValueError(f"Invalid max_pressure: {self._max_pressure}. Must be between 0.0 and 1.0.")
+                
+            if self._min_pressure >= self._max_pressure:
+                raise ValueError(f"min_pressure ({self._min_pressure}) must be less than max_pressure ({self._max_pressure})")
+                
+            if not 0.0 <= self._pressure_decay_rate <= 1.0:
+                raise ValueError(f"Invalid pressure_decay_rate: {self._pressure_decay_rate}. Must be between 0.0 and 1.0.")
+                
+            if not 0.0 <= self._pressure_change_cooldown <= 10.0:
+                raise ValueError(f"Invalid pressure_change_cooldown: {self._pressure_change_cooldown}. Must be between 0.0 and 10.0.")
+                
+            # Validate memory parameters
+            if not 64.0 <= self.max_memory_mb <= 4096.0:
+                raise ValueError(f"Invalid max_memory_mb: {self.max_memory_mb}. Must be between 64.0 and 4096.0.")
+                
+            # Validate queue parameters
+            if not 10 <= self.curiosity_queue.maxlen <= 1000:
+                raise ValueError(f"Invalid queue_maxlen: {self.curiosity_queue.maxlen}. Must be between 10 and 1000.")
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="curiosity_config_validation_failed",
+                message=f"Configuration validation failed: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
+    def _on_config_change(self) -> None:
+        """Handle configuration changes."""
+        try:
+            self._initialize_config()
+            self.logger.record_event(
+                event_type="curiosity_config_updated",
+                message="Curiosity configuration updated",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="curiosity_config_update_failed",
+                message=f"Failed to update curiosity configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            
     def _initialize_components(self) -> None:
-        """Initialize curiosity components."""
-        self.curiosity = Curiosity(
-            weight_ignorance=self.config_manager.config.get("weight_ignorance", 0.7),
-            weight_novelty=self.config_manager.config.get("weight_novelty", 0.3),
-            metrics_maxlen=self.config_manager.config.get("metrics_maxlen", 1000),
-            logger=self.logger
-        )
-        self.callbacks = CuriosityCallbacks(logger=self.logger)
-        self.last_question_time: float = time.time()
-        
+        """Initialize curiosity components with configuration."""
+        try:
+            # Load curiosity weights from configuration
+            curiosity_config = self.config_manager.get_section("curiosity_config")
+            weight_ignorance = float(curiosity_config.get("weight_ignorance", 0.7))
+            weight_novelty = float(curiosity_config.get("weight_novelty", 0.3))
+            metrics_maxlen = int(curiosity_config.get("metrics_maxlen", 1000))
+            
+            # Initialize components with validated configuration
+            self.curiosity = Curiosity(
+                weight_ignorance=weight_ignorance,
+                weight_novelty=weight_novelty,
+                metrics_maxlen=metrics_maxlen,
+                logger=self.logger
+            )
+            self.callbacks = CuriosityCallbacks(logger=self.logger)
+            self.last_question_time = time.time()
+            
+            self.logger.record_event(
+                event_type="curiosity_components_initialized",
+                message="Curiosity components initialized successfully",
+                level="info",
+                additional_info={
+                    "weight_ignorance": weight_ignorance,
+                    "weight_novelty": weight_novelty,
+                    "metrics_maxlen": metrics_maxlen
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="curiosity_components_initialization_failed",
+                message=f"Failed to initialize curiosity components: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
     def set_state(self, state: SOVLState) -> None:
         """Set the SOVL state and synchronize with CuriosityState."""
         with self.lock:

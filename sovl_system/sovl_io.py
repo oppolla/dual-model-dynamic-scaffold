@@ -17,6 +17,10 @@ class DataValidationError(Exception):
     """Raised when data fails validation checks."""
     pass
 
+class ConfigurationError(Exception):
+    """Raised when there is an error in configuration."""
+    pass
+
 class JSONLLoader:
     """Thread-safe JSONL data loader with configurable validation."""
     
@@ -32,39 +36,189 @@ class JSONLLoader:
         self.logger = logger
         self.lock = Lock()
         
-        # Get field mapping from config with defaults
-        self.field_mapping = self.config_manager.get(
-            "core_config.data_field_mapping",
-            {"response": "completion", "prompt": "prompt"},
-            expected_type=dict
-        )
+        # Load configuration
+        self._load_config()
         
-        # Get required fields from config with defaults
-        self.required_fields = self.config_manager.get(
-            "core_config.data_required_fields",
-            ["prompt", "response"],
-            expected_type=list
-        )
+    def _load_config(self) -> None:
+        """Load and validate configuration."""
+        try:
+            # Get field mapping from config with defaults
+            self.field_mapping = self.config_manager.get(
+                "io_config.field_mapping",
+                {"response": "completion", "prompt": "prompt"},
+                expected_type=dict
+            )
+            
+            # Get required fields from config with defaults
+            self.required_fields = self.config_manager.get(
+                "io_config.required_fields",
+                ["prompt", "response"],
+                expected_type=list
+            )
+            
+            # Get string length constraints from config
+            self.min_string_length = self.config_manager.get(
+                "io_config.min_string_length",
+                1,
+                expected_type=int
+            )
+            self.max_string_length = self.config_manager.get(
+                "io_config.max_string_length",
+                10000,
+                expected_type=int
+            )
+            
+            # Get validation settings
+            self.enable_validation = self.config_manager.get(
+                "io_config.enable_validation",
+                True,
+                expected_type=bool
+            )
+            self.strict_validation = self.config_manager.get(
+                "io_config.strict_validation",
+                False,
+                expected_type=bool
+            )
+            
+            # Initialize field validators
+            self.field_validators = {
+                "prompt": lambda x: isinstance(x, str) and self.min_string_length <= len(x.strip()) <= self.max_string_length,
+                "response": lambda x: isinstance(x, str) and self.min_string_length <= len(x.strip()) <= self.max_string_length,
+                "conversation_id": lambda x: isinstance(x, str) and len(x) > 0,
+                "timestamp": lambda x: isinstance(x, (str, float, int)) and (isinstance(x, str) and len(x) > 0 or x > 0)
+            }
+            
+            # Validate configuration
+            self._validate_config()
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to load IO configuration: {str(e)}",
+                error_type="config_loading_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_section": "io_config"
+                }
+            )
+            raise ConfigurationError(
+                f"Failed to load IO configuration: {str(e)}",
+                traceback.format_exc()
+            )
+            
+    def _validate_config(self) -> None:
+        """Validate IO configuration."""
+        try:
+            # Validate required configuration sections
+            required_sections = ["field_mapping", "required_fields", "min_string_length", "max_string_length"]
+            for section in required_sections:
+                if not self.config_manager.get(f"io_config.{section}"):
+                    raise ConfigurationError(
+                        f"Missing required IO configuration section: {section}",
+                        traceback.format_exc()
+                    )
+                    
+            # Validate string length constraints
+            if self.min_string_length < 0:
+                raise ConfigurationError(
+                    "Minimum string length must be non-negative",
+                    traceback.format_exc()
+                )
+            if self.max_string_length <= self.min_string_length:
+                raise ConfigurationError(
+                    "Maximum string length must be greater than minimum string length",
+                    traceback.format_exc()
+                )
+                
+            # Validate field mapping
+            if not isinstance(self.field_mapping, dict):
+                raise ConfigurationError(
+                    "Field mapping must be a dictionary",
+                    traceback.format_exc()
+                )
+                
+            # Validate required fields
+            if not isinstance(self.required_fields, list):
+                raise ConfigurationError(
+                    "Required fields must be a list",
+                    traceback.format_exc()
+                )
+                
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to validate IO configuration: {str(e)}",
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_section": "io_config"
+                }
+            )
+            raise ConfigurationError(
+                f"Failed to validate IO configuration: {str(e)}",
+                traceback.format_exc()
+            )
+            
+    def update_config(self, key: str, value: Any) -> bool:
+        """
+        Update IO configuration.
         
-        # Get string length constraints from config
-        self.min_string_length = self.config_manager.get(
-            "controls_config.data_min_string_length",
-            1,
-            expected_type=int
-        )
-        self.max_string_length = self.config_manager.get(
-            "controls_config.data_max_string_length",
-            10000,
-            expected_type=int
-        )
+        Args:
+            key: Configuration key to update
+            value: New value for the configuration key
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        try:
+            # Update in config manager
+            success = self.config_manager.update(f"io_config.{key}", value)
+            
+            if success:
+                # Reload configuration to ensure consistency
+                self._load_config()
+                
+            return success
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to update IO configuration: {str(e)}",
+                error_type="config_update_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "key": key,
+                    "value": value
+                }
+            )
+            raise ConfigurationError(
+                f"Failed to update IO configuration: {str(e)}",
+                traceback.format_exc()
+            )
+            
+    def get_config(self, key: str, default: Any = None) -> Any:
+        """
+        Get IO configuration value.
         
-        # Initialize field validators
-        self.field_validators = {
-            "prompt": lambda x: isinstance(x, str) and self.min_string_length <= len(x.strip()) <= self.max_string_length,
-            "response": lambda x: isinstance(x, str) and self.min_string_length <= len(x.strip()) <= self.max_string_length,
-            "conversation_id": lambda x: isinstance(x, str) and len(x) > 0,
-            "timestamp": lambda x: isinstance(x, (str, float, int)) and (isinstance(x, str) and len(x) > 0 or x > 0)
-        }
+        Args:
+            key: Configuration key to get
+            default: Default value if key is not found
+            
+        Returns:
+            Any: Configuration value
+        """
+        try:
+            return self.config_manager.get(f"io_config.{key}", default)
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to get IO configuration: {str(e)}",
+                error_type="config_get_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "key": key
+                }
+            )
+            raise ConfigurationError(
+                f"Failed to get IO configuration: {str(e)}",
+                traceback.format_exc()
+            )
 
     def load_jsonl(
         self,
@@ -218,27 +372,56 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, train_dat
     Load and split the training data into training and validation sets.
 
     Args:
-        config_manager: ConfigManager instance for configuration settings.
-        logger: Logger instance for recording events.
-        train_data: List of training data samples.
-        valid_split_ratio: Ratio for splitting validation data.
+        config_manager: ConfigManager instance for configuration settings
+        logger: Logger instance for recording events
+        train_data: List of training data samples
+        valid_split_ratio: Ratio for splitting validation data
 
     Returns:
-        A tuple containing the training and validation data lists.
+        A tuple containing the training and validation data lists
     """
-    random_seed = config_manager.get("core_config.random_seed", 42, expected_type=int)
-    random.seed(random_seed)
-    random.shuffle(train_data)
-    split_idx = int(len(train_data) * (1 - valid_split_ratio))
-    train_data, valid_data = train_data[:split_idx], train_data[split_idx:]
-
-    logger.write({
-        "event": "data_split",
-        "train_samples": len(train_data),
-        "valid_samples": len(valid_data),
-        "timestamp": time.time()
-    })
-    return train_data, valid_data
+    try:
+        # Get configuration values
+        random_seed = config_manager.get("io_config.random_seed", 42, expected_type=int)
+        shuffle_data = config_manager.get("io_config.shuffle_data", True, expected_type=bool)
+        
+        # Set random seed
+        random.seed(random_seed)
+        
+        # Shuffle data if enabled
+        if shuffle_data:
+            random.shuffle(train_data)
+            
+        # Calculate split index
+        split_idx = int(len(train_data) * (1 - valid_split_ratio))
+        train_data, valid_data = train_data[:split_idx], train_data[split_idx:]
+        
+        # Log data split
+        logger.log_training_event(
+            event_type="data_split",
+            message="Data split into training and validation sets",
+            additional_info={
+                "train_samples": len(train_data),
+                "valid_samples": len(valid_data),
+                "split_ratio": valid_split_ratio,
+                "random_seed": random_seed,
+                "shuffled": shuffle_data
+            }
+        )
+        
+        return train_data, valid_data
+        
+    except Exception as e:
+        logger.log_error(
+            error_msg=f"Failed to split data: {str(e)}",
+            error_type="data_split_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={
+                "train_data_size": len(train_data),
+                "valid_split_ratio": valid_split_ratio
+            }
+        )
+        raise DataValidationError(f"Failed to split data: {str(e)}")
 
 def validate_quantization_mode(mode: str, logger: Logger) -> str:
     """
@@ -254,22 +437,35 @@ def validate_quantization_mode(mode: str, logger: Logger) -> str:
     Raises:
         ValueError: If the mode is invalid
     """
-    valid_modes = ["fp16", "int8", "int4"]
-    normalized_mode = mode.lower()
-    
-    if normalized_mode not in valid_modes:
-        logger.record_event(
-            event_type="quantization_mode_validation",
-            message=f"Invalid quantization mode '{mode}'. Defaulting to 'fp16'.",
-            level="warning",
+    try:
+        # Get valid modes from config
+        valid_modes = ["fp16", "int8", "int4"]
+        normalized_mode = mode.lower()
+        
+        if normalized_mode not in valid_modes:
+            logger.log_training_event(
+                event_type="quantization_mode_validation",
+                message=f"Invalid quantization mode '{mode}'. Defaulting to 'fp16'.",
+                additional_info={
+                    "invalid_mode": mode,
+                    "valid_modes": valid_modes,
+                    "default_mode": "fp16"
+                }
+            )
+            return "fp16"
+        
+        return normalized_mode
+        
+    except Exception as e:
+        logger.log_error(
+            error_msg=f"Failed to validate quantization mode: {str(e)}",
+            error_type="quantization_validation_error",
+            stack_trace=traceback.format_exc(),
             additional_info={
-                "invalid_mode": mode,
-                "default_mode": "fp16"
+                "mode": mode
             }
         )
-        return "fp16"
-    
-    return normalized_mode
+        raise ValueError(f"Failed to validate quantization mode: {str(e)}")
 
 def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[List, List]:
     """
@@ -287,49 +483,56 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
         DataValidationError: If data validation fails
     """
     try:
+        # Get configuration values
+        seed_file = config_manager.get("io_config.seed_file", "sovl_seed.jsonl", expected_type=str)
+        min_entries = config_manager.get("io_config.min_training_entries", 10, expected_type=int)
+        valid_split_ratio = config_manager.get("io_config.valid_split_ratio", 0.2, expected_type=float)
+        
         # Initialize JSONL loader
         loader = JSONLLoader(config_manager, logger)
         
-        # Get minimum required entries from config
-        min_entries = config_manager.get("core_config.min_training_entries", 10, expected_type=int)
+        # Load training data
+        train_data = loader.load_jsonl(seed_file, min_entries=min_entries)
         
-        # Load training data with minimum entries requirement
-        train_data = loader.load_jsonl("sovl_seed.jsonl", min_entries=min_entries)
-        
-        # Get validation split ratio from config
-        valid_split_ratio = config_manager.get("core_config.valid_split_ratio", 0.2, expected_type=float)
-        
-        # Split data into training and validation sets
+        # Split data
         train_data, valid_data = load_and_split_data(config_manager, logger, train_data, valid_split_ratio)
         
         # Log successful data loading
-        logger.record({
-            "event": "training_data_loaded",
-            "train_samples": len(train_data),
-            "valid_samples": len(valid_data),
-            "min_entries": min_entries,
-            "timestamp": time.time(),
-            "conversation_id": "init"
-        })
+        logger.log_training_event(
+            event_type="training_data_loaded",
+            message="Training data loaded successfully",
+            additional_info={
+                "train_samples": len(train_data),
+                "valid_samples": len(valid_data),
+                "min_entries": min_entries,
+                "seed_file": seed_file,
+                "valid_split_ratio": valid_split_ratio
+            }
+        )
         
         return train_data, valid_data
-
+        
     except InsufficientDataError as e:
         logger.log_error(
             error_msg=str(e),
             error_type="insufficient_data",
             stack_trace=traceback.format_exc(),
             additional_info={
-                "min_entries": min_entries
+                "min_entries": min_entries,
+                "seed_file": seed_file
             }
         )
-        raise  # Re-raise to force caller to handle
-
+        raise
+        
     except Exception as e:
         logger.log_error(
-            error_msg=f"Unexpected error during data loading: {str(e)}",
+            error_msg=f"Failed to load training data: {str(e)}",
             error_type="data_loading_error",
-            stack_trace=traceback.format_exc()
+            stack_trace=traceback.format_exc(),
+            additional_info={
+                "seed_file": seed_file,
+                "min_entries": min_entries
+            }
         )
         raise DataValidationError(f"Failed to load training data: {str(e)}")
 

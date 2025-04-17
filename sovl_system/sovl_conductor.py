@@ -54,8 +54,8 @@ class SOVLOrchestrator:
             # Initialize ConfigManager with validation
             self.config_manager = self._create_config_manager(config_path)
             
-            # Validate configuration sections
-            self._validate_config_sections()
+            # Initialize configuration
+            self._initialize_config()
             
             # Initialize device
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -98,6 +98,78 @@ class SOVLOrchestrator:
             )
             raise RuntimeError(f"Failed to initialize orchestrator: {str(e)}") from e
 
+    def _initialize_config(self) -> None:
+        """Initialize and validate configuration from ConfigManager."""
+        try:
+            # Load orchestrator configuration
+            orchestrator_config = self.config_manager.get_section("orchestrator_config")
+            
+            # Set configuration parameters with validation
+            self.log_max_size_mb = int(orchestrator_config.get("log_max_size_mb", self.LOG_MAX_SIZE_MB))
+            self.save_path_suffix = str(orchestrator_config.get("save_path_suffix", self.SAVE_PATH_SUFFIX))
+            
+            # Validate configuration values
+            self._validate_config_values()
+            
+            # Subscribe to configuration changes
+            self.config_manager.subscribe(self._on_config_change)
+            
+            self.logger.record_event(
+                event_type="orchestrator_config_initialized",
+                message="Orchestrator configuration initialized successfully",
+                level="info",
+                additional_info={
+                    "log_max_size_mb": self.log_max_size_mb,
+                    "save_path_suffix": self.save_path_suffix
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="orchestrator_config_initialization_failed",
+                message=f"Failed to initialize orchestrator configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
+    def _validate_config_values(self) -> None:
+        """Validate configuration values against defined ranges."""
+        try:
+            # Validate log size
+            if not 1 <= self.log_max_size_mb <= 100:
+                raise ValueError(f"Invalid log_max_size_mb: {self.log_max_size_mb}. Must be between 1 and 100.")
+                
+            # Validate save path suffix
+            if not self.save_path_suffix.startswith("_"):
+                raise ValueError(f"Invalid save_path_suffix: {self.save_path_suffix}. Must start with '_'.")
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="orchestrator_config_validation_failed",
+                message=f"Configuration validation failed: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
+    def _on_config_change(self) -> None:
+        """Handle configuration changes."""
+        try:
+            self._initialize_config()
+            self.logger.record_event(
+                event_type="orchestrator_config_updated",
+                message="Orchestrator configuration updated",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="orchestrator_config_update_failed",
+                message=f"Failed to update orchestrator configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+
     def _create_config_manager(self, config_path: str) -> ConfigManager:
         """Create and initialize the configuration manager with validation."""
         try:
@@ -110,7 +182,8 @@ class SOVLOrchestrator:
                 "curiosity_config",
                 "cross_attn_config",
                 "controls_config",
-                "lora_config"
+                "lora_config",
+                "orchestrator_config"
             ]
             
             missing_sections = [section for section in required_sections 
@@ -138,34 +211,26 @@ class SOVLOrchestrator:
         """Validate configuration sections for consistency."""
         try:
             # Get configuration sections
-            curiosity_config = self.config_manager.get_section("curiosity_config")
+            orchestrator_config = self.config_manager.get_section("orchestrator_config")
             controls_config = self.config_manager.get_section("controls_config")
             
             # Define required keys and their default values
             required_keys = {
-                "queue_maxlen": 10,
-                "weight_ignorance": 0.7,
-                "weight_novelty": 0.3,
-                "metrics_maxlen": 1000,
-                "novelty_threshold_spontaneous": 0.9,
-                "novelty_threshold_response": 0.8,
-                "pressure_threshold": 0.7,
-                "pressure_drop": 0.3,
-                "silence_threshold": 20.0,
-                "question_cooldown": 60.0,
-                "max_new_tokens": 8,
-                "base_temperature": 1.1,
-                "temperament_influence": 0.4,
-                "top_k": 30
+                "log_max_size_mb": self.LOG_MAX_SIZE_MB,
+                "save_path_suffix": self.SAVE_PATH_SUFFIX,
+                "enable_logging": True,
+                "enable_state_saving": True,
+                "state_save_interval": 300,
+                "max_backup_files": 5
             }
             
-            # Check for missing keys in curiosity_config
-            missing_keys = [key for key in required_keys if key not in curiosity_config]
+            # Check for missing keys in orchestrator_config
+            missing_keys = [key for key in required_keys if key not in orchestrator_config]
             if missing_keys:
                 self._log_event(
                     "config_validation",
                     {
-                        "message": "Missing keys in curiosity_config",
+                        "message": "Missing keys in orchestrator_config",
                         "missing_keys": missing_keys,
                         "default_values": {k: required_keys[k] for k in missing_keys}
                     },
@@ -173,58 +238,44 @@ class SOVLOrchestrator:
                 )
                 # Add missing keys with default values
                 for key in missing_keys:
-                    curiosity_config[key] = required_keys[key]
+                    orchestrator_config[key] = required_keys[key]
             
-            # Check for mismatches between curiosity_config and controls_config
-            controls_mapping = {
-                "curiosity_queue_maxlen": "queue_maxlen",
-                "curiosity_weight_ignorance": "weight_ignorance",
-                "curiosity_weight_novelty": "weight_novelty",
-                "curiosity_metrics_maxlen": "metrics_maxlen",
-                "curiosity_novelty_threshold_spontaneous": "novelty_threshold_spontaneous",
-                "curiosity_novelty_threshold_response": "novelty_threshold_response",
-                "curiosity_pressure_threshold": "pressure_threshold",
-                "curiosity_pressure_drop": "pressure_drop",
-                "curiosity_silence_threshold": "silence_threshold",
-                "curiosity_question_cooldown": "question_cooldown",
-                "curiosity_max_new_tokens": "max_new_tokens",
-                "curiosity_base_temperature": "base_temperature",
-                "curiosity_temperament_influence": "temperament_influence",
-                "curiosity_top_k": "top_k"
-            }
-            
-            mismatches = []
-            for controls_key, curiosity_key in controls_mapping.items():
-                if controls_key in controls_config and curiosity_key in curiosity_config:
-                    if controls_config[controls_key] != curiosity_config[curiosity_key]:
-                        mismatches.append({
-                            "controls_key": controls_key,
-                            "curiosity_key": curiosity_key,
-                            "controls_value": controls_config[controls_key],
-                            "curiosity_value": curiosity_config[curiosity_key]
-                        })
-            
-            if mismatches:
+            # Validate state save interval
+            state_save_interval = int(orchestrator_config.get("state_save_interval", 300))
+            if not 60 <= state_save_interval <= 3600:
                 self._log_event(
                     "config_validation",
                     {
-                        "message": "Configuration mismatches between controls_config and curiosity_config",
-                        "mismatches": mismatches
+                        "message": "Invalid state_save_interval",
+                        "value": state_save_interval,
+                        "valid_range": [60, 3600]
                     },
                     level="warning"
                 )
-                # Align controls_config with curiosity_config
-                for mismatch in mismatches:
-                    controls_config[mismatch["controls_key"]] = curiosity_config[mismatch["curiosity_key"]]
+                orchestrator_config["state_save_interval"] = 300
+            
+            # Validate max backup files
+            max_backup_files = int(orchestrator_config.get("max_backup_files", 5))
+            if not 1 <= max_backup_files <= 10:
+                self._log_event(
+                    "config_validation",
+                    {
+                        "message": "Invalid max_backup_files",
+                        "value": max_backup_files,
+                        "valid_range": [1, 10]
+                    },
+                    level="warning"
+                )
+                orchestrator_config["max_backup_files"] = 5
             
             # Log final configuration state
             self._log_event(
                 "config_validation",
                 {
                     "message": "Configuration validation complete",
-                    "curiosity_config": curiosity_config,
+                    "orchestrator_config": orchestrator_config,
                     "controls_config": {k: v for k, v in controls_config.items() 
-                                     if k.startswith("curiosity_")}
+                                     if k.startswith("orchestrator_")}
                 },
                 level="info"
             )

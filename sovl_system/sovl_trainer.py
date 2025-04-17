@@ -14,87 +14,207 @@ from transformers import AutoModelForCausalLM
 import traceback
 from sovl_scaffold import ScaffoldProvider
 from sovl_error import ErrorManager
+from sovl_config import ConfigManager
+from sovl_exceptions import ConfigurationError
 
 @dataclass
 class TrainingConfig:
     """Configuration for training parameters."""
-    learning_rate: float = 2e-5
-    grad_accum_steps: int = 4
-    weight_decay: float = 0.01
-    warmup_steps: int = 0
-    total_steps: int = 100000
-    max_grad_norm: float = 1.0
-    use_amp: bool = True
-    max_patience: int = 2
-    batch_size: int = 2
-    max_epochs: int = 3
-    validate_every_n_steps: int = 100
-    checkpoint_interval: int = 1000
-    checkpoint_path: str = "checkpoints/sovl_trainer"
-    scheduler_type: str = "linear"
-    cosine_min_lr: float = 1e-6
-    warmup_ratio: float = 0.1
-    dropout_rate: float = 0.1
-    max_seq_length: int = 512
-    metrics_to_track: List[str] = None
-    enable_gestation: bool = True
-    enable_sleep_training: bool = True
-    enable_lifecycle_weighting: bool = True
-    lifecycle_capacity_factor: float = 0.01
-    lifecycle_curve: str = "sigmoid_linear"
-    sleep_conf_threshold: float = 0.7
-    sleep_log_min: int = 10
-    exposure_gain_eager: int = 3
-    exposure_gain_default: int = 2
-    dream_memory_weight: float = 0.1
-    enable_dreaming: bool = True
-    repetition_n: int = 3
-    sigmoid_scale: float = 0.5
-    sigmoid_shift: float = 5.0
-    dream_noise_scale: float = 0.05
-    dream_prompt_weight: float = 0.5
-    dream_novelty_boost: float = 0.03
-    dream_memory_decay: float = 0.95
-    dream_prune_threshold: float = 0.1
-    temp_melancholy_noise: float = 0.02
-    enable_prompt_driven_dreams: bool = True
-    dream_swing_var: float = 0.1
-    dream_lifecycle_delta: float = 0.1
-    dream_temperament_on: bool = True
-    confidence_history_maxlen: int = 5
-    temperament_history_maxlen: int = 5
-    dry_run: bool = False
-    dry_run_params: Dict[str, Any] = None
-    memory_threshold: float = 0.85
-    memory_decay_rate: float = 0.95
-    use_scaffold_memory: bool = True
-    use_token_map_memory: bool = True
-    scaffold_weight: float = 1.0
-
-    def __post_init__(self):
-        if self.metrics_to_track is None:
-            self.metrics_to_track = ["loss", "accuracy", "confidence"]
-        self._validate()
-
-    def _validate(self):
+    
+    def __init__(self, config_manager: ConfigManager):
+        """
+        Initialize training configuration from ConfigManager.
+        
+        Args:
+            config_manager: ConfigManager instance for accessing configuration
+        """
+        self.config_manager = config_manager
+        self._load_config()
+        
+    def _load_config(self) -> None:
+        """Load and validate training configuration."""
+        try:
+            # Get training section from config
+            training_config = self.config_manager.get_section("training")
+            
+            # Load required parameters with validation
+            self.learning_rate = self.config_manager.get("training.learning_rate", 2e-5)
+            self.grad_accum_steps = self.config_manager.get("training.grad_accum_steps", 4)
+            self.weight_decay = self.config_manager.get("training.weight_decay", 0.01)
+            self.warmup_steps = self.config_manager.get("training.warmup_steps", 0)
+            self.total_steps = self.config_manager.get("training.total_steps", 100000)
+            self.max_grad_norm = self.config_manager.get("training.max_grad_norm", 1.0)
+            self.use_amp = self.config_manager.get("training.use_amp", True)
+            self.max_patience = self.config_manager.get("training.max_patience", 2)
+            self.batch_size = self.config_manager.get("training.batch_size", 2)
+            self.max_epochs = self.config_manager.get("training.max_epochs", 3)
+            self.validate_every_n_steps = self.config_manager.get("training.validate_every_n_steps", 100)
+            self.checkpoint_interval = self.config_manager.get("training.checkpoint_interval", 1000)
+            self.checkpoint_path = self.config_manager.get("training.checkpoint_path", "checkpoints/sovl_trainer")
+            self.scheduler_type = self.config_manager.get("training.scheduler_type", "linear")
+            self.cosine_min_lr = self.config_manager.get("training.cosine_min_lr", 1e-6)
+            self.warmup_ratio = self.config_manager.get("training.warmup_ratio", 0.1)
+            self.dropout_rate = self.config_manager.get("training.dropout_rate", 0.1)
+            self.max_seq_length = self.config_manager.get("training.max_seq_length", 512)
+            
+            # Load metrics configuration
+            self.metrics_to_track = self.config_manager.get(
+                "training.metrics_to_track",
+                ["loss", "accuracy", "confidence"]
+            )
+            
+            # Load lifecycle configuration
+            self.enable_gestation = self.config_manager.get("training.enable_gestation", True)
+            self.enable_sleep_training = self.config_manager.get("training.enable_sleep_training", True)
+            self.enable_lifecycle_weighting = self.config_manager.get("training.enable_lifecycle_weighting", True)
+            self.lifecycle_capacity_factor = self.config_manager.get("training.lifecycle_capacity_factor", 0.01)
+            self.lifecycle_curve = self.config_manager.get("training.lifecycle_curve", "sigmoid_linear")
+            
+            # Load sleep configuration
+            self.sleep_conf_threshold = self.config_manager.get("training.sleep_conf_threshold", 0.7)
+            self.sleep_log_min = self.config_manager.get("training.sleep_log_min", 10)
+            self.exposure_gain_eager = self.config_manager.get("training.exposure_gain_eager", 3)
+            self.exposure_gain_default = self.config_manager.get("training.exposure_gain_default", 2)
+            
+            # Load dream configuration
+            self.dream_memory_weight = self.config_manager.get("training.dream_memory_weight", 0.1)
+            self.enable_dreaming = self.config_manager.get("training.enable_dreaming", True)
+            self.repetition_n = self.config_manager.get("training.repetition_n", 3)
+            self.sigmoid_scale = self.config_manager.get("training.sigmoid_scale", 0.5)
+            self.sigmoid_shift = self.config_manager.get("training.sigmoid_shift", 5.0)
+            self.dream_noise_scale = self.config_manager.get("training.dream_noise_scale", 0.05)
+            self.dream_prompt_weight = self.config_manager.get("training.dream_prompt_weight", 0.5)
+            self.dream_novelty_boost = self.config_manager.get("training.dream_novelty_boost", 0.03)
+            self.dream_memory_decay = self.config_manager.get("training.dream_memory_decay", 0.95)
+            self.dream_prune_threshold = self.config_manager.get("training.dream_prune_threshold", 0.1)
+            self.temp_melancholy_noise = self.config_manager.get("training.temp_melancholy_noise", 0.02)
+            self.enable_prompt_driven_dreams = self.config_manager.get("training.enable_prompt_driven_dreams", True)
+            self.dream_swing_var = self.config_manager.get("training.dream_swing_var", 0.1)
+            self.dream_lifecycle_delta = self.config_manager.get("training.dream_lifecycle_delta", 0.1)
+            self.dream_temperament_on = self.config_manager.get("training.dream_temperament_on", True)
+            
+            # Load history configuration
+            self.confidence_history_maxlen = self.config_manager.get("training.confidence_history_maxlen", 5)
+            self.temperament_history_maxlen = self.config_manager.get("training.temperament_history_maxlen", 5)
+            
+            # Load dry run configuration
+            self.dry_run = self.config_manager.get("training.dry_run", False)
+            self.dry_run_params = self.config_manager.get("training.dry_run_params", None)
+            
+            # Load memory configuration
+            self.memory_threshold = self.config_manager.get("training.memory_threshold", 0.85)
+            self.memory_decay_rate = self.config_manager.get("training.memory_decay_rate", 0.95)
+            self.use_scaffold_memory = self.config_manager.get("training.use_scaffold_memory", True)
+            self.use_token_map_memory = self.config_manager.get("training.use_token_map_memory", True)
+            self.scaffold_weight = self.config_manager.get("training.scaffold_weight", 1.0)
+            
+            # Validate configuration
+            self._validate()
+            
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to load training configuration: {str(e)}",
+                traceback.format_exc()
+            )
+            
+    def _validate(self) -> None:
         """Validate configuration parameters."""
-        assert self.learning_rate > 0, "Learning rate must be positive"
-        assert self.grad_accum_steps >= 1, "Gradient accumulation steps must be at least 1"
-        assert self.max_grad_norm > 0, "Max gradient norm must be positive"
-        assert self.scheduler_type in ["linear", "cosine", "constant"], "Invalid scheduler type"
-        assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "Invalid lifecycle curve"
-        assert self.repetition_n >= 2, "Repetition check length must be at least 2"
-        assert self.sigmoid_scale > 0, "Sigmoid scale must be positive"
-        assert self.sigmoid_shift >= 0, "Sigmoid shift must be non-negative"
-        assert self.dream_noise_scale >= 0, "Dream noise scale must be non-negative"
-        assert 0 <= self.dream_prompt_weight <= 1, "Dream prompt weight must be in [0, 1]"
-        assert self.dream_novelty_boost >= 0, "Dream novelty boost must be non-negative"
-        assert 0 <= self.dream_memory_decay <= 1, "Dream memory decay must be in [0, 1]"
-        assert 0 <= self.dream_prune_threshold <= 1, "Dream prune threshold must be in [0, 1]"
-        assert self.dream_swing_var >= 0, "Dream swing variance must be non-negative"
-        assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
-        assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
-        assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
+        try:
+            # Validate numeric parameters
+            assert self.learning_rate > 0, "Learning rate must be positive"
+            assert self.grad_accum_steps >= 1, "Gradient accumulation steps must be at least 1"
+            assert self.max_grad_norm > 0, "Max gradient norm must be positive"
+            assert self.scheduler_type in ["linear", "cosine", "constant"], "Invalid scheduler type"
+            assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "Invalid lifecycle curve"
+            assert self.repetition_n >= 2, "Repetition check length must be at least 2"
+            assert self.sigmoid_scale > 0, "Sigmoid scale must be positive"
+            assert self.sigmoid_shift >= 0, "Sigmoid shift must be non-negative"
+            assert self.dream_noise_scale >= 0, "Dream noise scale must be non-negative"
+            assert 0 <= self.dream_prompt_weight <= 1, "Dream prompt weight must be in [0, 1]"
+            assert self.dream_novelty_boost >= 0, "Dream novelty boost must be non-negative"
+            assert 0 <= self.dream_memory_decay <= 1, "Dream memory decay must be in [0, 1]"
+            assert 0 <= self.dream_prune_threshold <= 1, "Dream prune threshold must be in [0, 1]"
+            assert self.dream_swing_var >= 0, "Dream swing variance must be non-negative"
+            assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
+            assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
+            assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
+            
+        except AssertionError as e:
+            raise ConfigurationError(
+                f"Invalid training configuration: {str(e)}",
+                traceback.format_exc()
+            )
+            
+    def update(self, key: str, value: Any) -> bool:
+        """
+        Update a configuration parameter.
+        
+        Args:
+            key: Configuration key to update
+            value: New value for the configuration key
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        try:
+            # Update in config manager
+            success = self.config_manager.update(f"training.{key}", value)
+            
+            if success:
+                # Reload configuration to ensure consistency
+                self._load_config()
+                
+            return success
+            
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to update training configuration: {str(e)}",
+                traceback.format_exc()
+            )
+            
+    def get(self, key: str, default: Any = None) -> Any:
+        """
+        Get a configuration parameter.
+        
+        Args:
+            key: Configuration key to get
+            default: Default value if key is not found
+            
+        Returns:
+            Any: Configuration value
+        """
+        try:
+            return self.config_manager.get(f"training.{key}", default)
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to get training configuration: {str(e)}",
+                traceback.format_exc()
+            )
+            
+    def validate_section(self) -> bool:
+        """
+        Validate the training configuration section.
+        
+        Returns:
+            bool: True if validation successful, False otherwise
+        """
+        try:
+            required_keys = [
+                "learning_rate", "grad_accum_steps", "weight_decay",
+                "warmup_steps", "total_steps", "max_grad_norm",
+                "use_amp", "max_patience", "batch_size", "max_epochs",
+                "validate_every_n_steps", "checkpoint_interval",
+                "checkpoint_path", "scheduler_type", "cosine_min_lr",
+                "warmup_ratio", "dropout_rate", "max_seq_length"
+            ]
+            
+            return self.config_manager.validate_section("training", required_keys)
+            
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to validate training configuration section: {str(e)}",
+                traceback.format_exc()
+            )
 
 @dataclass
 class DreamMemoryConfig:

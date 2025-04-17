@@ -563,18 +563,26 @@ class CommandHandler:
         """Handle configuration commands."""
         if not args:
             # Show all configuration
-            config = self.system.config_manager.get_config()
+            config = self.system.config_manager.get_state()
             self._print_config(config)
             return
 
         if len(args) == 1:
             # Get value for specific key
             key = args[0]
-            value = self.system.config_manager.get(key)
-            if value is not None:
-                print(f"{key}: {value}")
-            else:
-                print(f"Configuration key '{key}' not found")
+            try:
+                value = self.system.config_manager.get(key)
+                if value is not None:
+                    print(f"{key}: {value}")
+                else:
+                    print(f"Configuration key '{key}' not found")
+            except Exception as e:
+                print(f"Error getting configuration value: {str(e)}")
+                self.system.logger.log_error(
+                    error_msg=f"Failed to get configuration value for key: {key}",
+                    error_type="config_get_error",
+                    stack_trace=traceback.format_exc()
+                )
             return
 
         if len(args) == 2:
@@ -605,13 +613,17 @@ class CommandHandler:
                 old_value = self.system.config_manager.get(key)
                 if self.system.config_manager.update(key, new_value):
                     # Log the configuration change
-                    self.system.logger.record({
-                        "event": "config_updated",
-                        "key": key,
-                        "old_value": old_value,
-                        "new_value": new_value,
-                        "timestamp": time.time()
-                    })
+                    self.system.logger.record_event(
+                        event_type="config_updated",
+                        message="Configuration value updated",
+                        level="info",
+                        additional_info={
+                            "key": key,
+                            "old_value": old_value,
+                            "new_value": new_value,
+                            "timestamp": time.time()
+                        }
+                    )
                     
                     # Check for configuration change effects
                     try:
@@ -628,16 +640,26 @@ class CommandHandler:
                                     print(f"- {warning}")
                     except Exception as e:
                         print(f"Warning: Configuration change may have side effects: {str(e)}")
-                        self.system.logger.record({
-                            "event": "config_change_warning",
-                            "key": key,
-                            "error": str(e),
-                            "timestamp": time.time()
-                        })
+                        self.system.logger.record_event(
+                            event_type="config_change_warning",
+                            message="Configuration change had side effects",
+                            level="warning",
+                            additional_info={
+                                "key": key,
+                                "error": str(e),
+                                "timestamp": time.time()
+                            }
+                        )
                 else:
                     print(f"Failed to update {key}")
             except ValueError as e:
                 print(f"Error setting configuration: {str(e)}")
+                self.system.logger.log_error(
+                    error_msg=f"Failed to set configuration value for key: {key}",
+                    error_type="config_set_error",
+                    stack_trace=traceback.format_exc(),
+                    additional_info={"value": new_value}
+                )
             return
 
         print("Invalid configuration command. Use 'config' to show all, 'config <key>' to get a value, or 'config <key> <value>' to set a value")

@@ -3,19 +3,21 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from peft import LoraConfig, get_peft_model, TaskType
 import bitsandbytes as bnb
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import traceback
 import os
 from threading import Lock
 import time
 from sovl_utils import validate_quantization_mode
+from sovl_config import ConfigManager
+from sovl_logger import Logger
 
 class ModelManager:
     """
     A robust module for managing model loading, initialization, and switching in the SOVL system.
     Handles base model, scaffold models, tokenizers, and related configurations.
     """
-    def __init__(self, config_manager, logger, device: torch.device):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         """
         Initialize the ModelManager.
 
@@ -24,15 +26,13 @@ class ModelManager:
             logger: Logger instance for recording events and errors.
             device: Torch device (cuda/cpu) for model placement.
         """
-        self.config_manager = config_manager
-        self.logger = logger
-        self.device = device
-        self.memory_lock = Lock()
+        self._config_manager = config_manager
+        self._logger = logger
+        self._device = device
+        self._memory_lock = Lock()
 
-        # Cache configuration sections
-        self.core_config = config_manager.get_section("core_config")
-        self.lora_config = config_manager.get_section("lora_config")
-        self.controls_config = config_manager.get_section("controls_config")
+        # Initialize configuration
+        self._initialize_config()
 
         # Model storage
         self.base_model = None
@@ -42,19 +42,128 @@ class ModelManager:
         self.base_config = None
         self.scaffold_config = None
 
-        # Quantization and model settings
-        self.quantization_mode = validate_quantization_mode(
-            self.core_config.get("quantization", "fp16"),
-            self.logger
-        )
-        self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", None)
-
         # Initialize models and tokenizers
         self.load_models()
 
+    def _initialize_config(self) -> None:
+        """Initialize and validate configuration parameters."""
+        try:
+            # Get core config section
+            core_config = self._config_manager.get_section("core_config", {})
+            
+            # Validate and set core config values
+            self.base_model_name = self._validate_config_value(
+                "base_model_name",
+                core_config.get("base_model_name", "gpt2"),
+                str
+            )
+            
+            self.scaffold_model_name = self._validate_config_value(
+                "scaffold_model_name",
+                core_config.get("scaffold_model_name", "gpt2"),
+                str
+            )
+            
+            self.quantization_mode = self._validate_config_value(
+                "quantization",
+                core_config.get("quantization", "fp16"),
+                str,
+                valid_values=["fp16", "int8", "int4"]
+            )
+            
+            # Get LoRA config section
+            lora_config = self._config_manager.get_section("lora_config", {})
+            
+            # Validate and set LoRA config values
+            self.enable_lora = self._validate_config_value(
+                "enable_lora_adapters",
+                lora_config.get("enable_lora_adapters", True),
+                bool
+            )
+            
+            self.lora_rank = self._validate_config_value(
+                "lora_rank",
+                lora_config.get("lora_rank", 8),
+                int,
+                valid_range=(1, 32)
+            )
+            
+            self.lora_alpha = self._validate_config_value(
+                "lora_alpha",
+                lora_config.get("lora_alpha", 16),
+                int,
+                valid_range=(1, 64)
+            )
+            
+            self.lora_dropout = self._validate_config_value(
+                "lora_dropout",
+                lora_config.get("lora_dropout", 0.1),
+                float,
+                valid_range=(0.0, 0.5)
+            )
+            
+            # Update config with validated values
+            core_config.update({
+                "base_model_name": self.base_model_name,
+                "scaffold_model_name": self.scaffold_model_name,
+                "quantization": self.quantization_mode
+            })
+            
+            lora_config.update({
+                "enable_lora_adapters": self.enable_lora,
+                "lora_rank": self.lora_rank,
+                "lora_alpha": self.lora_alpha,
+                "lora_dropout": self.lora_dropout
+            })
+            
+            self._config_manager.update_section("core_config", core_config)
+            self._config_manager.update_section("lora_config", lora_config)
+            
+            # Log successful initialization
+            self._log_event(
+                "model_config_initialized",
+                "Model configuration initialized successfully",
+                level="info"
+            )
+            
+        except Exception as e:
+            self._log_error(
+                f"Failed to initialize model config: {str(e)}",
+                error_type="config_error",
+                stack_trace=traceback.format_exc(),
+                context="config_initialization"
+            )
+            raise
+
+    def _validate_config_value(self, key: str, value: Any, expected_type: type, valid_values: Optional[List[Any]] = None, valid_range: Optional[Tuple[Any, Any]] = None) -> Any:
+        """Validate a configuration value against type and constraints."""
+        try:
+            # Type validation
+            if not isinstance(value, expected_type):
+                raise ValueError(f"Config {key} must be of type {expected_type.__name__}")
+            
+            # Value validation
+            if valid_values is not None and value not in valid_values:
+                raise ValueError(f"Config {key}={value} not in valid values {valid_values}")
+            
+            # Range validation
+            if valid_range is not None:
+                min_val, max_val = valid_range
+                if not (min_val <= value <= max_val):
+                    raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+            
+            return value
+        except Exception as e:
+            self._log_error(
+                f"Config validation failed for {key}: {str(e)}",
+                error_type="config_validation_error",
+                context="config_validation"
+            )
+            raise
+
     def load_models(self):
         """Load base and scaffold models along with their tokenizers."""
-        with self.memory_lock:
+        with self._memory_lock:
             try:
                 start_time = time.time()
                 self._load_base_model()
@@ -70,12 +179,13 @@ class ModelManager:
                 
                 total_load_time = time.time() - start_time
                 
-                self.logger.log_training_event(
-                    event_type="models_loaded",
-                    message="All models and tokenizers loaded successfully",
+                self._log_event(
+                    "models_loaded",
+                    "All models and tokenizers loaded successfully",
+                    level="info",
                     additional_info={
-                        "base_model": self.core_config.get("base_model_name", "unknown"),
-                        "scaffold_model": self.core_config.get("scaffold_model_name", "unknown"),
+                        "base_model": self.base_model_name,
+                        "scaffold_model": self.scaffold_model_name,
                         "quantization": self.quantization_mode,
                         "load_times": {
                             "base_model": base_load_time,
@@ -90,13 +200,13 @@ class ModelManager:
                     }
                 )
             except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Model loading failed: {str(e)}",
+                self._log_error(
+                    f"Model loading failed: {str(e)}",
                     error_type="model_loading_error",
                     stack_trace=traceback.format_exc(),
                     additional_info={
-                        "base_model": self.core_config.get("base_model_name", "unknown"),
-                        "scaffold_model": self.core_config.get("scaffold_model_name", "unknown")
+                        "base_model": self.base_model_name,
+                        "scaffold_model": self.scaffold_model_name
                     }
                 )
                 raise
@@ -118,7 +228,7 @@ class ModelManager:
                 "buffers": sum(b.numel() for b in model.buffers())
             }
         except Exception as e:
-            self.logger.log_error(
+            self._logger.log_error(
                 error_msg=f"Failed to get memory usage: {str(e)}",
                 error_type="memory_usage_error",
                 stack_trace=traceback.format_exc()
@@ -127,19 +237,18 @@ class ModelManager:
 
     def _load_base_model(self):
         """Load the base model with specified quantization."""
-        base_model_name = self.core_config.get("base_model_name", "gpt2")
         try:
             start_time = time.time()
-            self.base_config = AutoConfig.from_pretrained(base_model_name)
+            self.base_config = AutoConfig.from_pretrained(self.base_model_name)
             config_load_time = time.time() - start_time
             
             start_time = time.time()
             quantization_config = self._get_quantization_config()
             self.base_model = AutoModelForCausalLM.from_pretrained(
-                base_model_name,
+                self.base_model_name,
                 config=self.base_config,
                 **quantization_config
-            ).to(self.device)
+            ).to(self._device)
             model_load_time = time.time() - start_time
             
             start_time = time.time()
@@ -148,11 +257,12 @@ class ModelManager:
                 param.requires_grad = False
             setup_time = time.time() - start_time
             
-            self.logger.log_training_event(
-                event_type="base_model_loaded",
-                message=f"Base model '{base_model_name}' loaded and frozen",
+            self._log_event(
+                "base_model_loaded",
+                f"Base model '{self.base_model_name}' loaded and frozen",
+                level="info",
                 additional_info={
-                    "model_name": base_model_name,
+                    "model_name": self.base_model_name,
                     "quantization": self.quantization_mode,
                     "load_times": {
                         "config": config_load_time,
@@ -164,12 +274,12 @@ class ModelManager:
                 }
             )
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to load base model: {str(e)}",
+            self._log_error(
+                f"Failed to load base model: {str(e)}",
                 error_type="base_model_loading_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
-                    "model_name": base_model_name,
+                    "model_name": self.base_model_name,
                     "quantization": self.quantization_mode
                 }
             )
@@ -177,44 +287,44 @@ class ModelManager:
 
     def _load_scaffold_model(self):
         """Load the scaffold model, optionally with LoRA adapters."""
-        scaffold_model_name = self.core_config.get("scaffold_model_name", "gpt2")
         try:
             start_time = time.time()
-            self.scaffold_config = AutoConfig.from_pretrained(scaffold_model_name)
+            self.scaffold_config = AutoConfig.from_pretrained(self.scaffold_model_name)
             config_load_time = time.time() - start_time
             
             start_time = time.time()
             quantization_config = self._get_quantization_config()
             scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
-                scaffold_model_name,
+                self.scaffold_model_name,
                 config=self.scaffold_config,
                 **quantization_config
             )
             model_load_time = time.time() - start_time
             
             start_time = time.time()
-            if self.controls_config.get("enable_lora_adapters", True):
+            if self.enable_lora:
                 lora_config = LoraConfig(
-                    r=self.lora_config.get("lora_rank", 8),
-                    lora_alpha=self.lora_config.get("lora_alpha", 16),
-                    target_modules=self.lora_config.get("lora_target_modules", ["c_attn", "c_proj", "c_fc"]),
-                    lora_dropout=self.lora_config.get("lora_dropout", 0.1),
+                    r=self.lora_rank,
+                    lora_alpha=self.lora_alpha,
+                    target_modules=self._config_manager.get("lora_config.lora_target_modules", ["c_attn", "c_proj", "c_fc"]),
+                    lora_dropout=self.lora_dropout,
                     bias="none",
                     task_type=TaskType.CAUSAL_LM
                 )
-                self.scaffold_models = [get_peft_model(scaffold_model_raw, lora_config).to(self.device)]
+                self.scaffold_models = [get_peft_model(scaffold_model_raw, lora_config).to(self._device)]
                 lora_message = "LoRA adapters applied to scaffold model"
             else:
-                self.scaffold_models = [scaffold_model_raw.to(self.device)]
+                self.scaffold_models = [scaffold_model_raw.to(self._device)]
                 lora_message = "Scaffold model loaded without LoRA adapters"
             setup_time = time.time() - start_time
             
-            self.logger.log_training_event(
-                event_type="scaffold_model_loaded",
-                message=lora_message,
+            self._log_event(
+                "scaffold_model_loaded",
+                lora_message,
+                level="info",
                 additional_info={
-                    "model_name": scaffold_model_name,
-                    "lora_enabled": self.controls_config.get("enable_lora_adapters", True),
+                    "model_name": self.scaffold_model_name,
+                    "lora_enabled": self.enable_lora,
                     "load_times": {
                         "config": config_load_time,
                         "model": model_load_time,
@@ -225,28 +335,26 @@ class ModelManager:
                 }
             )
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to load scaffold model: {str(e)}",
+            self._log_error(
+                f"Failed to load scaffold model: {str(e)}",
                 error_type="scaffold_model_loading_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
-                    "model_name": scaffold_model_name,
-                    "lora_enabled": self.controls_config.get("enable_lora_adapters", True)
+                    "model_name": self.scaffold_model_name,
+                    "lora_enabled": self.enable_lora
                 }
             )
             raise
 
     def _load_tokenizers(self):
         """Load tokenizers for base and scaffold models."""
-        base_model_name = self.core_config.get("base_model_name", "gpt2")
-        scaffold_model_name = self.core_config.get("scaffold_model_name", "gpt2")
         try:
             start_time = time.time()
-            self.base_tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+            self.base_tokenizer = AutoTokenizer.from_pretrained(self.base_model_name)
             base_tokenizer_time = time.time() - start_time
             
             start_time = time.time()
-            self.scaffold_tokenizer = AutoTokenizer.from_pretrained(scaffold_model_name)
+            self.scaffold_tokenizer = AutoTokenizer.from_pretrained(self.scaffold_model_name)
             scaffold_tokenizer_time = time.time() - start_time
             
             start_time = time.time()
@@ -264,16 +372,16 @@ class ModelManager:
             # Set scaffold_unk_id if not set
             if self.scaffold_unk_id is None:
                 self.scaffold_unk_id = self.scaffold_tokenizer.unk_token_id
-                self.controls_config["scaffold_unk_id"] = self.scaffold_unk_id
-                self.config_manager.update("controls_config.scaffold_unk_id", self.scaffold_unk_id)
+                self._config_manager.set("controls_config.scaffold_unk_id", self.scaffold_unk_id)
             setup_time = time.time() - start_time
                 
-            self.logger.log_training_event(
-                event_type="tokenizers_loaded",
-                message="Tokenizers loaded and configured",
+            self._log_event(
+                "tokenizers_loaded",
+                "Tokenizers loaded and configured",
+                level="info",
                 additional_info={
-                    "base_model": base_model_name,
-                    "scaffold_model": scaffold_model_name,
+                    "base_model": self.base_model_name,
+                    "scaffold_model": self.scaffold_model_name,
                     "load_times": {
                         "base_tokenizer": base_tokenizer_time,
                         "scaffold_tokenizer": scaffold_tokenizer_time,
@@ -283,13 +391,13 @@ class ModelManager:
                 }
             )
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to load tokenizers: {str(e)}",
+            self._log_error(
+                f"Failed to load tokenizers: {str(e)}",
                 error_type="tokenizer_loading_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
-                    "base_model": base_model_name,
-                    "scaffold_model": scaffold_model_name
+                    "base_model": self.base_model_name,
+                    "scaffold_model": self.scaffold_model_name
                 }
             )
             raise
@@ -310,7 +418,7 @@ class ModelManager:
             model_name: Name of the new model (e.g., "gpt2", "bert-base-uncased").
             quantization: Optional quantization mode ("fp16", "int8", "int4").
         """
-        with self.memory_lock:
+        with self._memory_lock:
             try:
                 # Clean up existing base model
                 if self.base_model is not None:
@@ -320,29 +428,41 @@ class ModelManager:
                         torch.cuda.empty_cache()
 
                 # Update configuration
-                self.core_config["base_model_name"] = model_name
+                self.base_model_name = self._validate_config_value(
+                    "base_model_name",
+                    model_name,
+                    str
+                )
+                
                 if quantization:
-                    self.quantization_mode = quantization
-                    self.core_config["quantization"] = quantization
-                self.config_manager.update("core_config.base_model_name", model_name)
+                    self.quantization_mode = self._validate_config_value(
+                        "quantization",
+                        quantization,
+                        str,
+                        valid_values=["fp16", "int8", "int4"]
+                    )
+                
+                # Update config manager
+                self._config_manager.set("core_config.base_model_name", self.base_model_name)
                 if quantization:
-                    self.config_manager.update("core_config.quantization", quantization)
+                    self._config_manager.set("core_config.quantization", self.quantization_mode)
 
                 # Load new base model and tokenizer
                 self._load_base_model()
                 self._load_tokenizers()  # Reload tokenizers to match new base model
 
-                self.logger.log_training_event(
-                    event_type="base_model_switched",
-                    message=f"Switched base model to {model_name} with quantization {self.quantization_mode}",
+                self._log_event(
+                    "base_model_switched",
+                    f"Switched base model to {model_name} with quantization {self.quantization_mode}",
+                    level="info",
                     additional_info={
                         "new_model": model_name,
                         "quantization": self.quantization_mode
                     }
                 )
             except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Failed to switch base model: {str(e)}",
+                self._log_error(
+                    f"Failed to switch base model: {str(e)}",
                     error_type="base_model_switching_error",
                     stack_trace=traceback.format_exc(),
                     additional_info={
@@ -361,7 +481,7 @@ class ModelManager:
             quantization: Optional quantization mode ("fp16", "int8", "int4").
             apply_lora: Whether to apply LoRA adapters (defaults to config setting).
         """
-        with self.memory_lock:
+        with self._memory_lock:
             try:
                 # Clean up existing scaffold models
                 if self.scaffold_models:
@@ -372,33 +492,50 @@ class ModelManager:
                         torch.cuda.empty_cache()
 
                 # Update configuration
-                self.core_config["scaffold_model_name"] = model_name
+                self.scaffold_model_name = self._validate_config_value(
+                    "scaffold_model_name",
+                    model_name,
+                    str
+                )
+                
                 if quantization:
-                    self.quantization_mode = quantization
-                    self.core_config["quantization"] = quantization
+                    self.quantization_mode = self._validate_config_value(
+                        "quantization",
+                        quantization,
+                        str,
+                        valid_values=["fp16", "int8", "int4"]
+                    )
+                
                 if apply_lora is not None:
-                    self.controls_config["enable_lora_adapters"] = apply_lora
-                    self.config_manager.update("controls_config.enable_lora_adapters", apply_lora)
-                self.config_manager.update("core_config.scaffold_model_name", model_name)
+                    self.enable_lora = self._validate_config_value(
+                        "enable_lora_adapters",
+                        apply_lora,
+                        bool
+                    )
+                    self._config_manager.set("lora_config.enable_lora_adapters", self.enable_lora)
+                
+                # Update config manager
+                self._config_manager.set("core_config.scaffold_model_name", self.scaffold_model_name)
                 if quantization:
-                    self.config_manager.update("core_config.quantization", quantization)
+                    self._config_manager.set("core_config.quantization", self.quantization_mode)
 
                 # Load new scaffold model's tokenizer
                 self._load_scaffold_model()
                 self._load_tokenizers()  # Reload tokenizers to match new scaffold model
 
-                self.logger.log_training_event(
-                    event_type="scaffold_model_switched",
-                    message=f"Switched scaffold model to {model_name} with quantization {self.quantization_mode}",
+                self._log_event(
+                    "scaffold_model_switched",
+                    f"Switched scaffold model to {model_name} with quantization {self.quantization_mode}",
+                    level="info",
                     additional_info={
                         "new_model": model_name,
                         "quantization": self.quantization_mode,
-                        "lora_enabled": self.controls_config.get("enable_lora_adapters", True)
+                        "lora_enabled": self.enable_lora
                     }
                 )
             except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Failed to switch scaffold model: {str(e)}",
+                self._log_error(
+                    f"Failed to switch scaffold model: {str(e)}",
                     error_type="scaffold_model_switching_error",
                     stack_trace=traceback.format_exc(),
                     additional_info={
@@ -416,25 +553,42 @@ class ModelManager:
         Args:
             mode: Quantization mode ("fp16", "int8", "int4").
         """
-        validated_mode = validate_quantization_mode(mode, self.logger)
-        if validated_mode != self.quantization_mode:
-            self.quantization_mode = validated_mode
-            self.core_config["quantization"] = validated_mode
-            self.config_manager.update("core_config.quantization", validated_mode)
-            self.logger.log_training_event(
-                event_type="quantization_mode_set",
-                message=f"Quantization mode set to '{validated_mode}'. Restart or reload models to apply.",
+        try:
+            validated_mode = self._validate_config_value(
+                "quantization",
+                mode,
+                str,
+                valid_values=["fp16", "int8", "int4"]
+            )
+            
+            if validated_mode != self.quantization_mode:
+                self.quantization_mode = validated_mode
+                self._config_manager.set("core_config.quantization", validated_mode)
+                self._log_event(
+                    "quantization_mode_set",
+                    f"Quantization mode set to '{validated_mode}'. Restart or reload models to apply.",
+                    level="info",
+                    additional_info={
+                        "mode": validated_mode
+                    }
+                )
+                print(f"Quantization mode set to '{validated_mode}'. Restart or reload models to apply.")
+            else:
+                print(f"Invalid mode '{mode}' or no change.")
+        except Exception as e:
+            self._log_error(
+                f"Failed to set quantization mode: {str(e)}",
+                error_type="quantization_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
-                    "mode": validated_mode
+                    "mode": mode
                 }
             )
-            print(f"Quantization mode set to '{validated_mode}'. Restart or reload models to apply.")
-        else:
-            print(f"Invalid mode '{mode}' or no change.")
+            raise
 
     def reload_models(self):
         """Reload all models with current configuration."""
-        with self.memory_lock:
+        with self._memory_lock:
             try:
                 # Clean up existing models
                 if self.base_model:
@@ -449,23 +603,49 @@ class ModelManager:
                 # Reload models
                 self.load_models()
 
-                self.logger.log_training_event(
-                    event_type="models_reloaded",
-                    message="All models reloaded successfully",
+                self._log_event(
+                    "models_reloaded",
+                    "All models reloaded successfully",
+                    level="info",
                     additional_info={
-                        "base_model": self.core_config.get("base_model_name", "unknown"),
-                        "scaffold_model": self.core_config.get("scaffold_model_name", "unknown"),
+                        "base_model": self.base_model_name,
+                        "scaffold_model": self.scaffold_model_name,
                         "quantization": self.quantization_mode
                     }
                 )
                 print("All models reloaded successfully.")
             except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Model reload failed: {str(e)}",
+                self._log_error(
+                    f"Model reload failed: {str(e)}",
                     error_type="model_reloading_error",
                     stack_trace=traceback.format_exc()
                 )
                 raise
+
+    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Log an event with standardized format."""
+        try:
+            self._logger.record_event(
+                event_type=event_type,
+                message=message,
+                level=level,
+                additional_info=kwargs.get("additional_info", {})
+            )
+        except Exception as e:
+            print(f"Failed to log event: {str(e)}")
+
+    def _log_error(self, error_msg: str, error_type: str, stack_trace: Optional[str] = None, **kwargs) -> None:
+        """Log an error with consistent formatting and context."""
+        try:
+            self._logger.log_error(
+                error_msg=error_msg,
+                error_type=error_type,
+                stack_trace=stack_trace,
+                context=kwargs.get("context", {}),
+                additional_info=kwargs.get("additional_info", {})
+            )
+        except Exception as e:
+            print(f"Failed to log error: {str(e)}")
 
     def get_base_model(self) -> Optional[nn.Module]:
         """Return the base model."""
@@ -489,7 +669,7 @@ class ModelManager:
 
     def cleanup(self):
         """Clean up models and free memory."""
-        with self.memory_lock:
+        with self._memory_lock:
             try:
                 if self.base_model:
                     del self.base_model
@@ -499,14 +679,14 @@ class ModelManager:
                 self.scaffold_models = []
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                self.logger.log_training_event(
-                    event_type="model_manager_cleanup",
-                    message="ModelManager cleanup completed"
+                self._log_event(
+                    "model_manager_cleanup",
+                    "ModelManager cleanup completed"
                 )
                 print("ModelManager cleanup completed.")
             except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"ModelManager cleanup failed: {str(e)}",
+                self._log_error(
+                    f"ModelManager cleanup failed: {str(e)}",
                     error_type="model_manager_cleanup_error",
                     stack_trace=traceback.format_exc()
                 )

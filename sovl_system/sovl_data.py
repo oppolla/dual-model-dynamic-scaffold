@@ -436,55 +436,6 @@ class FileDataProvider(DataProvider):
 class DataManager:
     """Manages loading, validation, and splitting of training data."""
     
-    # Define configuration schema with validation rules
-    CONFIG_SCHEMA = {
-        "core_config": {
-            "random_seed": {
-                "type": int,
-                "default": 42,
-                "range": (1, 999999),
-                "required": True
-            },
-            "valid_split_ratio": {
-                "type": float,
-                "default": 0.2,
-                "range": (0.0, 1.0),
-                "required": True
-            },
-            "data_source": {
-                "type": str,
-                "default": "sovl_seed.jsonl",
-                "required": True
-            },
-            "batch_size": {
-                "type": int,
-                "default": 32,
-                "range": (1, 1024),
-                "required": True
-            },
-            "max_retries": {
-                "type": int,
-                "default": 3,
-                "range": (1, 10),
-                "required": True
-            }
-        },
-        "data_config": {
-            "min_entries": {
-                "type": int,
-                "default": 10,
-                "range": (1, 1000000),
-                "required": True
-            },
-            "validation_threshold": {
-                "type": float,
-                "default": 0.8,
-                "range": (0.0, 1.0),
-                "required": True
-            }
-        }
-    }
-    
     def __init__(
         self,
         config_manager: ConfigManager,
@@ -492,7 +443,25 @@ class DataManager:
         state: Optional[SOVLState] = None,
         error_handler: Optional[ErrorManager] = None
     ):
-        """Initialize DataManager with configuration and dependencies."""
+        """Initialize DataManager with configuration and dependencies.
+        
+        Args:
+            config_manager: ConfigManager instance for configuration handling
+            logger: Logger instance for logging
+            state: Optional SOVLState instance for state management
+            error_handler: Optional ErrorManager instance for error handling
+            
+        Raises:
+            ValueError: If config_manager or logger is None
+            TypeError: If config_manager is not a ConfigManager instance
+        """
+        if not config_manager:
+            raise ValueError("config_manager cannot be None")
+        if not logger:
+            raise ValueError("logger cannot be None")
+        if not isinstance(config_manager, ConfigManager):
+            raise TypeError("config_manager must be a ConfigManager instance")
+            
         self.config_manager = config_manager
         self.logger = logger
         self.state = state
@@ -510,70 +479,103 @@ class DataManager:
         self._validate_initialization()
         
     def _initialize_config(self) -> None:
-        """Initialize and validate configuration."""
+        """Initialize and validate configuration from ConfigManager."""
+        try:
+            # Load core configuration
+            core_config = self.config_manager.get_section("core_config")
+            self.random_seed = int(core_config.get("random_seed", 42))
+            self.valid_split_ratio = float(core_config.get("valid_split_ratio", 0.2))
+            self.data_source = str(core_config.get("data_source", "sovl_seed.jsonl"))
+            self.batch_size = int(core_config.get("batch_size", 32))
+            self.max_retries = int(core_config.get("max_retries", 3))
+            
+            # Load data configuration
+            data_config = self.config_manager.get_section("data_config")
+            self.min_entries = int(data_config.get("min_entries", 10))
+            self.validation_threshold = float(data_config.get("validation_threshold", 0.8))
+            
+            # Validate configuration values
+            self._validate_config_values()
+            
+            # Subscribe to configuration changes
+            self.config_manager.subscribe(self._on_config_change)
+            
+            self.logger.record_event(
+                event_type="data_config_initialized",
+                message="Data configuration initialized successfully",
+                level="info",
+                additional_info={
+                    "random_seed": self.random_seed,
+                    "valid_split_ratio": self.valid_split_ratio,
+                    "data_source": self.data_source,
+                    "batch_size": self.batch_size,
+                    "max_retries": self.max_retries,
+                    "min_entries": self.min_entries,
+                    "validation_threshold": self.validation_threshold
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="data_config_initialization_failed",
+                message=f"Failed to initialize data configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
+    def _validate_config_values(self) -> None:
+        """Validate configuration values against defined ranges."""
         try:
             # Validate core configuration
-            self._validate_config_section("core_config")
-            
+            if not 1 <= self.random_seed <= 999999:
+                raise ValueError(f"Invalid random_seed: {self.random_seed}. Must be between 1 and 999999.")
+                
+            if not 0.0 <= self.valid_split_ratio <= 1.0:
+                raise ValueError(f"Invalid valid_split_ratio: {self.valid_split_ratio}. Must be between 0.0 and 1.0.")
+                
+            if not 1 <= self.batch_size <= 1024:
+                raise ValueError(f"Invalid batch_size: {self.batch_size}. Must be between 1 and 1024.")
+                
+            if not 1 <= self.max_retries <= 10:
+                raise ValueError(f"Invalid max_retries: {self.max_retries}. Must be between 1 and 10.")
+                
             # Validate data configuration
-            self._validate_config_section("data_config")
-            
-            # Set default values
-            self.default_source = self.config_manager.get("core_config.data_source")
-            self.default_split_ratio = self.config_manager.get("core_config.valid_split_ratio")
-            self.min_entries = self.config_manager.get("data_config.min_entries")
-            
+            if not 1 <= self.min_entries <= 1000000:
+                raise ValueError(f"Invalid min_entries: {self.min_entries}. Must be between 1 and 1000000.")
+                
+            if not 0.0 <= self.validation_threshold <= 1.0:
+                raise ValueError(f"Invalid validation_threshold: {self.validation_threshold}. Must be between 0.0 and 1.0.")
+                
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="config_initialization",
-                stack_trace=traceback.format_exc()
+            self.logger.record_event(
+                event_type="data_config_validation_failed",
+                message=f"Configuration validation failed: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
             )
             raise
             
-    def _validate_config_section(self, section: str) -> None:
-        """Validate a configuration section against schema."""
+    def _on_config_change(self) -> None:
+        """Handle configuration changes."""
         try:
-            schema = self.CONFIG_SCHEMA.get(section, {})
-            if not schema:
-                raise ValueError(f"Unknown configuration section: {section}")
-                
-            for key, rules in schema.items():
-                # Get value from config manager
-                value = self.config_manager.get(f"{section}.{key}")
-                
-                # Check if required
-                if rules.get("required", False) and value is None:
-                    raise ValueError(f"Required configuration missing: {section}.{key}")
-                    
-                # Validate type
-                if value is not None and not isinstance(value, rules["type"]):
-                    raise TypeError(
-                        f"Invalid type for {section}.{key}: "
-                        f"expected {rules['type'].__name__}, got {type(value).__name__}"
-                    )
-                    
-                # Validate range if specified
-                if "range" in rules:
-                    min_val, max_val = rules["range"]
-                    if not min_val <= value <= max_val:
-                        raise ValueError(
-                            f"Value out of range for {section}.{key}: "
-                            f"{value} not in [{min_val}, {max_val}]"
-                        )
-                        
-        except Exception as e:
-            self._log_error(
-                error=e,
-                context=f"config_validation_{section}",
-                stack_trace=traceback.format_exc()
+            self._initialize_config()
+            self.logger.record_event(
+                event_type="data_config_updated",
+                message="Data configuration updated",
+                level="info"
             )
-            raise
+        except Exception as e:
+            self.logger.record_event(
+                event_type="data_config_update_failed",
+                message=f"Failed to update data configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
             
     def _initialize_provider(self) -> None:
-        """Initialize data provider with validation."""
+        """Initialize data provider with configuration."""
         try:
-            # Create provider based on configuration
             provider_type = self.config_manager.get("core_config.provider_type", "file")
             
             if provider_type == "file":
@@ -585,56 +587,54 @@ class DataManager:
             else:
                 raise ValueError(f"Unsupported provider type: {provider_type}")
                 
-            # Validate provider initialization
-            if not hasattr(self.provider, '_initialized') or not self.provider._initialized:
-                raise RuntimeError("Data provider failed to initialize")
-                
+            self.logger.record_event(
+                event_type="data_provider_initialized",
+                message=f"Data provider initialized: {provider_type}",
+                level="info"
+            )
+            
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="provider_initialization",
-                stack_trace=traceback.format_exc()
+            self.logger.record_event(
+                event_type="data_provider_initialization_failed",
+                message=f"Failed to initialize data provider: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
             )
             raise
             
     def _validate_initialization(self) -> None:
         """Validate complete initialization state."""
         try:
-            # Check configuration
             if not hasattr(self, 'config_manager') or not self.config_manager:
                 raise RuntimeError("Configuration manager not initialized")
                 
-            # Check provider
             if not hasattr(self, 'provider') or not self.provider:
                 raise RuntimeError("Data provider not initialized")
                 
-            # Check logger
             if not hasattr(self, 'logger') or not self.logger:
                 raise RuntimeError("Logger not initialized")
                 
-            # Check error handler
             if not hasattr(self, 'error_handler') or not self.error_handler:
                 raise RuntimeError("Error handler not initialized")
                 
-            # Mark as initialized
             self._initialized = True
             
-            # Log successful initialization
-            self._log_event(
-                event_type="initialization_complete",
+            self.logger.record_event(
+                event_type="data_manager_initialized",
                 message="DataManager initialized successfully",
                 level="info",
                 additional_info={
                     "provider_type": type(self.provider).__name__,
-                    "config_sections": list(self.CONFIG_SCHEMA.keys())
+                    "config_sections": ["core_config", "data_config"]
                 }
             )
             
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="initialization_validation",
-                stack_trace=traceback.format_exc()
+            self.logger.record_event(
+                event_type="data_manager_initialization_failed",
+                message=f"DataManager initialization failed: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
             )
             raise
             
@@ -744,8 +744,8 @@ class DataManager:
         
         try:
             # Use defaults if not provided
-            source = source or self.default_source
-            split_ratio = split_ratio or self.default_split_ratio
+            source = source or self.data_source
+            split_ratio = split_ratio or self.valid_split_ratio
             
             # Validate split ratio
             if not 0 < split_ratio < 1:

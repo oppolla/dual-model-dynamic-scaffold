@@ -11,13 +11,14 @@ from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
 from sovl_error_manager import ErrorManager
 from sovl_main import confidence_calculator
+from sovl_config import ConfigManager
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
     
     def __init__(
         self,
-        config_manager: Any,
+        config_manager: ConfigManager,
         base_model: AutoModelForCausalLM,
         scaffolds: List[AutoModelForCausalLM],
         base_tokenizer: AutoTokenizer,
@@ -33,7 +34,7 @@ class GenerationManager:
     ):
         """Initialize GenerationManager with configuration and model components."""
         # Core components
-        self.config_manager = config_manager
+        self._config_manager = config_manager
         self.base_model = base_model.to(device)
         self.scaffolds = [scaffold.to(device) for scaffold in scaffolds]
         self.base_tokenizer = base_tokenizer
@@ -47,20 +48,20 @@ class GenerationManager:
         self.curiosity_manager = curiosity_manager
         self.device = device
 
-        # Configuration sections
-        self._load_config_sections()
+        # Initialize configuration
+        self._initialize_config()
         
         # Log initialization with config values
         self._log_initialization()
 
         # Memory settings
-        self.scaffold_unk_id = self.controls_config.get("scaffold_unk_id", scaffold_tokenizer.unk_token_id)
-        self.use_token_map_memory = self.controls_config.get("use_token_map_memory", True)
-        self.dynamic_cross_attn_mode = self.controls_config.get("dynamic_cross_attn_mode", None)
+        self.scaffold_unk_id = self._get_config_value("controls_config.scaffold_unk_id", scaffold_tokenizer.unk_token_id)
+        self.use_token_map_memory = self._get_config_value("controls_config.use_token_map_memory", True)
+        self.dynamic_cross_attn_mode = self._get_config_value("controls_config.dynamic_cross_attn_mode", None)
 
         # Generation settings
-        self.max_retries = self.controls_config.get("max_generation_retries", 3)
-        self.memory_threshold = self.controls_config.get("memory_threshold", 0.85)
+        self.max_retries = self._get_config_value("controls_config.max_generation_retries", 3)
+        self.memory_threshold = self._get_config_value("controls_config.memory_threshold", 0.85)
         self.generation_callbacks: Dict[str, List[Callable]] = {
             "pre_generate": [],
             "post_generate": []
@@ -69,11 +70,86 @@ class GenerationManager:
         # Validate and initialize curiosity state
         self._validate_curiosity_state()
 
+    def _initialize_config(self) -> None:
+        """Initialize and validate configuration parameters."""
+        try:
+            # Validate required configuration sections
+            required_sections = ["controls_config", "curiosity_config", "training_config"]
+            for section in required_sections:
+                if not self._config_manager.validate_section(section):
+                    raise ValueError(f"Missing required configuration section: {section}")
+
+            # Validate specific configuration values
+            self._validate_config_values()
+
+        except Exception as e:
+            self._log_error(
+                Exception(f"Configuration initialization failed: {str(e)}"),
+                "config_initialization",
+                traceback.format_exc()
+            )
+            raise
+
+    def _validate_config_values(self) -> None:
+        """Validate specific configuration values."""
+        try:
+            # Memory threshold validation
+            memory_threshold = self._get_config_value("controls_config.memory_threshold", 0.85)
+            if not 0.0 <= memory_threshold <= 1.0:
+                raise ValueError(f"Invalid memory_threshold: {memory_threshold}")
+
+            # Generation retries validation
+            max_retries = self._get_config_value("controls_config.max_generation_retries", 3)
+            if not isinstance(max_retries, int) or max_retries < 1:
+                raise ValueError(f"Invalid max_generation_retries: {max_retries}")
+
+            # Temperature validation
+            base_temperature = self._get_config_value("controls_config.base_temperature", 0.7)
+            if not 0.0 <= base_temperature <= 2.0:
+                raise ValueError(f"Invalid base_temperature: {base_temperature}")
+
+            # Top-k validation
+            top_k = self._get_config_value("curiosity_config.top_k", 30)
+            if not isinstance(top_k, int) or top_k < 1:
+                raise ValueError(f"Invalid top_k: {top_k}")
+
+        except Exception as e:
+            self._log_error(
+                Exception(f"Configuration validation failed: {str(e)}"),
+                "config_validation",
+                traceback.format_exc()
+            )
+            raise
+
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get a configuration value with validation."""
+        try:
+            return self._config_manager.get(key, default)
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to get config value for {key}: {str(e)}"),
+                "config_access",
+                traceback.format_exc()
+            )
+            return default
+
+    def _update_config(self, key: str, value: Any) -> bool:
+        """Update a configuration value with validation."""
+        try:
+            return self._config_manager.update(key, value)
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to update config value for {key}: {str(e)}"),
+                "config_update",
+                traceback.format_exc()
+            )
+            return False
+
     def _load_config_sections(self) -> None:
         """Load configuration sections from config manager."""
-        self.controls_config = self.config_manager.get_section("controls_config")
-        self.curiosity_config = self.config_manager.get_section("curiosity_config")
-        self.training_config = self.config_manager.get_section("training_config")
+        self.controls_config = self._config_manager.get_section("controls_config")
+        self.curiosity_config = self._config_manager.get_section("curiosity_config")
+        self.training_config = self._config_manager.get_section("training_config")
         
     def _log_initialization(self) -> None:
         """Log GenerationManager initialization with config values."""
@@ -397,14 +473,22 @@ class GenerationManager:
 
     def _prepare_generation_params(self, max_new_tokens: int, scaffold_weight: Optional[float], **kwargs) -> Dict[str, Any]:
         """Prepare and validate generation parameters."""
-        return {
-            "max_new_tokens": max_new_tokens or self.curiosity_config.get("max_new_tokens", 8),  # Match ConfigHandler
-            "scaffold_weight": scaffold_weight,
-            "temperature": kwargs.get("temperature", self.controls_config.get("base_temperature", 0.7)),
-            "top_k": kwargs.get("top_k", self.curiosity_config.get("top_k", 30)),
-            "do_sample": kwargs.get("do_sample", False),
-            "prompt_count": 1 if isinstance(kwargs.get("prompts"), str) else len(kwargs.get("prompts", [])),
-        }
+        try:
+            return {
+                "max_new_tokens": max_new_tokens or self._get_config_value("curiosity_config.max_new_tokens", 8),
+                "scaffold_weight": scaffold_weight,
+                "temperature": kwargs.get("temperature", self._get_config_value("controls_config.base_temperature", 0.7)),
+                "top_k": kwargs.get("top_k", self._get_config_value("curiosity_config.top_k", 30)),
+                "do_sample": kwargs.get("do_sample", False),
+                "prompt_count": 1 if isinstance(kwargs.get("prompts"), str) else len(kwargs.get("prompts", [])),
+            }
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to prepare generation parameters: {str(e)}"),
+                "prepare_generation_params",
+                traceback.format_exc()
+            )
+            raise
 
     def _compute_dynamic_factor(self) -> Optional[torch.Tensor]:
         """Compute dynamic cross-attention factor based on configuration."""

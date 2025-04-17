@@ -15,93 +15,121 @@ from sovl_event import EventDispatcher
 @dataclass
 class TemperamentConfig:
     """Configuration for the temperament system."""
-    eager_threshold: float = 0.7
-    sluggish_threshold: float = 0.3
-    mood_influence: float = 0.5
-    curiosity_boost: float = 0.2
-    restless_drop: float = 0.1
-    melancholy_noise: float = 0.1
-    confidence_feedback_strength: float = 0.3
-    temp_smoothing_factor: float = 0.1
-    decay_rate: float = 0.1
-    history_maxlen: int = 5
-    confidence_history_maxlen: int = 5
-    early_lifecycle: float = 0.25
-    mid_lifecycle: float = 0.75
-    lifecycle_params: Optional[Dict[str, Dict[str, float]]] = None
-
-    def __post_init__(self):
-        """Initialize and validate configuration."""
-        self._ranges = {
-            "eager_threshold": (0.7, 0.9),
-            "sluggish_threshold": (0.3, 0.6),
-            "mood_influence": (0.0, 1.0),
-            "curiosity_boost": (0.0, 0.5),
-            "restless_drop": (0.0, 0.5),
-            "melancholy_noise": (0.0, 0.1),
-            "confidence_feedback_strength": (0.0, 1.0),
-            "temp_smoothing_factor": (0.0, 1.0),
-            "decay_rate": (0.0, 1.0),
-            "early_lifecycle": (0.1, 0.3),
-            "mid_lifecycle": (0.6, 0.8),
-        }
-        self._history_ranges = {
-            "history_maxlen": (3, 10),
-            "confidence_history_maxlen": (3, 10),
-        }
-        self.validate()
-
-    def validate(self) -> None:
-        """Validate all configuration parameters."""
-        for key, (min_val, max_val) in self._ranges.items():
-            value = getattr(self, key)
-            if not (min_val <= value <= max_val):
-                raise ValueError(
-                    f"{key} must be between {min_val} and {max_val}, got {value}"
-                )
-        for key, (min_val, max_val) in self._history_ranges.items():
-            value = getattr(self, key)
-            if not (min_val <= value <= max_val):
-                raise ValueError(
-                    f"{key} must be between {min_val} and {max_val}, got {value}"
-                )
-        if self.lifecycle_params is not None:
-            for stage, params in self.lifecycle_params.items():
-                if not isinstance(params, dict) or "bias" not in params or "decay" not in params:
-                    raise ValueError(
-                        f"lifecycle_params for {stage} must contain 'bias' and 'decay'"
-                    )
-
+    
+    def __init__(self, config_manager: ConfigManager):
+        """
+        Initialize temperament configuration from ConfigManager.
+        
+        Args:
+            config_manager: Configuration manager instance
+        """
+        self.config_manager = config_manager
+        self._validate_config()
+        
+    def _validate_config(self) -> None:
+        """Validate temperament configuration."""
+        try:
+            # Define required keys and their validation ranges
+            required_keys = {
+                "controls_config.temp_eager_threshold": (0.7, 0.9),
+                "controls_config.temp_sluggish_threshold": (0.3, 0.6),
+                "controls_config.temp_mood_influence": (0.0, 1.0),
+                "controls_config.temp_curiosity_boost": (0.0, 0.5),
+                "controls_config.temp_restless_drop": (0.0, 0.5),
+                "controls_config.temp_melancholy_noise": (0.0, 0.1),
+                "controls_config.conf_feedback_strength": (0.0, 1.0),
+                "controls_config.temp_smoothing_factor": (0.0, 1.0),
+                "controls_config.temperament_decay_rate": (0.0, 1.0),
+                "controls_config.temperament_history_maxlen": (3, 10),
+                "controls_config.confidence_history_maxlen": (3, 10)
+            }
+            
+            # Validate each key
+            for key, (min_val, max_val) in required_keys.items():
+                if not self.config_manager.has_key(key):
+                    raise ConfigurationError(f"Missing required config key: {key}")
+                    
+                value = self.config_manager.get(key)
+                if not isinstance(value, (int, float)):
+                    raise ConfigurationError(f"{key} must be numeric")
+                    
+                if not (min_val <= value <= max_val):
+                    raise ConfigurationError(f"{key} must be between {min_val} and {max_val}")
+            
+            # Validate lifecycle parameters if present
+            if self.config_manager.has_key("controls_config.lifecycle_params"):
+                lifecycle_params = self.config_manager.get("controls_config.lifecycle_params")
+                if not isinstance(lifecycle_params, dict):
+                    raise ConfigurationError("lifecycle_params must be a dictionary")
+                    
+                for stage, params in lifecycle_params.items():
+                    if not isinstance(params, dict) or "bias" not in params or "decay" not in params:
+                        raise ConfigurationError(f"lifecycle_params for {stage} must contain 'bias' and 'decay'")
+            
+        except Exception as e:
+            self.config_manager.logger.record_event(
+                event_type="temperament_config_error",
+                message=f"Failed to validate temperament config: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+            
+    def get(self, key: str, default: Any = None) -> Any:
+        """
+        Get a configuration value.
+        
+        Args:
+            key: Configuration key
+            default: Default value if key is missing
+            
+        Returns:
+            Configuration value or default
+        """
+        return self.config_manager.get(key, default)
+        
     def update(self, **kwargs) -> None:
-        """Update configuration with validation."""
-        for key, value in kwargs.items():
-            if key in self._ranges:
-                min_val, max_val = self._ranges[key]
-                if not (min_val <= value <= max_val):
-                    raise ValueError(
-                        f"{key} must be between {min_val} and {max_val}, got {value}"
-                    )
-                setattr(self, key, value)
-            elif key in self._history_ranges:
-                min_val, max_val = self._history_ranges[key]
-                if not (min_val <= value <= max_val):
-                    raise ValueError(
-                        f"{key} must be between {min_val} and {max_val}, got {value}"
-                    )
-                setattr(self, key, value)
-            elif key == "lifecycle_params":
-                self.lifecycle_params = value
-                self.validate()
-            else:
-                raise ValueError(f"Unknown configuration parameter: {key}")
+        """
+        Update configuration values.
+        
+        Args:
+            **kwargs: Key-value pairs to update
+        """
+        try:
+            for key, value in kwargs.items():
+                if not self.config_manager.update(key, value):
+                    raise ConfigurationError(f"Failed to update {key}")
+                    
+        except Exception as e:
+            self.config_manager.logger.record_event(
+                event_type="temperament_config_update_error",
+                message=f"Failed to update temperament config: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
 
 class TemperamentSystem:
     """Manages the temperament state and updates."""
     
-    def __init__(self, state: SOVLState, config: SOVLConfig):
+    def __init__(self, state: SOVLState, config_manager: ConfigManager):
+        """
+        Initialize temperament system.
+        
+        Args:
+            state: SOVL state instance
+            config_manager: Configuration manager instance
+        """
         self.state = state
-        self.config = config
-        self.logger = LoggingManager()
+        self.config_manager = config_manager
+        self.temperament_config = TemperamentConfig(config_manager)
+        self.logger = config_manager.logger
         
     def update(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
         """
@@ -119,6 +147,10 @@ class TemperamentSystem:
             if not 0.0 <= confidence <= 1.0:
                 raise ValueError(f"Invalid confidence: {confidence}")
                 
+            # Get configuration values
+            smoothing_factor = self.temperament_config.get("controls_config.temp_smoothing_factor")
+            feedback_strength = self.temperament_config.get("controls_config.conf_feedback_strength")
+            
             # Update state with new score
             self.state.update_temperament(new_score)
             
@@ -133,20 +165,24 @@ class TemperamentSystem:
                     "lifecycle_stage": lifecycle_stage,
                     "current_score": self.state.current_temperament,
                     "conversation_id": self.state.conversation_id,
-                    "state_hash": self.state.state_hash
+                    "state_hash": self.state.state_hash,
+                    "smoothing_factor": smoothing_factor,
+                    "feedback_strength": feedback_strength
                 }
             )
             
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to update temperament: {str(e)}",
-                error_type="temperament_error",
-                stack_trace=traceback.format_exc(),
-                conversation_id=self.state.conversation_id,
-                state_hash=self.state.state_hash
+            self.logger.record_event(
+                event_type="temperament_update_error",
+                message=f"Failed to update temperament: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
             )
             raise
-            
+        
     @property
     def current_score(self) -> float:
         """Get the current temperament score."""
@@ -380,7 +416,7 @@ class TemperamentAdjuster:
             # Create new temperament system
             self.temperament_system = TemperamentSystem(
                 state=self.state_tracker.get_state(),
-                config=params
+                config_manager=self.config_handler.config_manager
             )
             
             # Update parameter hash

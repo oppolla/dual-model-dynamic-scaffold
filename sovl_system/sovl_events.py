@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 from sovl_logger import Logger, LoggerConfig
+from sovl_config import ConfigManager
+import traceback
 
 # Type alias for callbacks - clearer name
 EventHandler = Callable[..., Any]
@@ -39,20 +41,108 @@ class EventDispatcher:
         '_logger',
         '_notification_depth',
         '_deferred_unsubscriptions',
+        '_config_manager',
     )
 
-    def __init__(self, logger: Optional[Logger] = None):
+    def __init__(self, config_manager: ConfigManager, logger: Optional[Logger] = None):
         """
-        Initializes the EventDispatcher.
+        Initialize the EventDispatcher.
 
         Args:
+            config_manager: ConfigManager instance for configuration handling
             logger: Optional Logger instance. If None, creates a new Logger instance.
         """
+        self._config_manager = config_manager
         self._subscribers: Dict[str, List[Tuple[int, EventHandler]]] = defaultdict(list)
         self._lock = Lock()
         self._logger = logger or Logger(LoggerConfig(log_file="sovl_events.log"))
         self._notification_depth: int = 0
         self._deferred_unsubscriptions: Dict[str, Set[EventHandler]] = defaultdict(set)
+
+        # Initialize configuration
+        self._initialize_config()
+
+    def _initialize_config(self) -> None:
+        """Initialize and validate configuration parameters."""
+        try:
+            # Validate required configuration sections
+            required_sections = ["logging_config", "controls_config"]
+            for section in required_sections:
+                if not self._config_manager.validate_section(section):
+                    raise ValueError(f"Missing required configuration section: {section}")
+
+            # Validate specific configuration values
+            self._validate_config_values()
+
+        except Exception as e:
+            self._log_error(
+                Exception(f"Configuration initialization failed: {str(e)}"),
+                "config_initialization",
+                traceback.format_exc()
+            )
+            raise
+
+    def _validate_config_values(self) -> None:
+        """Validate specific configuration values."""
+        try:
+            # Log file validation
+            log_file = self._get_config_value("logging_config.log_file", "sovl_events.log")
+            if not isinstance(log_file, str) or not log_file:
+                raise ValueError(f"Invalid log_file: {log_file}")
+
+            # Max size validation
+            max_size_mb = self._get_config_value("logging_config.max_size_mb", 10)
+            if not isinstance(max_size_mb, int) or max_size_mb < 1:
+                raise ValueError(f"Invalid max_size_mb: {max_size_mb}")
+
+            # Compress old validation
+            compress_old = self._get_config_value("logging_config.compress_old", False)
+            if not isinstance(compress_old, bool):
+                raise ValueError(f"Invalid compress_old: {compress_old}")
+
+        except Exception as e:
+            self._log_error(
+                Exception(f"Configuration validation failed: {str(e)}"),
+                "config_validation",
+                traceback.format_exc()
+            )
+            raise
+
+    def _get_config_value(self, key: str, default: Any) -> Any:
+        """Get a configuration value with validation."""
+        try:
+            return self._config_manager.get(key, default)
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to get config value for {key}: {str(e)}"),
+                "config_access",
+                traceback.format_exc()
+            )
+            return default
+
+    def _update_config(self, key: str, value: Any) -> bool:
+        """Update a configuration value with validation."""
+        try:
+            return self._config_manager.update(key, value)
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to update config value for {key}: {str(e)}"),
+                "config_update",
+                traceback.format_exc()
+            )
+            return False
+
+    def _log_error(self, error: Exception, context: str, stack_trace: Optional[str] = None) -> None:
+        """Log an error with context and stack trace."""
+        self._logger.log_error(
+            error_msg=str(error),
+            error_type=f"events_{context}_error",
+            stack_trace=stack_trace or traceback.format_exc(),
+            additional_info={
+                "context": context,
+                "timestamp": time.time()
+            }
+        )
 
     @contextmanager
     def _locked(self):

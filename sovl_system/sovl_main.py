@@ -64,12 +64,36 @@ class SystemContext:
         # Initialize config manager with event dispatcher
         self.config_handler = ConfigHandler(config_path, self.logger, self.event_dispatcher)
         
+        # Validate initial configuration
+        if not self.config_handler.validate():
+            raise SystemInitializationError(
+                "Failed to validate initial configuration",
+                config_path,
+                traceback.format_exc()
+            )
+        
+        # Subscribe to configuration changes
+        self.event_dispatcher.subscribe("config_change", self._on_config_change)
+        
     def _on_config_change(self) -> None:
         """Handle configuration changes and propagate them to affected components."""
         try:
+            # Validate configuration after change
+            if not self.config_handler.validate():
+                self.logger.log_error(
+                    error_msg="Configuration validation failed after change",
+                    error_type="config_validation_error",
+                    stack_trace=traceback.format_exc(),
+                    additional_info={
+                        "config_path": self.config_path,
+                        "timestamp": time.time()
+                    }
+                )
+                return
+                
             self.logger.record_event(
                 event_type="config_change",
-                message="Configuration changed",
+                message="Configuration changed and validated successfully",
                 level="info",
                 additional_info={
                     "timestamp": time.time(),
@@ -97,193 +121,258 @@ class SystemInitializationError(Exception):
         super().__init__(f"{message}\nConfig path: {config_path}\nStack trace:\n{stack_trace}")
 
 class ModelLoader:
-    """Handles model loading, initialization, and cross-attention injection."""
+    """Handles model loading and initialization."""
     
-    def __init__(self, context: SystemContext, config_handler: ConfigHandler):
-        """Initialize model loader with required dependencies."""
+    def __init__(self, context: SystemContext):
+        """
+        Initialize model loader with system context.
+        
+        Args:
+            context: System context containing shared resources
+        """
         self.context = context
-        self.config_handler = config_handler
-        self.model = None
-        self.scaffold_model = None
-        self.token_map = None
-        self._cross_attention_injector = None
-        self._initialize()
+        self.logger = context.logger
+        self.config = context.config_handler.get_section("model")
         
-    def _initialize(self) -> None:
-        """Initialize cross-attention injector and validate configuration."""
-        if not self.context or not self.config_handler:
-            raise ValueError("Missing required dependencies")
+        # Validate model configuration
+        if not self._validate_model_config():
+            raise ModelLoadingError(
+                "Invalid model configuration",
+                self.config,
+                traceback.format_exc()
+            )
             
-        # Initialize cross-attention injector if needed
-        cross_attn_config = self.context.config_handler.config_manager.get_section("cross_attn_config", {})
-        if cross_attn_config.get("enabled", False):
-            self._cross_attention_injector = CrossAttentionInjector()
-        
-    def _validate_cross_attention_weights(self) -> None:
-        """Validate cross-attention layer weights before injection."""
+    def _validate_model_config(self) -> bool:
+        """Validate model configuration section."""
         try:
-            # Get current cross-attention configuration
-            cross_attn_config = self.context.config_handler.config_manager.get_section("cross_attn_config")
-            layer_weights = cross_attn_config.get("layer_weights", [])
+            required_fields = ["model_path", "model_type", "quantization_mode"]
+            for field in required_fields:
+                if field not in self.config:
+                    self.logger.log_error(
+                        error_msg=f"Missing required model configuration field: {field}",
+                        error_type="config_validation_error",
+                        stack_trace=None,
+                        additional_info={
+                            "missing_field": field,
+                            "config_section": "model"
+                        }
+                    )
+                    return False
+                    
+            # Validate quantization mode
+            if not validate_quantization_mode(self.config["quantization_mode"]):
+                self.logger.log_error(
+                    error_msg=f"Invalid quantization mode: {self.config['quantization_mode']}",
+                    error_type="config_validation_error",
+                    stack_trace=None,
+                    additional_info={
+                        "invalid_value": self.config["quantization_mode"],
+                        "config_section": "model"
+                    }
+                )
+                return False
+                
+            return True
             
-            # Get current cross-attention layers
-            if self._cross_attention_injector:
-                layers = self._cross_attention_injector.get_cross_attention_layers(
-                    self.model,
-                    mode=self.context.config_handler.config_manager.get("core_config.layer_selection_mode", "balanced")
-                )
-                
-                # Validate weights before injection
-                self._validate_cross_attention_weights(layers, layer_weights)
-                
-                # Log injection attempt
-                self.context.logger.record_event(
-                    event_type="cross_attention_injection",
-                    message="Injecting cross-attention layers",
-                    level="info",
-                    additional_info={
-                        "layer_count": len(layers),
-                        "layer_weights": layer_weights,
-                        "layer_selection_mode": self.context.config_handler.config_manager.get("core_config.layer_selection_mode", "balanced")
-                    }
-                )
-                
-                # Perform injection
-                self._cross_attention_injector.inject_cross_attention(
-                    model=self.model,
-                    scaffold_model=self.scaffold_model,
-                    core_config=self.context.config_handler.config_manager.get_section("core_config"),
-                    cross_attn_config=cross_attn_config,
-                    lora_config=self.context.config_handler.config_manager.get_section("lora_config"),
-                    token_map=self.token_map,
-                    device=self.context.device
-                )
-                
-                # Log successful injection
-                self.context.logger.record_event(
-                    event_type="cross_attention_injected",
-                    message="Successfully injected cross-attention layers",
-                    level="info",
-                    additional_info={
-                        "layer_count": len(layers),
-                        "layer_weights": layer_weights
-                    }
-                )
-            else:
-                self.context.logger.record_event(
-                    event_type="cross_attention_error",
-                    message="Cross attention injector not initialized",
-                    level="error"
-                )
-                raise RuntimeError("Cross attention injector not initialized")
-                
         except Exception as e:
-            self.context.logger.record_event(
-                event_type="cross_attention_error",
-                message=f"Failed to inject cross-attention layers: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_section": "model"
+                }
+            )
+            return False
+            
+    def load_model(self) -> torch.nn.Module:
+        """Load and initialize the model with validated configuration."""
+        try:
+            if not self._validate_model_config():
+                raise ModelLoadingError(
+                    "Cannot load model with invalid configuration",
+                    self.config,
+                    traceback.format_exc()
+                )
+                
+            # Load model with validated configuration
+            model = load_model(
+                self.config["model_path"],
+                self.config["model_type"],
+                self.config["quantization_mode"],
+                self.context.device
+            )
+            
+            self.logger.record_event(
+                event_type="model_loaded",
+                message="Model loaded successfully",
+                level="info",
+                additional_info={
+                    "model_path": self.config["model_path"],
+                    "model_type": self.config["model_type"],
+                    "quantization_mode": self.config["quantization_mode"],
+                    "device": self.context.device
+                }
+            )
+            
+            return model
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="model_loading_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "model_path": self.config["model_path"],
+                    "model_type": self.config["model_type"],
+                    "quantization_mode": self.config["quantization_mode"]
+                }
             )
             raise
 
 class StateTracker:
-    """Tracks and manages the system's state."""
+    """Tracks and manages system state."""
     
-    def __init__(self, context: SystemContext, config_handler: ConfigHandler):
-        """Initialize the state tracker with context and configuration."""
+    def __init__(self, context: SystemContext):
+        """
+        Initialize state tracker with system context.
+        
+        Args:
+            context: System context containing shared resources
+        """
         self.context = context
-        self.config_handler = config_handler
-        self.state_manager = None
-        self.state = None
-        self._initialize()
+        self.logger = context.logger
+        self.config = context.config_handler.get_section("state")
+        self.state = {}
         
-    def _initialize(self) -> None:
-        """Initialize state manager and state."""
-        if not self.context or not self.config_handler:
-            raise ValueError("Missing required dependencies")
+        # Subscribe to configuration changes
+        self.context.event_dispatcher.subscribe(
+            "config_changed",
+            self._on_config_change
+        )
+        
+        # Validate initial state configuration
+        if not self._validate_state_config():
+            raise StateTrackingError(
+                "Invalid state configuration",
+                self.config,
+                traceback.format_exc()
+            )
             
-        self.state_manager = StateManager(
-            config_manager=self.context.config_handler.config_manager,
-            logger=self.context.logger,
-            device=self.context.device
-        )
-        # Auto-initialize state
-        self.state = self.state_manager.initialize_state()
-        self._log_event("state_tracker_initialized", {
-            "state_hash": self.state.state_hash,
-            "conversation_id": self.state.history.conversation_id
-        })
-        
-    def _log_event(self, event_type: str, message: str, level: str = "info", additional_info: Optional[Dict] = None) -> None:
-        """Log an event with standardized fields."""
-        self.context.logger.record_event(
-            event_type=f"state_{event_type}",
-            message=message,
-            level=level,
-            additional_info={
-                "timestamp": time.time(),
-                "state_hash": self.state.state_hash if self.state else None,
-                "conversation_id": self.state.history.conversation_id if self.state else None,
-                **(additional_info or {})
-            }
-        )
-        
-    def _log_error(self, error: Exception, context: str, stack_trace: Optional[str] = None) -> None:
-        """Log an error with context and stack trace."""
-        self.context.logger.log_error(
-            error_msg=str(error),
-            error_type=f"state_{context}_error",
-            stack_trace=stack_trace or traceback.format_exc(),
-            additional_info={
-                "context": context,
-                "state_hash": self.state.state_hash if self.state else None,
-                "conversation_id": self.state.history.conversation_id if self.state else None,
-                "timestamp": time.time()
-            }
-        )
-        
-    def load_state(self) -> None:
-        """Load state from file or initialize new state if not found."""
+    def _validate_state_config(self) -> bool:
+        """Validate state configuration section."""
         try:
-            # Only load if state path exists, otherwise keep initialized state
-            state_path = self.config_handler.config_manager.get("state_config.state_path")
-            if state_path and os.path.exists(state_path):
-                with self.state.lock:
-                    self.state = self.state_manager.load_state(state_path)
-                    self._log_event("state_loaded", {
-                        "state_path": state_path,
-                        "state_hash": self.state.state_hash,
-                        "conversation_id": self.state.history.conversation_id
-                    })
-            else:
-                self._log_event("state_initialized", {
-                    "state_hash": self.state.state_hash,
-                    "conversation_id": self.state.history.conversation_id
-                })
-        except Exception as e:
-            self._log_error(e, "state_loading")
-            raise StateError(f"Failed to load state: {str(e)}")
+            required_fields = ["state_file", "backup_interval", "max_history"]
+            for field in required_fields:
+                if field not in self.config:
+                    self.logger.log_error(
+                        error_msg=f"Missing required state configuration field: {field}",
+                        error_type="config_validation_error",
+                        stack_trace=None,
+                        additional_info={
+                            "missing_field": field,
+                            "config_section": "state"
+                        }
+                    )
+                    return False
+                    
+            # Validate backup interval
+            if not isinstance(self.config["backup_interval"], int) or self.config["backup_interval"] <= 0:
+                self.logger.log_error(
+                    error_msg=f"Invalid backup interval: {self.config['backup_interval']}",
+                    error_type="config_validation_error",
+                    stack_trace=None,
+                    additional_info={
+                        "invalid_value": self.config["backup_interval"],
+                        "config_section": "state"
+                    }
+                )
+                return False
+                
+            return True
             
-    def save_state(self) -> None:
-        """Save current state to file."""
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_section": "state"
+                }
+            )
+            return False
+            
+    def _on_config_change(self, event_data: dict) -> None:
+        """Handle configuration changes."""
         try:
-            state_path = self.config_handler.config_manager.get("state_config.state_path")
-            if state_path:
-                with self.state.lock:
-                    self.state_manager.save_state(state_path)
-                    self._log_event("state_saved", {
-                        "state_path": state_path,
-                        "state_hash": self.state.state_hash
-                    })
+            if "state" in event_data:
+                self.config = event_data["state"]
+                
+                # Validate new configuration
+                if not self._validate_state_config():
+                    self.logger.log_error(
+                        error_msg="Invalid state configuration after change",
+                        error_type="config_validation_error",
+                        stack_trace=None,
+                        additional_info={
+                            "new_config": self.config
+                        }
+                    )
+                    return
+                    
+                self.logger.log_training_event(
+                    event_type="config_updated",
+                    message="State configuration updated successfully",
+                    additional_info={
+                        "config_section": "state",
+                        "changes": event_data["state"]
+                    }
+                )
+                
         except Exception as e:
-            self._log_error(e, "state_saving")
-            raise StateError(f"Failed to save state: {str(e)}")
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="config_update_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_section": "state",
+                    "event_data": event_data
+                }
+            )
             
-    def get_state(self) -> SOVLState:
-        """Get the current state instance."""
-        if self.state is None:
-            raise StateError("State not initialized")
-        return self.state
+    def update_state(self, key: str, value: Any) -> None:
+        """Update state with validated configuration."""
+        try:
+            if not self._validate_state_config():
+                raise StateTrackingError(
+                    "Cannot update state with invalid configuration",
+                    self.config,
+                    traceback.format_exc()
+                )
+                
+            self.state[key] = value
+            
+            self.logger.log_training_event(
+                event_type="state_updated",
+                message=f"State updated for key: {key}",
+                additional_info={
+                    "key": key,
+                    "value": value,
+                    "state_file": self.config["state_file"]
+                }
+            )
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="state_update_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "key": key,
+                    "value": value
+                }
+            )
+            raise
 
 class ErrorManager:
     """Manages error handling and recovery for the SOVL system."""

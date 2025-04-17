@@ -693,12 +693,83 @@ class CrossAttentionInjector:
     """Injector for adding cross-attention layers to a transformer model."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger):
+        """
+        Initialize the CrossAttentionInjector with configuration manager and logger.
+        
+        Args:
+            config_manager: Configuration manager instance
+            logger: Logger instance for structured logging
+        """
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
         self.scaffold_proj = None
         self.scaffold_unk_id = config_manager.get("controls_config.scaffold_unk_id", 0)
         self.error_handler = ErrorHandler(config_manager, logger)
+        
+        # Validate configuration
+        self._validate_config()
+        
+    def _validate_config(self) -> None:
+        """Validate cross-attention configuration."""
+        try:
+            required_keys = [
+                "core_config.cross_attn_layers",
+                "core_config.hidden_size",
+                "core_config.num_heads",
+                "controls_config.scaffold_weight_cap",
+                "controls_config.scaffold_unk_id"
+            ]
+            
+            for key in required_keys:
+                if not self.config_manager.has_key(key):
+                    self.logger.record_event(
+                        event_type="cross_attention_config_error",
+                        message=f"Missing required config key: {key}",
+                        level="error",
+                        additional_info={
+                            "timestamp": time.time()
+                        }
+                    )
+                    raise ConfigurationError(f"Missing required config key: {key}")
+            
+            # Validate numeric ranges
+            numeric_validations = {
+                "controls_config.scaffold_weight_cap": (0.0, 1.0),
+                "controls_config.blend_strength": (0.0, 1.0),
+                "controls_config.attention_weight": (0.0, None)
+            }
+            
+            for key, (min_val, max_val) in numeric_validations.items():
+                if self.config_manager.has_key(key):
+                    value = self.config_manager.get(key)
+                    if not isinstance(value, (int, float)):
+                        raise ConfigurationError(f"{key} must be numeric")
+                    if min_val is not None and value < min_val:
+                        raise ConfigurationError(f"{key} must be >= {min_val}")
+                    if max_val is not None and value > max_val:
+                        raise ConfigurationError(f"{key} must be <= {max_val}")
+            
+            self.logger.record_event(
+                event_type="cross_attention_config_validated",
+                message="Cross-attention configuration validated successfully",
+                level="info",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="cross_attention_config_error",
+                message=f"Failed to validate cross-attention config: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
 
     def inject(
         self,
@@ -784,7 +855,7 @@ class CrossAttentionInjector:
                 
             original_layer = layers[layer_idx]
             cross_attn_layer = CrossAttentionLayer(
-                config=self.config_manager.get("core_config"),
+                config=self.config_manager.get_section("core_config"),
                 logger=self.logger,
                 device=model.device
             )
@@ -803,24 +874,14 @@ class CrossAttentionInjector:
             if not self._verify_single_layer(model, layer_idx):
                 raise RuntimeError(f"Layer {layer_idx} injection verification failed")
                 
-            self.logger.record_event(
-                event_type="layer_injected",
-                message="Layer injected successfully",
-                level="info",
-                additional_info={
-                    "layer_idx": layer_idx,
-                    "strategy": injection_strategy,
-                    "timestamp": time.time()
-                }
-            )
-            
         except Exception as e:
             self.logger.record_event(
-                event_type="layer_injection_failed",
-                message=f"Failed to inject layer {layer_idx}: {str(e)}",
+                event_type="cross_attention_injection_error",
+                message=f"Failed to inject cross-attention layer {layer_idx}: {str(e)}",
                 level="error",
                 additional_info={
-                    "timestamp": time.time(),
+                    "layer_idx": layer_idx,
+                    "error": str(e),
                     "stack_trace": traceback.format_exc()
                 }
             )
@@ -1208,27 +1269,135 @@ class InsufficientDataError(Exception):
     pass
 
 class ScaffoldProvider:
-    """Provides a clean interface for scaffold functionality in training."""
+    """Provides scaffold-related functionality and state management."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger, 
-                 base_tokenizer=None, scaffold_tokenizer=None):
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
         """
-        Initialize ScaffoldProvider.
+        Initialize the ScaffoldProvider with configuration manager and logger.
         
         Args:
             config_manager: Configuration manager instance
-            logger: Logger instance
-            base_tokenizer: Optional base model tokenizer
-            scaffold_tokenizer: Optional scaffold model tokenizer
+            logger: Logger instance for structured logging
         """
-        self.manager = ScaffoldManager(
-            config_manager=config_manager,
-            logger=logger,
-            base_tokenizer=base_tokenizer,
-            scaffold_tokenizer=scaffold_tokenizer
-        )
+        self.config_manager = config_manager
         self.logger = logger
-    
+        self.lock = Lock()
+        self.error_handler = ErrorHandler(config_manager, logger)
+        
+        # Initialize state
+        self.scaffold_state = {
+            "is_initialized": False,
+            "last_update": None,
+            "scaffold_model": None,
+            "token_map": None
+        }
+        
+        # Validate configuration
+        self._validate_config()
+        
+    def _validate_config(self) -> None:
+        """Validate scaffold provider configuration."""
+        try:
+            required_keys = [
+                "scaffold_config.model_path",
+                "scaffold_config.model_type",
+                "scaffold_config.tokenizer_path",
+                "scaffold_config.quantization_mode"
+            ]
+            
+            for key in required_keys:
+                if not self.config_manager.has_key(key):
+                    self.logger.record_event(
+                        event_type="scaffold_config_error",
+                        message=f"Missing required config key: {key}",
+                        level="error",
+                        additional_info={
+                            "timestamp": time.time()
+                        }
+                    )
+                    raise ConfigurationError(f"Missing required config key: {key}")
+            
+            # Validate model type
+            model_type = self.config_manager.get("scaffold_config.model_type")
+            if model_type not in ["gpt2", "gptj", "gpt_neox"]:
+                raise ConfigurationError(f"Unsupported model type: {model_type}")
+            
+            # Validate quantization mode
+            quantization_mode = self.config_manager.get("scaffold_config.quantization_mode")
+            if quantization_mode not in ["none", "int8", "int4"]:
+                raise ConfigurationError(f"Unsupported quantization mode: {quantization_mode}")
+            
+            self.logger.record_event(
+                event_type="scaffold_config_validated",
+                message="Scaffold configuration validated successfully",
+                level="info",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_config_error",
+                message=f"Failed to validate scaffold config: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+
+    def initialize_scaffold(self) -> None:
+        """Initialize the scaffold model and tokenizer."""
+        try:
+            with self.lock:
+                if self.scaffold_state["is_initialized"]:
+                    return
+                
+                model_path = self.config_manager.get("scaffold_config.model_path")
+                model_type = self.config_manager.get("scaffold_config.model_type")
+                tokenizer_path = self.config_manager.get("scaffold_config.tokenizer_path")
+                quantization_mode = self.config_manager.get("scaffold_config.quantization_mode")
+                
+                # Load model and tokenizer
+                self.scaffold_state["scaffold_model"] = self._load_model(
+                    model_path=model_path,
+                    model_type=model_type,
+                    quantization_mode=quantization_mode
+                )
+                
+                self.scaffold_state["token_map"] = self._build_token_map(
+                    base_tokenizer=self.scaffold_state["scaffold_model"].tokenizer,
+                    scaffold_tokenizer=self._load_tokenizer(tokenizer_path)
+                )
+                
+                self.scaffold_state["is_initialized"] = True
+                self.scaffold_state["last_update"] = time.time()
+                
+                self.logger.record_event(
+                    event_type="scaffold_initialized",
+                    message="Scaffold model and tokenizer initialized successfully",
+                    level="info",
+                    additional_info={
+                        "model_type": model_type,
+                        "quantization_mode": quantization_mode,
+                        "timestamp": time.time()
+                    }
+                )
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="scaffold_initialization_error",
+                message=f"Failed to initialize scaffold: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
+            raise
+
     def get_scaffold_context(
         self, 
         scaffold_inputs: Dict[str, torch.Tensor],
@@ -1274,173 +1443,6 @@ class ScaffoldProvider:
             )
             raise
     
-    def initialize_scaffold_state(self, model_name: str, device: str) -> bool:
-        """Initialize scaffold state."""
-        try:
-            return self.manager.initialize_scaffold_state(model_name, device)
-        except Exception as e:
-            self.logger.record_event(
-                event_type="scaffold_error",
-                message="Failed to initialize scaffold state",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise
-    
-    def verify_scaffold_compatibility(self, base_config) -> bool:
-        """Verify scaffold compatibility with base model."""
-        try:
-            return self.manager.verify_scaffold_compatibility(base_config)
-        except Exception as e:
-            self.logger.record_event(
-                event_type="scaffold_error",
-                message="Failed to verify scaffold compatibility",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise
-    
-    def get_scaffold_stats(self) -> Dict:
-        """Get scaffold statistics."""
-        try:
-            return self.manager.get_scaffold_stats()
-        except Exception as e:
-            self.logger.record_event(
-                event_type="scaffold_error",
-                message="Failed to get scaffold stats",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise
-    
-    def reset_scaffold_state(self):
-        """Reset scaffold state."""
-        try:
-            self.manager.reset_scaffold_state()
-        except Exception as e:
-            self.logger.record_event(
-                event_type="scaffold_error",
-                message="Failed to reset scaffold state",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise
-
-class ScaffoldManager:
-    """Manages scaffold-related operations and state."""
-    
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        logger: Logger,
-        error_manager: ErrorHandler,
-        base_tokenizer=None,
-        scaffold_tokenizer=None
-    ):
-        self.config_manager = config_manager
-        self.logger = logger
-        self.error_manager = error_manager
-        self.base_tokenizer = base_tokenizer
-        self.scaffold_tokenizer = scaffold_tokenizer
-        self.token_mapper = None
-        self.scaffold_state = None
-        
-    def validate_scaffold_config(self) -> bool:
-        """Validate scaffold configuration."""
-        try:
-            required_keys = [
-                "core_config.scaffold_model_name",
-                "core_config.cross_attn_layers",
-                "controls_config.scaffold_weight_cap",
-                "controls_config.scaffold_unk_id"
-            ]
-            
-            for key in required_keys:
-                if not self.config_manager.has_key(key):
-                    self.logger.record_event(
-                        event_type="scaffold_config_error",
-                        message=f"Missing required scaffold config key: {key}",
-                        level="error",
-                        additional_info={
-                            "timestamp": time.time()
-                        }
-                    )
-                    return False
-
-            cross_attn_layers = self.config_manager.get("core_config.cross_attn_layers", [])
-            if not isinstance(cross_attn_layers, list):
-                self.logger.record_event(
-                    event_type="scaffold_config_error",
-                    message="cross_attn_layers must be a list",
-                    level="error",
-                    additional_info={
-                        "timestamp": time.time()
-                    }
-                )
-                return False
-
-            numeric_validations = {
-                "controls_config.scaffold_weight_cap": (0.0, 1.0),
-                "controls_config.blend_strength": (0.0, 1.0),
-                "controls_config.attention_weight": (0.0, None),
-                "controls_config.memory_weight": (0.0, 1.0)
-            }
-
-            for key, (min_val, max_val) in numeric_validations.items():
-                if self.config_manager.has_key(key):
-                    value = self.config_manager.get(key)
-                    if not isinstance(value, (int, float)):
-                        self.logger.record_event(
-                            event_type="scaffold_config_error",
-                            message=f"{key} must be numeric",
-                            level="error",
-                            additional_info={
-                                "timestamp": time.time()
-                            }
-                        )
-                        return False
-                    if min_val is not None and value < min_val:
-                        self.logger.record_event(
-                            event_type="scaffold_config_error",
-                            message=f"{key} must be >= {min_val}",
-                            level="error",
-                            additional_info={
-                                "timestamp": time.time()
-                            }
-                        )
-                        return False
-                    if max_val is not None and value > max_val:
-                        self.logger.record_event(
-                            event_type="scaffold_config_error",
-                            message=f"{key} must be <= {max_val}",
-                            level="error",
-                            additional_info={
-                                "timestamp": time.time()
-                            }
-                        )
-                        return False
-
-            self.validation_cache["config_valid"] = True
-            return True
-
-        except Exception as e:
-            self.error_manager.handle_scaffold_error(e, {
-                "operation": "config_validation"
-            })
-            return False
-            
     def initialize_scaffold_state(self, model_name: str, device: str) -> bool:
         """Initialize scaffold state."""
         try:
@@ -1521,7 +1523,7 @@ class ScaffoldManager:
 
             return True
         except Exception as e:
-            self.error_manager.handle_scaffold_error(e, {
+            self.error_handler.handle_scaffold_error(e, {
                 "operation": "compatibility_verification",
                 "base_config": base_config
             })

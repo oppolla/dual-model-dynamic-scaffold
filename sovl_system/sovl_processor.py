@@ -41,61 +41,80 @@ class ProcessorConfig:
     rep_confidence_penalty: float = 0.3
     enable_rep_detection: bool = True
 
-    _RANGES: Dict[str, Tuple[float, float]] = None
-    _HISTORY_RANGES: Dict[str, Tuple[int, int]] = None
-    _REP_RANGES: Dict[str, Tuple[float, float]] = None
-
-    def __post_init__(self):
-        """Initialize and validate configuration parameters."""
-        self._RANGES = {
-            "flat_distribution_confidence": (0.0, 0.5),
-            "confidence_var_threshold": (1e-6, 1e-4),
-            "confidence_smoothing_factor": (0.0, 1.0),
-            "rep_confidence_penalty": (0.0, 1.0),
-        }
-        self._HISTORY_RANGES = {
-            "max_confidence_history": (5, 20),
-        }
-        self._REP_RANGES = {
-            "min_rep_length": (2, 10),
-            "max_rep_scan": (50, 200),
-        }
-        self._validate_config()
+    @classmethod
+    def from_config_manager(cls, config_manager: ConfigManager) -> 'ProcessorConfig':
+        """Create a ProcessorConfig instance from ConfigManager."""
+        processor_config = config_manager.get_section("processor_config", {})
+        return cls(
+            flat_distribution_confidence=processor_config.get("flat_distribution_confidence", 0.2),
+            confidence_var_threshold=processor_config.get("confidence_var_threshold", 1e-5),
+            confidence_smoothing_factor=processor_config.get("confidence_smoothing_factor", 0.0),
+            max_confidence_history=processor_config.get("max_confidence_history", 10),
+            min_rep_length=processor_config.get("min_rep_length", 3),
+            max_rep_scan=processor_config.get("max_rep_scan", 100),
+            rep_confidence_penalty=processor_config.get("rep_confidence_penalty", 0.3),
+            enable_rep_detection=processor_config.get("enable_rep_detection", True)
+        )
 
     def _validate_config(self) -> None:
         """Validate all configuration parameters."""
-        for key, (min_val, max_val) in self._RANGES.items():
-            value = getattr(self, key)
-            if not (min_val <= value <= max_val):
-                raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
-        for key, (min_val, max_val) in self._HISTORY_RANGES.items():
-            value = getattr(self, key)
-            if not (min_val <= value <= max_val):
-                raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
-        for key, (min_val, max_val) in self._REP_RANGES.items():
-            value = getattr(self, key)
-            if not (min_val <= value <= max_val):
-                raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
+        try:
+            # Validate confidence parameters
+            if not (0.0 <= self.flat_distribution_confidence <= 0.5):
+                raise ValueError(f"flat_distribution_confidence must be in [0.0, 0.5], got {self.flat_distribution_confidence}")
+            if not (1e-6 <= self.confidence_var_threshold <= 1e-4):
+                raise ValueError(f"confidence_var_threshold must be in [1e-6, 1e-4], got {self.confidence_var_threshold}")
+            if not (0.0 <= self.confidence_smoothing_factor <= 1.0):
+                raise ValueError(f"confidence_smoothing_factor must be in [0.0, 1.0], got {self.confidence_smoothing_factor}")
+            if not (5 <= self.max_confidence_history <= 20):
+                raise ValueError(f"max_confidence_history must be in [5, 20], got {self.max_confidence_history}")
 
-    def update(self, **kwargs) -> None:
+            # Validate repetition detection parameters
+            if not (2 <= self.min_rep_length <= 10):
+                raise ValueError(f"min_rep_length must be in [2, 10], got {self.min_rep_length}")
+            if not (50 <= self.max_rep_scan <= 200):
+                raise ValueError(f"max_rep_scan must be in [50, 200], got {self.max_rep_scan}")
+            if not (0.0 <= self.rep_confidence_penalty <= 1.0):
+                raise ValueError(f"rep_confidence_penalty must be in [0.0, 1.0], got {self.rep_confidence_penalty}")
+            if not isinstance(self.enable_rep_detection, bool):
+                raise ValueError(f"enable_rep_detection must be boolean, got {type(self.enable_rep_detection)}")
+
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid processor configuration: {str(e)}")
+
+    def update(self, config_manager: ConfigManager, **kwargs) -> None:
         """Update configuration parameters with validation."""
-        for key, value in kwargs.items():
-            if key in self._RANGES:
-                min_val, max_val = self._RANGES[key]
-                if not (min_val <= value <= max_val):
-                    raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
-            elif key in self._HISTORY_RANGES:
-                min_val, max_val = self._HISTORY_RANGES[key]
-                if not (min_val <= value <= max_val):
-                    raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
-            elif key in self._REP_RANGES:
-                min_val, max_val = self._REP_RANGES[key]
-                if not (min_val <= value <= max_val):
-                    raise ValueError(f"{key} must be in [{min_val}, {max_val}], got {value}")
-            else:
-                raise ValueError(f"Unknown parameter: {key}")
-            setattr(self, key, value)
-        self._validate_config()
+        try:
+            # Validate new values before updating
+            for key, value in kwargs.items():
+                if key == "flat_distribution_confidence" and not (0.0 <= value <= 0.5):
+                    raise ValueError(f"flat_distribution_confidence must be in [0.0, 0.5], got {value}")
+                elif key == "confidence_var_threshold" and not (1e-6 <= value <= 1e-4):
+                    raise ValueError(f"confidence_var_threshold must be in [1e-6, 1e-4], got {value}")
+                elif key == "confidence_smoothing_factor" and not (0.0 <= value <= 1.0):
+                    raise ValueError(f"confidence_smoothing_factor must be in [0.0, 1.0], got {value}")
+                elif key == "max_confidence_history" and not (5 <= value <= 20):
+                    raise ValueError(f"max_confidence_history must be in [5, 20], got {value}")
+                elif key == "min_rep_length" and not (2 <= value <= 10):
+                    raise ValueError(f"min_rep_length must be in [2, 10], got {value}")
+                elif key == "max_rep_scan" and not (50 <= value <= 200):
+                    raise ValueError(f"max_rep_scan must be in [50, 200], got {value}")
+                elif key == "rep_confidence_penalty" and not (0.0 <= value <= 1.0):
+                    raise ValueError(f"rep_confidence_penalty must be in [0.0, 1.0], got {value}")
+                elif key == "enable_rep_detection" and not isinstance(value, bool):
+                    raise ValueError(f"enable_rep_detection must be boolean, got {type(value)}")
+
+            # Update local config
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+            # Update config in ConfigManager
+            processor_config = config_manager.get_section("processor_config", {})
+            processor_config.update(kwargs)
+            config_manager.update_section("processor_config", processor_config)
+
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid processor configuration update: {str(e)}")
 
 
 class TensorValidator:
@@ -253,17 +272,7 @@ class SOVLProcessor:
         self.device = device
         
         # Load processor configuration
-        processor_config = self.config_manager.get_section("processor_config", {})
-        self.config = ProcessorConfig(
-            flat_distribution_confidence=processor_config.get("flat_distribution_confidence", 0.2),
-            confidence_var_threshold=processor_config.get("confidence_var_threshold", 1e-5),
-            confidence_smoothing_factor=processor_config.get("confidence_smoothing_factor", 0.0),
-            max_confidence_history=processor_config.get("max_confidence_history", 10),
-            min_rep_length=processor_config.get("min_rep_length", 3),
-            max_rep_scan=processor_config.get("max_rep_scan", 100),
-            rep_confidence_penalty=processor_config.get("rep_confidence_penalty", 0.3),
-            enable_rep_detection=processor_config.get("enable_rep_detection", True)
-        )
+        self.config = ProcessorConfig.from_config_manager(config_manager)
         
         # Initialize token mapping components
         self._initialize_token_mapping()
@@ -281,7 +290,7 @@ class SOVLProcessor:
             # Initialize scaffold_unk_id with validation
             self.scaffold_unk_id = token_config.get("scaffold_unk_id", 0)
             if not isinstance(self.scaffold_unk_id, int) or self.scaffold_unk_id < 0:
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="token_mapping_warning",
                     message=f"Invalid scaffold_unk_id: {self.scaffold_unk_id}, using default 0",
                     level="warning"
@@ -291,7 +300,7 @@ class SOVLProcessor:
             # Initialize token map with validation
             self.token_map = token_config.get("token_map", {})
             if not isinstance(self.token_map, dict):
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="token_mapping_warning",
                     message="Invalid token_map type, using empty dict",
                     level="warning"
@@ -329,7 +338,7 @@ class SOVLProcessor:
             self.token_map = valid_entries
             
             # Log initialization
-            self.logger.record_event(
+            self.logger.log_training_event(
                 event_type="token_mapping_initialized",
                 message="Token mapping initialized successfully",
                 level="info",
@@ -341,8 +350,9 @@ class SOVLProcessor:
             
         except Exception as e:
             self.logger.log_error(
-                error_msg="Failed to initialize token mapping",
-                error_type="initialization_error",
+                error_type="token_mapping_error",
+                message="Failed to initialize token mapping",
+                error=str(e),
                 stack_trace=traceback.format_exc(),
                 additional_info={
                     "scaffold_unk_id": self.scaffold_unk_id,
@@ -355,7 +365,7 @@ class SOVLProcessor:
 
     def _log_init(self) -> None:
         """Log initialization event."""
-        self.logger.record_event(
+        self.logger.log_training_event(
             event_type="processor_initialized",
             message="Processor initialized successfully",
             level="info",
@@ -523,14 +533,9 @@ class SOVLProcessor:
         try:
             with self._lock:
                 old_config = vars(self.config).copy()
-                self.config.update(**kwargs)
+                self.config.update(self.config_manager, **kwargs)
                 
-                # Update config in config_manager
-                processor_config = self.config_manager.get_section("processor_config", {})
-                processor_config.update(kwargs)
-                self.config_manager.update_section("processor_config", processor_config)
-                
-                self.logger.record_event(
+                self.logger.log_training_event(
                     event_type="processor_tuned",
                     message="Processor configuration updated",
                     level="info",
@@ -541,8 +546,9 @@ class SOVLProcessor:
                 )
         except Exception as e:
             self.logger.log_error(
-                error_msg="Processor tuning failed",
                 error_type="tuning_error",
+                message="Processor tuning failed",
+                error=str(e),
                 stack_trace=traceback.format_exc(),
                 additional_info={"kwargs": kwargs}
             )
@@ -551,7 +557,13 @@ class SOVLProcessor:
     def get_state(self) -> Dict[str, Any]:
         """Export processor state."""
         with self._lock:
-            return {}
+            return {
+                "config": vars(self.config),
+                "token_mapping": {
+                    "scaffold_unk_id": self.scaffold_unk_id,
+                    "token_map": self.token_map
+                }
+            }
 
     def load_state(self, state: Dict[str, Any]) -> None:
         """
@@ -562,7 +574,13 @@ class SOVLProcessor:
         """
         try:
             with self._lock:
-                self.logger.record_event(
+                if "config" in state:
+                    self.config.update(self.config_manager, **state["config"])
+                if "token_mapping" in state:
+                    self.scaffold_unk_id = state["token_mapping"].get("scaffold_unk_id", 0)
+                    self.token_map = state["token_mapping"].get("token_map", {})
+                
+                self.logger.log_training_event(
                     event_type="state_loaded",
                     message="Processor state loaded",
                     level="info",
@@ -570,8 +588,9 @@ class SOVLProcessor:
                 )
         except Exception as e:
             self.logger.log_error(
-                error_msg="Failed to load processor state",
                 error_type="state_error",
+                message="Failed to load processor state",
+                error=str(e),
                 stack_trace=traceback.format_exc()
             )
             raise
@@ -579,7 +598,12 @@ class SOVLProcessor:
     def reset(self) -> None:
         """Reset processor state."""
         with self._lock:
-            self.logger.record_event(
+            # Reset to default configuration
+            self.config = ProcessorConfig.from_config_manager(self.config_manager)
+            self.scaffold_unk_id = 0
+            self.token_map = {}
+            
+            self.logger.log_training_event(
                 event_type="processor_reset",
                 message="Processor state reset",
                 level="info"

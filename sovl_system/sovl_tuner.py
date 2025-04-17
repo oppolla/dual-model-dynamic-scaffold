@@ -115,6 +115,9 @@ class SOVLTuner:
         self.cross_attention_injector = cross_attention_injector
         self._guard = NumericalGuard(logger)
         
+        # Validate configuration on initialization
+        self._validate_config()
+        
         # Cache configuration sections
         self.core_config = config_manager.get_section("core_config")
         self.controls_config = config_manager.get_section("controls_config")
@@ -133,6 +136,102 @@ class SOVLTuner:
         self._last_confidence_check = 0.0
         self._confidence_check_interval = 60.0  # seconds
         
+    def _validate_config(self) -> None:
+        """Validate the tuner configuration."""
+        try:
+            # Validate required configuration sections
+            required_sections = [
+                "core_config",
+                "controls_config",
+                "training_config",
+                "curiosity_config",
+                "cross_attn_config",
+                "lora_config"
+            ]
+            
+            for section in required_sections:
+                if not self.config_manager.has_section(section):
+                    raise ConfigurationError(f"Missing required configuration section: {section}")
+            
+            # Validate core configuration
+            self.config_manager.validate_section("core_config", {
+                "hidden_size": (lambda x: x > 0, "must be positive"),
+                "quantization": (lambda x: x in ["fp16", "fp32", "int8"], "must be one of: fp16, fp32, int8"),
+                "use_dynamic_layers": (lambda x: isinstance(x, bool), "must be boolean")
+            })
+            
+            # Validate controls configuration
+            self.config_manager.validate_section("controls_config", {
+                "temp_eager_threshold": (lambda x: 0.7 <= x <= 0.9, "must be in [0.7, 0.9]"),
+                "temp_sluggish_threshold": (lambda x: 0.4 <= x <= 0.6, "must be in [0.4, 0.6]"),
+                "temp_mood_influence": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "temp_curiosity_boost": (lambda x: 0.0 <= x <= 0.5, "must be in [0, 0.5]"),
+                "temp_restless_drop": (lambda x: 0.0 <= x <= 0.5, "must be in [0, 0.5]"),
+                "temp_melancholy_noise": (lambda x: 0.0 <= x <= 0.05, "must be in [0, 0.05]"),
+                "conf_feedback_strength": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "temp_smoothing_factor": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "temperament_decay_rate": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "scaffold_weight_cap": (lambda x: 0.5 <= x <= 1.0, "must be in [0.5, 1.0]"),
+                "base_temperature": (lambda x: 0.5 <= x <= 1.5, "must be in [0.5, 1.5]"),
+                "sleep_conf_threshold": (lambda x: 0.5 <= x <= 0.9, "must be in [0.5, 0.9]"),
+                "sleep_time_factor": (lambda x: 0.5 <= x <= 5.0, "must be in [0.5, 5.0]"),
+                "sleep_log_min": (lambda x: 5 <= x <= 20, "must be in [5, 20]"),
+                "dream_swing_var": (lambda x: 0.05 <= x <= 0.2, "must be in [0.05, 0.2]"),
+                "dream_lifecycle_delta": (lambda x: 0.05 <= x <= 0.2, "must be in [0.05, 0.2]"),
+                "dream_temperament_on": (lambda x: isinstance(x, bool), "must be boolean"),
+                "dream_noise_scale": (lambda x: 0.01 <= x <= 0.1, "must be in [0.01, 0.1]"),
+                "dream_memory_weight": (lambda x: 0.0 <= x <= 0.5, "must be in [0, 0.5]"),
+                "dream_memory_maxlen": (lambda x: 5 <= x <= 20, "must be in [5, 20]"),
+                "dream_prompt_weight": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "dream_novelty_boost": (lambda x: 0.0 <= x <= 0.05, "must be in [0, 0.05]"),
+                "dream_memory_decay": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "dream_prune_threshold": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]")
+            })
+            
+            # Validate curiosity configuration
+            self.config_manager.validate_section("curiosity_config", {
+                "enable_curiosity": (lambda x: isinstance(x, bool), "must be boolean"),
+                "novelty_threshold_spontaneous": (lambda x: 0.5 <= x <= 1.0, "must be in [0.5, 1.0]"),
+                "novelty_threshold_response": (lambda x: 0.5 <= x <= 1.0, "must be in [0.5, 1.0]"),
+                "pressure_threshold": (lambda x: 0.5 <= x <= 0.9, "must be in [0.5, 0.9]"),
+                "pressure_drop": (lambda x: 0.1 <= x <= 0.5, "must be in [0.1, 0.5]"),
+                "silence_threshold": (lambda x: 5.0 <= x <= 60.0, "must be in [5.0, 60.0]"),
+                "question_cooldown": (lambda x: 30.0 <= x <= 120.0, "must be in [30.0, 120.0]"),
+                "queue_maxlen": (lambda x: 1 <= x <= 50, "must be in [1, 50]"),
+                "weight_ignorance": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "weight_novelty": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "max_new_tokens": (lambda x: 5 <= x <= 12, "must be in [5, 12]"),
+                "base_temperature": (lambda x: 0.5 <= x <= 1.5, "must be in [0.5, 1.5]"),
+                "temperament_influence": (lambda x: 0.1 <= x <= 0.6, "must be in [0.1, 0.6]"),
+                "top_k": (lambda x: 10 <= x <= 50, "must be in [10, 50]"),
+                "attention_weight": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
+                "question_timeout": (lambda x: 60.0 <= x <= 86400.0, "must be in [60.0, 86400.0]")
+            })
+            
+            # Validate training configuration
+            self.config_manager.validate_section("training_config", {
+                "lifecycle_capacity_factor": (lambda x: 0.001 <= x <= 0.1, "must be in [0.001, 0.1]"),
+                "lifecycle_curve": (lambda x: x in ["sigmoid_linear", "exponential"], "must be one of: sigmoid_linear, exponential"),
+                "lora_capacity": (lambda x: 0 <= x <= 1000, "must be in [0, 1000]")
+            })
+            
+        except ConfigurationError as e:
+            self.logger.log_error(
+                error_type="config_validation_error",
+                message="Configuration validation failed",
+                error=str(e),
+                stack_trace=traceback.format_exc()
+            )
+            raise
+        except Exception as e:
+            self.logger.log_error(
+                error_type="config_validation_error",
+                message="Unexpected error during configuration validation",
+                error=str(e),
+                stack_trace=traceback.format_exc()
+            )
+            raise ConfigurationError(f"Unexpected error during configuration validation: {str(e)}")
+    
     def _handle_error(self, error: Exception, error_type: str, context: Dict[str, Any]) -> None:
         """Handle errors with coordination between ErrorManager and local handling."""
         try:
@@ -195,101 +294,73 @@ class SOVLTuner:
             
     def _get_validation_range(self, section: str, key: str) -> ValidationRange:
         """Get validation range for a configuration parameter."""
-        ranges_map = {
-            "core_config": self.CORE_RANGES,
-            "controls_config": self.CONTROLS_RANGES,
-            "curiosity_config": self.CURIOSITY_RANGES,
-            "training_config": self.TRAINING_RANGES
-        }
-        
-        if section not in ranges_map:
-            raise ValueError(f"Unknown configuration section: {section}")
+        try:
+            # Get validation rules from ConfigManager
+            validation_rules = self.config_manager.get_validation_rules(section, key)
+            if not validation_rules:
+                raise ValueError(f"No validation rules found for {section}.{key}")
             
-        if key not in ranges_map[section]:
-            raise ValueError(f"Unknown configuration key: {key} in section {section}")
+            # Extract min and max values from validation rules
+            min_value = validation_rules.get("min")
+            max_value = validation_rules.get("max")
+            description = validation_rules.get("description", "")
             
-        return ranges_map[section][key]
-
+            if min_value is None or max_value is None:
+                raise ValueError(f"Invalid validation range for {section}.{key}")
+            
+            return ValidationRange(min_value, max_value, description)
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_type="validation_range_error",
+                message=f"Failed to get validation range for {section}.{key}",
+                error=str(e),
+                stack_trace=traceback.format_exc()
+            )
+            raise ConfigurationError(f"Failed to get validation range for {section}.{key}: {str(e)}")
+    
     def validate_param(self, param_name: str, value: Any) -> bool:
         """Validate a parameter against its allowed range or type."""
         try:
             # Extract section and key from param_name
             section, key = param_name.split(".", 1)
             
-            # Get validation range
-            validation_range = self._get_validation_range(section, key)
-            
-            if isinstance(validation_range.min_value, bool):
-                if not isinstance(value, bool):
-                    self.logger.log_training_event(
-                        event_type="param_validation_error",
-                        message=f"{key} must be a boolean value",
-                        level="error",
-                        additional_info={
-                            "param_name": param_name,
-                            "value": value
-                        }
-                    )
-                    return False
-                return True
-                
-            if isinstance(validation_range.min_value, str):
-                if not isinstance(value, str):
-                    self.logger.log_training_event(
-                        event_type="param_validation_error",
-                        message=f"{key} must be a string value",
-                        level="error",
-                        additional_info={
-                            "param_name": param_name,
-                            "value": value
-                        }
-                    )
-                    return False
-                if value not in [validation_range.min_value, validation_range.max_value]:
-                    self.logger.log_training_event(
-                        event_type="param_validation_error",
-                        message=f"{key} must be one of: {validation_range.min_value}, {validation_range.max_value}",
-                        level="error",
-                        additional_info={
-                            "param_name": param_name,
-                            "value": value
-                        }
-                    )
-                    return False
-                return True
-                
-            if not isinstance(value, (int, float)):
+            # Get validation rules from ConfigManager
+            validation_rules = self.config_manager.get_validation_rules(section, key)
+            if not validation_rules:
                 self.logger.log_training_event(
-                    event_type="param_validation_error",
-                    message=f"{key} must be a numeric value",
-                    level="error",
+                    event_type="param_validation_warning",
+                    message=f"No validation rules found for {param_name}",
+                    level="warning",
                     additional_info={
                         "param_name": param_name,
                         "value": value
                     }
                 )
-                return False
-                
-            if not (validation_range.min_value <= value <= validation_range.max_value):
+                return True
+            
+            # Validate value against rules
+            validator = validation_rules.get("validator")
+            if validator and not validator(value):
                 self.logger.log_training_event(
                     event_type="param_validation_error",
-                    message=f"{key} must be between {validation_range.min_value} and {validation_range.max_value}. Got: {value}",
+                    message=f"Parameter validation failed for {key}",
                     level="error",
                     additional_info={
                         "param_name": param_name,
                         "value": value,
-                        "min": validation_range.min_value,
-                        "max": validation_range.max_value
+                        "validation_rules": validation_rules
                     }
                 )
                 return False
-                
+            
             return True
             
-        except ValueError as e:
+        except Exception as e:
             self.logger.log_error(
-                error_msg=f"Failed to validate parameter: {str(e)}",
                 error_type="param_validation_error",
+                message=f"Failed to validate parameter: {param_name}",
+                error=str(e),
                 stack_trace=traceback.format_exc(),
                 additional_info={
                     "param_name": param_name,
@@ -394,8 +465,14 @@ class SOVLTuner:
             # Adjust parameters based on metrics
             tuned_params = self._adjust_parameters(current_params, metrics)
             
-            # Apply parameter changes
+            # Validate and apply parameter changes
             if self.trainer:
+                # Validate all parameters before applying
+                for param_name, value in tuned_params.items():
+                    if not self.validate_param(param_name, value):
+                        raise ConfigurationError(f"Invalid parameter value: {param_name}={value}")
+                
+                # Apply validated parameters
                 self.trainer.update_parameters(tuned_params)
             
             # Log tuning results

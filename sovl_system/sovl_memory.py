@@ -37,49 +37,34 @@ class MemoryManager:
     _CLEANUP_COOLDOWN = 60.0
     _MEM_USAGE_HISTORY_MAXLEN = 10
 
-    def __init__(self, config_manager, device: torch.device, logger: Logger):
+    def __init__(self, config_manager: ConfigManager, device: torch.device, logger: Logger):
+        """Initialize MemoryManager with configuration and dependencies."""
         self._config_manager = config_manager
-        self._device = config_manager.device  # Use device from config_manager
+        self._device = device
         self._logger = logger
         self._memory_lock = Lock()
-
-        # Validate device consistency
-        if str(self._device) != str(device):
-            self._log_event("device_mismatch_warning", {
-                "provided_device": str(device),
-                "used_device": str(self._device),
-                "config_device": str(config_manager.device)
-            })
+        self._last_cleanup_time = 0.0
+        self._mem_usage_history = deque(maxlen=self._MEM_USAGE_HISTORY_MAXLEN)
+        self._state = None
+        self._conversation_history = None
+        self._token_map = {}
+        self._scaffold_context = {}
+        self._dream_memory = deque(maxlen=10)
+        self._memory_health = {
+            "gpu_usage": 0.0,
+            "cpu_usage": 0.0,
+            "last_check": 0.0
+        }
+        self._cleanup_cooldown = self._CLEANUP_COOLDOWN
 
         # Initialize configuration
-        self._controls_config = config_manager.get_section("controls_config")
-        self._core_config = config_manager.get_section("core_config")
-        self._training_config = config_manager.get_section("training_config")
         self._initialize_config()
 
-        # Memory structures
-        self._token_map = defaultdict(lambda: None)
-        self._special_token_map = {}
-        self._scaffold_unk_id = None
-        self._dream_memory = deque(maxlen=self.dream_memory_maxlen)
-        self._conversation_history = ConversationHistory(maxlen=self.conversation_history_maxlen)
-        self._mem_usage_history = deque(maxlen=self._MEM_USAGE_HISTORY_MAXLEN)
-        self._temp_scaffold_context = None
-        self._last_cleanup = 0.0
-
-        # State integration
-        self._state = None
-        self._hidden_size = None
-
-        # New memory health attributes
-        self.memory_lock = threading.Lock()
-        self.mem_usage_history = []
-        self.dynamic_threshold_base = config_manager.get("memory_config.memory_threshold", 0.8)
-        self.memory_decay_rate = config_manager.get("memory_config.memory_decay_rate", 0.95)
-        self.max_history_size = config_manager.get("memory_config.max_history_size", 100)
-        self.min_batch_size = config_manager.get("memory_config.min_batch_size", 1)
-        self.max_batch_size = config_manager.get("memory_config.max_batch_size", 32)
-        self.initial_batch_size = config_manager.get("memory_config.initial_batch_size", 8)
+        # Initialize memory thresholds and batch sizes
+        self.dynamic_threshold_base = self._config_manager.get("memory_config.memory_threshold", 0.85)
+        self.memory_decay_rate = self._config_manager.get("memory_config.memory_decay_rate", 0.95)
+        self.max_batch_size = self._config_manager.get("memory_config.max_batch_size", 32)
+        self.initial_batch_size = self._config_manager.get("memory_config.initial_batch_size", 8)
         self.batch_size = self.initial_batch_size
         self.memory_threshold = self.dynamic_threshold_base
 
@@ -95,65 +80,68 @@ class MemoryManager:
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
         try:
-            # Get controls config
-            controls_config = self._config_manager.get_section("controls_config", {})
+            # Get memory config section
+            memory_config = self._config_manager.get_section("memory_config", {})
             
-            # Validate and set config values
-            for key, (min_val, max_val) in self._CONFIG_RANGES.items():
-                value = controls_config.get(key)
-                if value is not None:
-                    if not isinstance(value, (int, float)) or not (min_val <= value <= max_val):
-                        self._log_warning(
-                            f"Config {key}={value} outside valid range [{min_val}, {max_val}]",
-                            context="config_validation"
-                        )
-                        # Reset to default if invalid
-                        default = self._get_default_value(key)
-                        controls_config[key] = default
-                        self._log_event(
-                            f"config_reset_{key}",
-                            f"Reset {key} to default value {default}",
-                            level="warning"
-                        )
-                    setattr(self, key, value)
-                else:
-                    # Set default value if missing
-                    default = self._get_default_value(key)
-                    setattr(self, key, default)
-                    self._log_warning(
-                        f"Missing config {key}, using default {default}",
-                        context="config_validation"
-                    )
+            # Validate and set memory-specific config values
+            self.memory_threshold = self._validate_config_value(
+                "memory_threshold",
+                memory_config.get("memory_threshold", 0.85),
+                (0.5, 0.95)
+            )
             
-            # Validate maxlen values
-            for key, (min_val, max_val) in self._MAXLEN_RANGES.items():
-                value = controls_config.get(key)
-                if value is not None:
-                    if not isinstance(value, int) or not (min_val <= value <= max_val):
-                        self._log_warning(
-                            f"Config {key}={value} outside valid range [{min_val}, {max_val}]",
-                            context="config_validation"
-                        )
-                        # Reset to default if invalid
-                        default = self._get_default_value(key)
-                        controls_config[key] = default
-                        self._log_event(
-                            f"config_reset_{key}",
-                            f"Reset {key} to default value {default}",
-                            level="warning"
-                        )
-                    setattr(self, key, value)
-                else:
-                    # Set default value if missing
-                    default = self._get_default_value(key)
-                    setattr(self, key, default)
-                    self._log_warning(
-                        f"Missing config {key}, using default {default}",
-                        context="config_validation"
-                    )
+            self.memory_decay_rate = self._validate_config_value(
+                "memory_decay_rate",
+                memory_config.get("memory_decay_rate", 0.95),
+                (0.8, 1.0)
+            )
+            
+            self.use_scaffold_memory = self._config_manager.get("memory_config.use_scaffold_memory", True)
+            self.use_token_map_memory = self._config_manager.get("memory_config.use_token_map_memory", True)
+            self.scaffold_weight = self._validate_config_value(
+                "scaffold_weight",
+                memory_config.get("scaffold_weight", 1.0),
+                (0.0, 1.0)
+            )
+            
+            # Validate and set dream memory config values
+            self.dream_memory_maxlen = self._validate_config_value(
+                "dream_memory_maxlen",
+                memory_config.get("dream_memory_maxlen", 10),
+                (5, 50),
+                is_int=True
+            )
+            
+            self.dream_memory_decay = self._validate_config_value(
+                "dream_memory_decay",
+                memory_config.get("dream_memory_decay", 0.95),
+                (0.8, 1.0)
+            )
+            
+            self.dream_prune_threshold = self._validate_config_value(
+                "dream_prune_threshold",
+                memory_config.get("dream_prune_threshold", 0.1),
+                (0.0, 0.5)
+            )
+            
+            self.dream_memory_weight = self._validate_config_value(
+                "dream_memory_weight",
+                memory_config.get("dream_memory_weight", 0.1),
+                (0.0, 0.5)
+            )
             
             # Update config with validated values
-            self._config_manager.update_section("controls_config", controls_config)
+            memory_config.update({
+                "memory_threshold": self.memory_threshold,
+                "memory_decay_rate": self.memory_decay_rate,
+                "dream_memory_maxlen": self.dream_memory_maxlen,
+                "dream_memory_decay": self.dream_memory_decay,
+                "dream_prune_threshold": self.dream_prune_threshold,
+                "dream_memory_weight": self.dream_memory_weight,
+                "scaffold_weight": self.scaffold_weight
+            })
+            
+            self._config_manager.update_section("memory_config", memory_config)
             
             # Log successful initialization
             self._log_event(
@@ -171,21 +159,30 @@ class MemoryManager:
             )
             raise
 
-    def _get_default_value(self, key: str) -> Any:
-        """Get default value for a configuration key."""
-        defaults = {
-            "memory_threshold": 0.85,
-            "memory_decay_rate": 0.95,
-            "dream_memory_decay": 0.95,
-            "dream_prune_threshold": 0.1,
-            "token_map_weight_cap": 2.0,
-            "dream_memory_weight": 0.1,
-            "dream_memory_maxlen": 10,
-            "conversation_history_maxlen": 10,
-            "confidence_history_maxlen": 1000,
-            "temperament_history_maxlen": 1000
-        }
-        return defaults.get(key)
+    def _validate_config_value(self, key: str, value: Any, valid_range: Tuple[float, float], is_int: bool = False) -> Union[float, int]:
+        """Validate a configuration value against a range."""
+        try:
+            if is_int:
+                if not isinstance(value, int):
+                    raise ValueError(f"Config {key} must be an integer")
+                min_val, max_val = valid_range
+                if not (min_val <= value <= max_val):
+                    raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+                return value
+            else:
+                if not isinstance(value, (int, float)):
+                    raise ValueError(f"Config {key} must be a number")
+                min_val, max_val = valid_range
+                if not (min_val <= value <= max_val):
+                    raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+                return float(value)
+        except Exception as e:
+            self._log_error(
+                f"Config validation failed for {key}: {str(e)}",
+                error_type="config_validation_error",
+                context="config_validation"
+            )
+            raise
 
     def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log an event with standardized format."""
@@ -543,10 +540,10 @@ class MemoryManager:
         """Clear scaffold-related caches safely."""
         with self._memory_lock:
             try:
-                if self._temp_scaffold_context is not None:
-                    if isinstance(self._temp_scaffold_context, torch.Tensor):
-                        self._temp_scaffold_context = self._temp_scaffold_context.detach().cpu()
-                    self._temp_scaffold_context = None
+                if self._scaffold_context is not None:
+                    if isinstance(self._scaffold_context, torch.Tensor):
+                        self._scaffold_context = self._scaffold_context.detach().cpu()
+                    self._scaffold_context = None
 
                 if self._state and self._state.last_prompt_embedding is not None:
                     if isinstance(self._state.last_prompt_embedding, torch.Tensor):
@@ -582,7 +579,7 @@ class MemoryManager:
         with self._memory_lock:
             # Ensure tensor is on correct device
             scaffold_hidden_states = scaffold_hidden_states.to(self._device)
-            self._temp_scaffold_context = scaffold_hidden_states.detach() if isinstance(scaffold_hidden_states, torch.Tensor) else scaffold_hidden_states
+            self._scaffold_context = scaffold_hidden_states.detach() if isinstance(scaffold_hidden_states, torch.Tensor) else scaffold_hidden_states
             self._log_event(
                 "scaffold_context_set",
                 message="Scaffold context set for generation",
@@ -594,10 +591,10 @@ class MemoryManager:
     def get_scaffold_context(self) -> Optional[torch.Tensor]:
         """Retrieve the current scaffold context."""
         with self._memory_lock:
-            if self._temp_scaffold_context is None:
+            if self._scaffold_context is None:
                 return None
             # Ensure tensor is on correct device
-            return self._temp_scaffold_context.to(self._device)
+            return self._scaffold_context.to(self._device)
 
     def append_dream_memory(self, tensor: torch.Tensor, weight: float, metadata: Optional[Dict] = None) -> None:
         """Append a tensor to dream memory with associated weight and metadata."""
@@ -926,9 +923,9 @@ class MemoryManager:
             total_mem = torch.cuda.get_device_properties(0).total_memory
             mem_ratio = current_mem / total_mem
 
-            if mem_ratio > self.memory_threshold and time.time() - self._last_cleanup > self._CLEANUP_COOLDOWN:
+            if mem_ratio > self.memory_threshold and time.time() - self._last_cleanup_time > self._cleanup_cooldown:
                 torch.cuda.empty_cache()
-                self._last_cleanup = time.time()
+                self._last_cleanup_time = time.time()
                 self._log_event(
                     "memory_cleanup",
                     message="Memory cleanup performed",
@@ -945,71 +942,72 @@ class MemoryManager:
     def tune_memory_config(self, **kwargs) -> None:
         """Dynamically adjust memory configuration with validation."""
         with self._memory_lock:
-            old_config = {
-                "memory_threshold": self.memory_threshold,
-                "memory_decay_rate": self.memory_decay_rate,
-                "dream_memory_maxlen": self.dream_memory_maxlen,
-                "dream_memory_decay": self.dream_memory_decay,
-                "dream_prune_threshold": self.dream_prune_threshold,
-                "conversation_history_maxlen": self.conversation_history_maxlen,
-                "confidence_history_maxlen": self.confidence_history_maxlen,
-                "temperament_history_maxlen": self.temperament_history_maxlen,
-                "token_map_weight_cap": self.token_map_weight_cap,
-            }
-            updates = {}
             try:
+                old_config = {
+                    "memory_threshold": self.memory_threshold,
+                    "memory_decay_rate": self.memory_decay_rate,
+                    "dream_memory_maxlen": self.dream_memory_maxlen,
+                    "dream_memory_decay": self.dream_memory_decay,
+                    "dream_prune_threshold": self.dream_prune_threshold,
+                    "dream_memory_weight": self.dream_memory_weight,
+                    "scaffold_weight": self.scaffold_weight
+                }
+                
+                updates = {}
                 for key, value in kwargs.items():
-                    if key in self._CONFIG_RANGES:
-                        validated_value = self._validate_config(key, value)
-                        setattr(self, key, validated_value)
-                        updates[f"controls_config.{key}"] = validated_value
-                    elif key in self._MAXLEN_RANGES:
-                        validated_value = self._validate_maxlen(key, value)
-                        setattr(self, key, validated_value)
-                        updates[f"controls_config.{key}"] = validated_value
-                        if key == "dream_memory_maxlen":
-                            self._dream_memory = deque(self._dream_memory, maxlen=validated_value)
-                            self._state.dream_memory = self._dream_memory
-                        elif key == "conversation_history_maxlen":
-                            self._conversation_history = ConversationHistory(maxlen=validated_value)
-                            self._state.conversation_history = self._conversation_history
-                    else:
-                        raise ValueError(f"Unknown configuration parameter: {key}")
-
-                self._config_manager.update_batch(updates)
-                self._controls_config.update({k.split('.')[-1]: v for k, v in updates.items()})
+                    if key in old_config:
+                        if key in ["dream_memory_maxlen"]:
+                            updates[key] = self._validate_config_value(key, value, (5, 50), is_int=True)
+                        elif key in ["memory_threshold", "memory_decay_rate", "dream_memory_decay", "dream_prune_threshold", "dream_memory_weight", "scaffold_weight"]:
+                            updates[key] = self._validate_config_value(key, value, (0.0, 1.0))
+                
+                # Apply updates
+                for key, value in updates.items():
+                    setattr(self, key, value)
+                    self._config_manager.set(f"memory_config.{key}", value)
+                
+                # Log configuration changes
                 self._log_event(
-                    "memory_config_tuned",
-                    message="Memory configuration tuned",
+                    "memory_config_updated",
+                    "Memory configuration updated",
                     level="info",
                     old_config=old_config,
-                    new_config=kwargs
+                    new_config=updates
                 )
+                
             except Exception as e:
                 self._log_error(
-                    error_msg=f"Failed to tune memory config: {str(e)}",
-                    error_type="config_error",
-                    stack_trace=traceback.format_exc()
+                    f"Failed to tune memory config: {str(e)}",
+                    error_type="config_tuning_error",
+                    stack_trace=traceback.format_exc(),
+                    context="config_tuning"
                 )
                 raise
 
-    def _validate_config(self, key: str, value: Any) -> float:
-        """Validate a configuration parameter."""
-        min_val, max_val = self._CONFIG_RANGES[key]
-        if not isinstance(value, (int, float)):
-            raise ValueError(f"Config {key} must be a number")
-        if not (min_val <= value <= max_val):
-            raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
-        return float(value)
-
-    def _validate_maxlen(self, key: str, value: Any) -> int:
-        """Validate a maxlen configuration parameter."""
-        min_val, max_val = self._MAXLEN_RANGES[key]
-        if not isinstance(value, int):
-            raise ValueError(f"Config {key} must be an integer")
-        if not (min_val <= value <= max_val):
-            raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
-        return value
+    def _validate_config_value(self, key: str, value: Any, valid_range: Tuple[float, float], is_int: bool = False) -> Union[float, int]:
+        """Validate a configuration value against a range."""
+        try:
+            if is_int:
+                if not isinstance(value, int):
+                    raise ValueError(f"Config {key} must be an integer")
+                min_val, max_val = valid_range
+                if not (min_val <= value <= max_val):
+                    raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+                return value
+            else:
+                if not isinstance(value, (int, float)):
+                    raise ValueError(f"Config {key} must be a number")
+                min_val, max_val = valid_range
+                if not (min_val <= value <= max_val):
+                    raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+                return float(value)
+        except Exception as e:
+            self._log_error(
+                f"Config validation failed for {key}: {str(e)}",
+                error_type="config_validation_error",
+                context="config_validation"
+            )
+            raise
 
 class MemoryMonitor:
     """Monitors memory usage using Python's built-in capabilities."""

@@ -26,6 +26,7 @@ class ErrorManager:
         self,
         context: SystemContext,
         state_tracker: StateTracker,
+        config_manager: ConfigManager,
         error_cooldown: float = 1.0,
         max_recent_errors: int = 100
     ) -> None:
@@ -34,17 +35,20 @@ class ErrorManager:
         Args:
             context: System context containing logger and config manager
             state_tracker: State tracker for system state management
+            config_manager: ConfigManager instance for configuration handling
             error_cooldown: Time in seconds before an error is no longer considered recent
             max_recent_errors: Maximum number of recent errors to track
             
         Raises:
-            ValueError: If context or state_tracker is None
+            ValueError: If context, state_tracker, or config_manager is None
             TypeError: If error_cooldown is not a float or max_recent_errors is not an int
         """
         if not context:
             raise ValueError("context cannot be None")
         if not state_tracker:
             raise ValueError("state_tracker cannot be None")
+        if not config_manager:
+            raise ValueError("config_manager cannot be None")
         if not isinstance(error_cooldown, (int, float)):
             raise TypeError("error_cooldown must be a number")
         if not isinstance(max_recent_errors, int):
@@ -52,44 +56,135 @@ class ErrorManager:
             
         self.context = context
         self.state_tracker = state_tracker
+        self.config_manager = config_manager
         self.logger = context.logger
         self.error_counts = defaultdict(int)
         self.recent_errors = deque(maxlen=max_recent_errors)
-        self.error_cooldown = float(error_cooldown)
-        self.severity_thresholds = {
-            "warning": 3.0,
-            "error": 5.0,
-            "critical": 10.0
-        }
-        self.recovery_strategies = {
-            "training": self._recover_training,
-            "curiosity": self._recover_curiosity,
-            "memory": self._recover_memory,
-            "generation": self._recover_generation,
-            "data": self._recover_data
-        }
-        self.parameter_adjustments = {
-            "training": lambda ctx: self.context.config_manager.update(
-                "training_config.batch_size", 
-                max(1, ctx.get("batch_size", 32) // 2)
-            ),
-            "curiosity": lambda ctx: self.context.config_manager.update(
-                "curiosity_config.pressure_threshold",
-                max(0.1, self.context.config_manager.get("curiosity_config.pressure_threshold", 0.5) - 0.05)
-            ),
-            "memory": lambda ctx: self.context.config_manager.update(
-                "memory_config.max_memory_mb",
-                max(256, self.context.config_manager.get("memory_config.max_memory_mb", 512) // 2)
-            ),
-            "generation": lambda ctx: self.context.config_manager.update(
-                "generation_config.temperature",
-                max(0.5, self.context.config_manager.get("generation_config.temperature", 1.0) - 0.05)
-            ),
-            "data": lambda ctx: self.context.config_manager.update(
-                "data_config.batch_size",
-                max(1, ctx.get("batch_size", 32) // 2)
+        
+        # Initialize configuration
+        self._initialize_config()
+        
+        # Subscribe to configuration changes
+        self.config_manager.subscribe(self._on_config_change)
+        
+    def _initialize_config(self) -> None:
+        """Initialize error handling configuration from ConfigManager."""
+        try:
+            # Load error handling configuration
+            error_config = self.config_manager.get_section("error_config")
+            
+            # Set error cooldown with validation
+            self.error_cooldown = float(error_config.get("error_cooldown", 1.0))
+            if self.error_cooldown <= 0:
+                self.logger.record_event(
+                    event_type="config_validation",
+                    message="Invalid error_cooldown value, using default",
+                    level="warning",
+                    additional_info={"value": self.error_cooldown, "default": 1.0}
+                )
+                self.error_cooldown = 1.0
+            
+            # Set severity thresholds with validation
+            self.severity_thresholds = {
+                "warning": float(error_config.get("warning_threshold", 3.0)),
+                "error": float(error_config.get("error_threshold", 5.0)),
+                "critical": float(error_config.get("critical_threshold", 10.0))
+            }
+            
+            # Validate thresholds
+            for level, threshold in self.severity_thresholds.items():
+                if threshold <= 0:
+                    self.logger.record_event(
+                        event_type="config_validation",
+                        message=f"Invalid {level} threshold, using default",
+                        level="warning",
+                        additional_info={"value": threshold, "default": 3.0 if level == "warning" else 5.0 if level == "error" else 10.0}
+                    )
+                    self.severity_thresholds[level] = 3.0 if level == "warning" else 5.0 if level == "error" else 10.0
+            
+            # Initialize recovery strategies
+            self.recovery_strategies = {
+                "training": self._recover_training,
+                "curiosity": self._recover_curiosity,
+                "memory": self._recover_memory,
+                "generation": self._recover_generation,
+                "data": self._recover_data
+            }
+            
+            # Initialize parameter adjustments with configuration validation
+            self.parameter_adjustments = {
+                "training": lambda ctx: self._adjust_training_params(ctx),
+                "curiosity": lambda ctx: self._adjust_curiosity_params(ctx),
+                "memory": lambda ctx: self._adjust_memory_params(ctx),
+                "generation": lambda ctx: self._adjust_generation_params(ctx),
+                "data": lambda ctx: self._adjust_data_params(ctx)
+            }
+            
+            self.logger.record_event(
+                event_type="error_config_initialized",
+                message="Error handling configuration initialized successfully",
+                level="info",
+                additional_info={
+                    "error_cooldown": self.error_cooldown,
+                    "severity_thresholds": self.severity_thresholds
+                }
             )
-        }
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="error_config_initialization_failed",
+                message=f"Failed to initialize error handling configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            raise
+            
+    def _on_config_change(self) -> None:
+        """Handle configuration changes."""
+        try:
+            self._initialize_config()
+            self.logger.record_event(
+                event_type="error_config_updated",
+                message="Error handling configuration updated",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="error_config_update_failed",
+                message=f"Failed to update error handling configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            
+    def _adjust_training_params(self, context: Dict[str, Any]) -> None:
+        """Adjust training parameters based on configuration."""
+        current_batch_size = self.config_manager.get("training_config.batch_size", 32)
+        new_batch_size = max(1, current_batch_size // 2)
+        self.config_manager.update("training_config.batch_size", new_batch_size)
+        
+    def _adjust_curiosity_params(self, context: Dict[str, Any]) -> None:
+        """Adjust curiosity parameters based on configuration."""
+        current_threshold = self.config_manager.get("curiosity_config.pressure_threshold", 0.5)
+        new_threshold = max(0.1, current_threshold - 0.05)
+        self.config_manager.update("curiosity_config.pressure_threshold", new_threshold)
+        
+    def _adjust_memory_params(self, context: Dict[str, Any]) -> None:
+        """Adjust memory parameters based on configuration."""
+        current_limit = self.config_manager.get("memory_config.max_memory_mb", 512)
+        new_limit = max(256, current_limit // 2)
+        self.config_manager.update("memory_config.max_memory_mb", new_limit)
+        
+    def _adjust_generation_params(self, context: Dict[str, Any]) -> None:
+        """Adjust generation parameters based on configuration."""
+        current_temp = self.config_manager.get("generation_config.temperature", 1.0)
+        new_temp = max(0.5, current_temp - 0.05)
+        self.config_manager.update("generation_config.temperature", new_temp)
+        
+    def _adjust_data_params(self, context: Dict[str, Any]) -> None:
+        """Adjust data parameters based on configuration."""
+        current_batch_size = self.config_manager.get("data_config.batch_size", 32)
+        new_batch_size = max(1, current_batch_size // 2)
+        self.config_manager.update("data_config.batch_size", new_batch_size)
         
     def _is_duplicate_error(self, error: Exception, error_type: str) -> bool:
         """Check if an error is a duplicate of a recently seen error.
