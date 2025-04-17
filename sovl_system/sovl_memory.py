@@ -76,85 +76,86 @@ class MemoryManager:
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
-        try:
-            # Get memory config section
-            memory_config = self._config_manager.get_section("memory_config", {})
-            
-            # Validate and set memory-specific config values
-            self.memory_threshold = self._validate_config_value(
-                "memory_threshold",
-                memory_config.get("memory_threshold", 0.85),
-                (0.5, 0.95)
-            )
-            
-            self.memory_decay_rate = self._validate_config_value(
-                "memory_decay_rate",
-                memory_config.get("memory_decay_rate", 0.95),
-                (0.8, 1.0)
-            )
-            
-            self.use_scaffold_memory = self._config_manager.get("memory_config.use_scaffold_memory", True)
-            self.use_token_map_memory = self._config_manager.get("memory_config.use_token_map_memory", True)
-            self.scaffold_weight = self._validate_config_value(
-                "scaffold_weight",
-                memory_config.get("scaffold_weight", 1.0),
-                (0.0, 1.0)
-            )
-            
-            # Validate and set dream memory config values
-            self.dream_memory_maxlen = self._validate_config_value(
-                "dream_memory_maxlen",
-                memory_config.get("dream_memory_maxlen", 10),
-                (5, 50),
-                is_int=True
-            )
-            
-            self.dream_memory_decay = self._validate_config_value(
-                "dream_memory_decay",
-                memory_config.get("dream_memory_decay", 0.95),
-                (0.8, 1.0)
-            )
-            
-            self.dream_prune_threshold = self._validate_config_value(
-                "dream_prune_threshold",
-                memory_config.get("dream_prune_threshold", 0.1),
-                (0.0, 0.5)
-            )
-            
-            self.dream_memory_weight = self._validate_config_value(
-                "dream_memory_weight",
-                memory_config.get("dream_memory_weight", 0.1),
-                (0.0, 0.5)
-            )
-            
-            # Update config with validated values
-            memory_config.update({
-                "memory_threshold": self.memory_threshold,
-                "memory_decay_rate": self.memory_decay_rate,
-                "dream_memory_maxlen": self.dream_memory_maxlen,
-                "dream_memory_decay": self.dream_memory_decay,
-                "dream_prune_threshold": self.dream_prune_threshold,
-                "dream_memory_weight": self.dream_memory_weight,
-                "scaffold_weight": self.scaffold_weight
-            })
-            
-            self._config_manager.update_section("memory_config", memory_config)
-            
-            # Log successful initialization
-            self._log_event(
-                "memory_config_initialized",
-                "Memory configuration initialized successfully",
-                level="info"
-            )
-            
-        except Exception as e:
-            self._log_error(
-                f"Failed to initialize memory config: {str(e)}",
-                error_type="config_error",
-                stack_trace=traceback.format_exc(),
-                context="config_initialization"
-            )
-            raise
+        with self._memory_lock:
+            try:
+                # Get memory config section
+                memory_config = self._config_manager.get_section("memory_config", {})
+                
+                # Validate and set memory-specific config values
+                self.memory_threshold = self._validate_config_value(
+                    "memory_threshold",
+                    memory_config.get("memory_threshold", 0.85),
+                    (0.5, 0.95)
+                )
+                
+                self.memory_decay_rate = self._validate_config_value(
+                    "memory_decay_rate",
+                    memory_config.get("memory_decay_rate", 0.95),
+                    (0.8, 1.0)
+                )
+                
+                self.use_scaffold_memory = self._config_manager.get("memory_config.use_scaffold_memory", True)
+                self.use_token_map_memory = self._config_manager.get("memory_config.use_token_map_memory", True)
+                self.scaffold_weight = self._validate_config_value(
+                    "scaffold_weight",
+                    memory_config.get("scaffold_weight", 1.0),
+                    (0.0, 1.0)
+                )
+                
+                # Validate and set dream memory config values
+                self.dream_memory_maxlen = self._validate_config_value(
+                    "dream_memory_maxlen",
+                    memory_config.get("dream_memory_maxlen", 10),
+                    (5, 50),
+                    is_int=True
+                )
+                
+                self.dream_memory_decay = self._validate_config_value(
+                    "dream_memory_decay",
+                    memory_config.get("dream_memory_decay", 0.95),
+                    (0.8, 1.0)
+                )
+                
+                self.dream_prune_threshold = self._validate_config_value(
+                    "dream_prune_threshold",
+                    memory_config.get("dream_prune_threshold", 0.1),
+                    (0.0, 0.5)
+                )
+                
+                self.dream_memory_weight = self._validate_config_value(
+                    "dream_memory_weight",
+                    memory_config.get("dream_memory_weight", 0.1),
+                    (0.0, 0.5)
+                )
+                
+                # Update config with validated values
+                memory_config.update({
+                    "memory_threshold": self.memory_threshold,
+                    "memory_decay_rate": self.memory_decay_rate,
+                    "dream_memory_maxlen": self.dream_memory_maxlen,
+                    "dream_memory_decay": self.dream_memory_decay,
+                    "dream_prune_threshold": self.dream_prune_threshold,
+                    "dream_memory_weight": self.dream_memory_weight,
+                    "scaffold_weight": self.scaffold_weight
+                })
+                
+                self._config_manager.update_section("memory_config", memory_config)
+                
+                # Log successful initialization
+                self._log_event(
+                    "memory_config_initialized",
+                    "Memory configuration initialized successfully",
+                    level="info"
+                )
+                
+            except Exception as e:
+                self._log_error(
+                    f"Failed to initialize memory config: {str(e)}",
+                    error_type="config_error",
+                    stack_trace=traceback.format_exc(),
+                    context="config_initialization"
+                )
+                raise
 
     def _validate_config_value(self, key: str, value: Any, valid_range: Tuple[float, float], is_int: bool = False) -> Union[float, int]:
         """Validate a configuration value against a range."""
@@ -183,16 +184,20 @@ class MemoryManager:
 
     def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log an event with standardized format."""
+        # Prepare data before acquiring any locks
+        additional_info = {
+            "conversation_id": self._conversation_history.conversation_id if self._conversation_history else None,
+            "state_hash": self._state.state_hash() if self._state else None,
+            **kwargs
+        }
+        
+        # Log without holding any locks
         try:
             self._logger.record_event(
                 event_type=event_type,
                 message=message,
                 level=level,
-                additional_info={
-                    "conversation_id": self._conversation_history.conversation_id if self._conversation_history else None,
-                    "state_hash": self._state.state_hash() if self._state else None,
-                    **kwargs
-                }
+                additional_info=additional_info
             )
         except Exception as e:
             print(f"Failed to log event: {str(e)}")

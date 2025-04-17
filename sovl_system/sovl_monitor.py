@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
 from threading import Thread, Event, Lock
 from collections import deque
 from sovl_memory import MemoryManager
@@ -85,7 +85,8 @@ class SystemMonitor:
             try:
                 metrics = self._collect_metrics()
                 self._display_metrics(metrics)
-                self._metrics_history.append(metrics)
+                with self._lock:
+                    self._metrics_history.append(metrics)
             except Exception as e:
                 self.logger.log_error(
                     error_msg=f"Error during monitoring: {str(e)}",
@@ -97,18 +98,24 @@ class SystemMonitor:
 
     def _collect_metrics(self) -> Dict[str, Any]:
         """Collect system metrics from all components."""
+        # Get enabled metrics first
+        enabled_metrics = self.config_manager.get("monitor.enabled_metrics", ["memory", "training", "curiosity"])
+        
+        # Collect metrics without holding the lock
+        metrics = {}
+        if "memory" in enabled_metrics:
+            metrics["memory"] = self.memory_manager.get_memory_stats()
+        if "training" in enabled_metrics:
+            metrics["training"] = self.training_manager.get_training_progress()
+        if "curiosity" in enabled_metrics:
+            metrics["curiosity"] = self.curiosity_manager.get_curiosity_scores()
+        
+        return metrics
+
+    def get_metrics_history(self) -> List[Dict[str, Any]]:
+        """Get a copy of the metrics history in a thread-safe way."""
         with self._lock:
-            metrics = {}
-            enabled_metrics = self.config_manager.get("monitor.enabled_metrics", ["memory", "training", "curiosity"])
-            
-            if "memory" in enabled_metrics:
-                metrics["memory"] = self.memory_manager.get_memory_stats()
-            if "training" in enabled_metrics:
-                metrics["training"] = self.training_manager.get_training_progress()
-            if "curiosity" in enabled_metrics:
-                metrics["curiosity"] = self.curiosity_manager.get_curiosity_scores()
-            
-            return metrics
+            return list(self._metrics_history)  # Return a copy to avoid race conditions
 
     def _display_metrics(self, metrics: Dict[str, Any]) -> None:
         """Display collected metrics in a user-friendly format."""
