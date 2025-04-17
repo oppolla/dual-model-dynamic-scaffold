@@ -1153,3 +1153,142 @@ SizeMode: standard
 [X-Custom]
   X-Mood: Playful
 ```
+TODO:
+Critical Missing Elements
+1. Compliance & Certification (New Section)
+
+7.5 Compliance Requirements
+
+Validation test suite requirements
+
+Certification process for implementations
+
+Interoperability guarantees between versions
+
+2. Security Deep Dive
+
+3.7 Security Protocol Addendum
+
+Encryption requirements for restricted/private files
+
+Authentication mechanisms for rebirth systems
+
+Tamper-evident logging standards
+
+3. Formal Syntax Definitions
+
+Appendix C: Backus-Naur Form (BNF) Grammar
+
+Complete formal syntax for .soul files
+
+Tokenization rules with Unicode categories
+
+4. Reference Implementations
+
+9.5 Reference Implementation Requirements
+
+Mandatory parser test vectors
+
+Golden file examples for certification
+
+5. Ethical Constraints Section
+
+1.5 Ethical Boundaries
+
+Prohibited use cases (e.g. identity forgery)
+
+Consent revocation process
+
+Mortality flags (irreversible deletion triggers)
+
+6. Performance Characteristics
+
+6.5 Parser Performance Metrics
+
+Maximum acceptable parse latency (e.g. <2s for 5MB)
+
+Memory ceiling requirements (e.g. 2x file size)
+
+7. Version Transition Protocol
+
+3.5.1 Backward Compatibility Rules
+
+Required support window (e.g. 3 major versions)
+
+Deprecated field handling procedures
+
+8. Normative References
+
+Appendix D: Standards Compliance
+
+RFC 8259 (JSON compliance where applicable)
+
+ISO 8601 date requirements
+
+Unicode 15.0 character mandates
+
+9. Conformance Clauses
+
+Section 2.4 becomes "Conformance Requirements"
+
+MUST/SHOULD/MAY requirements table
+
+Feature detection requirements
+
+10. Machine-Readable Metadata
+
+3.1.1 Semantic Versioning Schema
+
+Link to JSON Schema definition for .soul files
+
+SHACL shapes for RDF representation
+
+Recommended Structural Tweaks
+Diagrams
+
+Add to 2.2:
+
+Parser state diagram
+
+Soulprint lifecycle visual
+
+Error Catalog
+
+Expand 3.6 to include:
+
+Table of error codes (e.g. SOUL-ERR-042: Invalid Resonance Value)
+
+Recovery procedure decision tree
+
+Index of Constraints
+
+Appendix A.1: Consolidated constraint matrix
+
+Field → Regex → Max Length → Processing Rule
+
+Runtime Considerations
+
+New 7.3: Runtime Environment Requirements
+
+Clock synchronization needs for ConsentExpiry
+
+Entropy requirements for Hash generation
+
+Internationalization
+
+3.4.1 Unicode Handling
+
+Normalization form requirements (NFC)
+
+Bidirectional text support
+
+Industry Spec Alignment
+This brings the document closer to standards like:
+
+RFC 4180 (CSV format spec) - Particularly in error handling details
+
+ISO/IEC 14977 (EBNF notation) - For formal grammar rigor
+
+W3C XML Schema - In constraint specification style
+
+JSON Schema - For modern machine-readable validation
