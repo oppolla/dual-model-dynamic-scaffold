@@ -200,7 +200,47 @@ Run Training:
 
 `Enter command: train 5`
 
+## Common Issues
 
+### Configuration Errors
+
+Symptoms:
+SystemInitializationError or ConfigValidationError on startup.
+Missing metrics in monitoring or unexpected default values.
+Likely Causes:
+Invalid paths in sovl_config.json (e.g., model path typo).
+Missing required fields (e.g., model_type, quantization_mode).
+Invalid values (e.g., quantization_mode="5bit" instead of "4bit").
+How to Fix:
+Validate your sovl_config.json against the schema in sovl_config.py.
+Use the ConfigHandler.validate() method to check for errors:
+```
+  from sovl_config import ConfigHandler
+  handler = ConfigHandler("sovl_config.json")
+  if not handler.validate():
+      print("Configuration errors:", handler.get_validation_errors())
+```
+
+### Model Loading Failures
+
+Symptoms:
+ModelLoadingError or CUDA out-of-memory errors.
+The system hangs during initialization.
+Likely Causes:
+Incorrect model path or incompatible model format.
+Insufficient GPU memory for the specified quantization_mode.
+Missing dependencies (e.g., bitsandbytes for 4-bit quantization).
+How to Fix:
+Verify the model directory contains:
+config.json
+pytorch_model.bin (or .safetensors)
+Tokenizer files.
+Reduce quantization (e.g., switch from 4bit to 8bit in config).
+Test loading the model directly with transformers:
+```
+  from transformers import AutoModelForCausalLM
+  model = AutoModelForCausalLM.from_pretrained("/your/model/path")
+```
 
 
 
