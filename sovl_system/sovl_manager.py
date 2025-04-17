@@ -58,10 +58,22 @@ class ModelManager:
                 str
             )
             
+            self.base_model_path = self._validate_config_value(
+                "base_model_path",
+                core_config.get("base_model_path", None),
+                (str, type(None))
+            )
+            
             self.scaffold_model_name = self._validate_config_value(
                 "scaffold_model_name",
                 core_config.get("scaffold_model_name", "gpt2"),
                 str
+            )
+            
+            self.scaffold_model_path = self._validate_config_value(
+                "scaffold_model_path",
+                core_config.get("scaffold_model_path", None),
+                (str, type(None))
             )
             
             self.quantization_mode = self._validate_config_value(
@@ -105,7 +117,9 @@ class ModelManager:
             # Update config with validated values
             core_config.update({
                 "base_model_name": self.base_model_name,
+                "base_model_path": self.base_model_path,
                 "scaffold_model_name": self.scaffold_model_name,
+                "scaffold_model_path": self.scaffold_model_path,
                 "quantization": self.quantization_mode
             })
             
@@ -239,13 +253,14 @@ class ModelManager:
         """Load the base model with specified quantization."""
         try:
             start_time = time.time()
-            self.base_config = AutoConfig.from_pretrained(self.base_model_name)
+            model_path = self.base_model_path if self.base_model_path else self.base_model_name
+            self.base_config = AutoConfig.from_pretrained(model_path)
             config_load_time = time.time() - start_time
             
             start_time = time.time()
             quantization_config = self._get_quantization_config()
             self.base_model = AutoModelForCausalLM.from_pretrained(
-                self.base_model_name,
+                model_path,
                 config=self.base_config,
                 **quantization_config
             ).to(self._device)
@@ -259,10 +274,10 @@ class ModelManager:
             
             self._log_event(
                 "base_model_loaded",
-                f"Base model '{self.base_model_name}' loaded and frozen",
+                f"Base model loaded from {'local path' if self.base_model_path else 'Hugging Face hub'}: {model_path}",
                 level="info",
                 additional_info={
-                    "model_name": self.base_model_name,
+                    "model_path": model_path,
                     "quantization": self.quantization_mode,
                     "load_times": {
                         "config": config_load_time,
@@ -279,7 +294,7 @@ class ModelManager:
                 error_type="base_model_loading_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
-                    "model_name": self.base_model_name,
+                    "model_path": model_path,
                     "quantization": self.quantization_mode
                 }
             )
@@ -289,13 +304,14 @@ class ModelManager:
         """Load the scaffold model, optionally with LoRA adapters."""
         try:
             start_time = time.time()
-            self.scaffold_config = AutoConfig.from_pretrained(self.scaffold_model_name)
+            model_path = self.scaffold_model_path if self.scaffold_model_path else self.scaffold_model_name
+            self.scaffold_config = AutoConfig.from_pretrained(model_path)
             config_load_time = time.time() - start_time
             
             start_time = time.time()
             quantization_config = self._get_quantization_config()
             scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
-                self.scaffold_model_name,
+                model_path,
                 config=self.scaffold_config,
                 **quantization_config
             )
@@ -320,10 +336,10 @@ class ModelManager:
             
             self._log_event(
                 "scaffold_model_loaded",
-                lora_message,
+                f"{lora_message} from {'local path' if self.scaffold_model_path else 'Hugging Face hub'}: {model_path}",
                 level="info",
                 additional_info={
-                    "model_name": self.scaffold_model_name,
+                    "model_path": model_path,
                     "lora_enabled": self.enable_lora,
                     "load_times": {
                         "config": config_load_time,
@@ -340,7 +356,7 @@ class ModelManager:
                 error_type="scaffold_model_loading_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
-                    "model_name": self.scaffold_model_name,
+                    "model_path": model_path,
                     "lora_enabled": self.enable_lora
                 }
             )
@@ -350,11 +366,13 @@ class ModelManager:
         """Load tokenizers for base and scaffold models."""
         try:
             start_time = time.time()
-            self.base_tokenizer = AutoTokenizer.from_pretrained(self.base_model_name)
+            base_model_path = self.base_model_path if self.base_model_path else self.base_model_name
+            self.base_tokenizer = AutoTokenizer.from_pretrained(base_model_path)
             base_tokenizer_time = time.time() - start_time
             
             start_time = time.time()
-            self.scaffold_tokenizer = AutoTokenizer.from_pretrained(self.scaffold_model_name)
+            scaffold_model_path = self.scaffold_model_path if self.scaffold_model_path else self.scaffold_model_name
+            self.scaffold_tokenizer = AutoTokenizer.from_pretrained(scaffold_model_path)
             scaffold_tokenizer_time = time.time() - start_time
             
             start_time = time.time()
@@ -380,8 +398,8 @@ class ModelManager:
                 "Tokenizers loaded and configured",
                 level="info",
                 additional_info={
-                    "base_model": self.base_model_name,
-                    "scaffold_model": self.scaffold_model_name,
+                    "base_model": base_model_path,
+                    "scaffold_model": scaffold_model_path,
                     "load_times": {
                         "base_tokenizer": base_tokenizer_time,
                         "scaffold_tokenizer": scaffold_tokenizer_time,
@@ -396,8 +414,8 @@ class ModelManager:
                 error_type="tokenizer_loading_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
-                    "base_model": self.base_model_name,
-                    "scaffold_model": self.scaffold_model_name
+                    "base_model": base_model_path,
+                    "scaffold_model": scaffold_model_path
                 }
             )
             raise

@@ -1,7 +1,9 @@
 {
   "core_config": {
     "base_model_name": "gpt2",
+    "base_model_path": null,
     "scaffold_model_name": "gpt2",
+    "scaffold_model_path": null,
     "cross_attn_layers": [],
     "use_dynamic_layers": false,
     "layer_selection_mode": "balanced",
