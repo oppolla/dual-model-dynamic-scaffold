@@ -14,7 +14,6 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager, ConfigSchema, _SchemaValidator
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
 from sovl_error import ErrorHandler
-from sovl_main import confidence_calculator
 from sovl_confidence import ConfidenceCalculator
 from sovl_io import ConfigurationError
 import threading

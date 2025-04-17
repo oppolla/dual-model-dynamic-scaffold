@@ -9,8 +9,6 @@ from typing import Optional, Dict, List, Tuple, Any, Union
 from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import memory_usage, safe_divide
-import threading
-import logging
 from sovl_config import ConfigManager
 import gc
 

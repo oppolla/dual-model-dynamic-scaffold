@@ -8,7 +8,6 @@ import random
 from threading import Lock
 import traceback
 from functools import wraps
-
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 
