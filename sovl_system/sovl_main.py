@@ -1096,25 +1096,129 @@ class SOVLSystem:
             state_tracker: State tracking component
             error_manager: Error management component
         """
-        # Store injected components
-        self.context = context
-        self.config_handler = config_handler
-        self.model_loader = model_loader
-        self.curiosity_engine = curiosity_engine
-        self.memory_monitor = memory_monitor
-        self.state_tracker = state_tracker
-        self.error_manager = error_manager
-        
-        # Log successful initialization
-        self.context.logger.record_event(
-            event_type="system_initialized",
-            message="SOVL system initialized successfully with dependency injection",
-            level="info",
-            additional_info={
-                "config_path": self.config_handler.config_path,
-                "device": self.context.device
-            }
-        )
+        try:
+            # Validate required components
+            self._validate_components(
+                context=context,
+                config_handler=config_handler,
+                model_loader=model_loader,
+                curiosity_engine=curiosity_engine,
+                memory_monitor=memory_monitor,
+                state_tracker=state_tracker,
+                error_manager=error_manager
+            )
+            
+            # Store injected components
+            self.context = context
+            self.config_handler = config_handler
+            self.model_loader = model_loader
+            self.curiosity_engine = curiosity_engine
+            self.memory_monitor = memory_monitor
+            self.state_tracker = state_tracker
+            self.error_manager = error_manager
+            
+            # Initialize thread safety
+            self._lock = Lock()
+            
+            # Initialize component state
+            self._initialize_component_state()
+            
+            # Log successful initialization
+            self.context.logger.record_event(
+                event_type="system_initialized",
+                message="SOVL system initialized successfully with dependency injection",
+                level="info",
+                additional_info={
+                    "config_path": self.config_handler.config_path,
+                    "device": self.context.device,
+                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+                }
+            )
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to initialize SOVL system: {str(e)}",
+                error_type="system_initialization_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "config_path": self.config_handler.config_path if hasattr(self, 'config_handler') else None,
+                    "device": self.context.device if hasattr(self, 'context') else None
+                }
+            )
+            raise
+
+    def _validate_components(self, **components) -> None:
+        """Validate that all required components are properly initialized."""
+        for name, component in components.items():
+            if component is None:
+                raise ValueError(f"Required component {name} is None")
+            if not hasattr(component, '__class__'):
+                raise ValueError(f"Component {name} is not a valid object")
+
+    def _initialize_component_state(self) -> None:
+        """Initialize state for all components."""
+        try:
+            # Initialize state tracker if needed
+            if not self.state_tracker.state:
+                self.state_tracker.initialize_state()
+            
+            # Sync state between components
+            self._sync_component_states()
+            
+            # Validate component states
+            self._validate_component_states()
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to initialize component state: {str(e)}",
+                error_type="component_state_initialization_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+
+    def _sync_component_states(self) -> None:
+        """Synchronize state between components."""
+        try:
+            # Sync state with curiosity engine
+            if hasattr(self.curiosity_engine, 'state_tracker'):
+                self.curiosity_engine.state_tracker = self.state_tracker
+            
+            # Sync state with memory monitor
+            if hasattr(self.memory_monitor, 'state_tracker'):
+                self.memory_monitor.state_tracker = self.state_tracker
+            
+            # Sync state with model loader
+            if hasattr(self.model_loader, 'state_tracker'):
+                self.model_loader.state_tracker = self.state_tracker
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to sync component states: {str(e)}",
+                error_type="component_state_sync_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+
+    def _validate_component_states(self) -> None:
+        """Validate that all components have consistent state."""
+        try:
+            # Validate state tracker
+            if not self.state_tracker.state:
+                raise ValueError("State tracker state not initialized")
+            
+            # Validate state hashes
+            state_hash = self.state_tracker.state.state_hash
+            for component in [self.curiosity_engine, self.memory_monitor, self.model_loader]:
+                if hasattr(component, 'state_tracker') and component.state_tracker.state.state_hash != state_hash:
+                    raise ValueError(f"State hash mismatch in {component.__class__.__name__}")
+            
+        except Exception as e:
+            self.context.logger.log_error(
+                error_msg=f"Failed to validate component states: {str(e)}",
+                error_type="component_state_validation_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
 
     @classmethod
     def create_from_config(cls, config_path: str, device: str = "cuda") -> 'SOVLSystem':
@@ -1128,50 +1232,101 @@ class SOVLSystem:
         Returns:
             SOVLSystem: A new instance initialized with components created from config
         """
-        # Initialize shared context
-        context = SystemContext(config_path, device)
-        
-        # Initialize state tracker and error manager first
-        state_tracker = StateTracker()
-        error_manager = ErrorManager()
-        
-        # Initialize components with explicit dependencies
-        config_handler = ConfigHandler(
-            config_path=config_path,
-            logger=context.logger,
-            state_tracker=state_tracker
-        )
-        
-        model_loader = ModelLoader(
-            config_handler=config_handler,
-            logger=context.logger,
-            device=context.device
-        )
-        
-        curiosity_engine = CuriosityEngine(
-            config_handler=config_handler,
-            model_loader=model_loader,
-            state_tracker=state_tracker,
-            error_manager=error_manager,
-            logger=context.logger,
-            device=context.device
-        )
-        
-        memory_monitor = MemoryMonitor(
-            logger=context.logger,
-            device=context.device
-        )
-        
-        # Create and return new instance with all components
-        return cls(
-            context=context,
-            config_handler=config_handler,
-            model_loader=model_loader,
-            curiosity_engine=curiosity_engine,
-            memory_monitor=memory_monitor,
-            state_tracker=state_tracker,
-            error_manager=error_manager
-        )
+        try:
+            # Initialize shared context
+            context = SystemContext(config_path, device)
+            
+            # Initialize state tracker and error manager first
+            state_tracker = StateTracker()
+            error_manager = ErrorManager()
+            
+            # Initialize components with explicit dependencies
+            config_handler = ConfigHandler(
+                config_path=config_path,
+                logger=context.logger,
+                state_tracker=state_tracker
+            )
+            
+            model_loader = ModelLoader(
+                config_handler=config_handler,
+                logger=context.logger,
+                device=context.device
+            )
+            
+            curiosity_engine = CuriosityEngine(
+                config_handler=config_handler,
+                model_loader=model_loader,
+                state_tracker=state_tracker,
+                error_manager=error_manager,
+                logger=context.logger,
+                device=context.device
+            )
+            
+            memory_monitor = MemoryMonitor(
+                logger=context.logger,
+                device=context.device
+            )
+            
+            # Create and return new instance with all components
+            return cls(
+                context=context,
+                config_handler=config_handler,
+                model_loader=model_loader,
+                curiosity_engine=curiosity_engine,
+                memory_monitor=memory_monitor,
+                state_tracker=state_tracker,
+                error_manager=error_manager
+            )
+            
+        except Exception as e:
+            if 'context' in locals() and hasattr(context, 'logger'):
+                context.logger.log_error(
+                    error_msg=f"Failed to create SOVL system from config: {str(e)}",
+                    error_type="system_creation_error",
+                    stack_trace=traceback.format_exc(),
+                    additional_info={
+                        "config_path": config_path,
+                        "device": device
+                    }
+                )
+            raise
+
+    @synchronized("_lock")
+    def toggle_memory(self, enable: bool) -> bool:
+        """Enable or disable memory management."""
+        try:
+            if not hasattr(self.memory_monitor, 'memory_manager'):
+                self.context.logger.record_event(
+                    event_type="memory_error",
+                    message="Memory manager not initialized",
+                    level="error"
+                )
+                return False
+                
+            self.memory_monitor.memory_manager.set_enabled(enable)
+            self.context.logger.record_event(
+                event_type="memory_toggle",
+                message=f"Memory management {'enabled' if enable else 'disabled'}",
+                level="info",
+                additional_info={
+                    "enabled": enable,
+                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+                }
+            )
+            return True
+            
+        except Exception as e:
+            self.error_manager.handle_memory_error(e, 0)  # 0 for memory size since this is a toggle operation
+            self.context.logger.log_error(
+                error_msg=f"Failed to toggle memory management: {str(e)}",
+                error_type="memory_toggle_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "enabled": enable,
+                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+                }
+            )
+            return False
 
     def generate_curiosity_question(self) -> Optional[str]:
         """Generate a curiosity-driven question."""
@@ -1205,40 +1360,6 @@ class SOVLSystem:
                 }
             )
             return None
-
-    def toggle_memory(self, enable: bool) -> bool:
-        """Enable or disable memory management."""
-        try:
-            if not hasattr(self.memory_monitor, 'memory_manager'):
-                self.logger.record_event(
-                    event_type="memory_error",
-                    message="Memory manager not initialized",
-                    level="error"
-                )
-                return False
-                
-            self.memory_monitor.memory_manager.set_enabled(enable)
-            self.logger.record_event(
-                event_type="memory_toggle",
-                message=f"Memory management {'enabled' if enable else 'disabled'}",
-                level="info",
-                additional_info={"enabled": enable}
-            )
-            return True
-            
-        except Exception as e:
-            self.error_manager.handle_memory_error(e, 0)  # 0 for memory size since this is a toggle operation
-            self.logger.record_event(
-                event_type="memory_toggle_error",
-                message="Failed to toggle memory management",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "enabled": enable,
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            return False
 
     def dream(self) -> bool:
         """Run a dream cycle to process and consolidate memories."""
