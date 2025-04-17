@@ -3,7 +3,6 @@ import os
 import sys
 import torch
 import traceback
-import logging
 import json
 import signal
 import atexit
@@ -18,6 +17,7 @@ from sovl_io import load_training_data, InsufficientDataError
 from sovl_monitor import SystemMonitor
 from sovl_cli import CommandHandler, run_cli
 from sovl_utils import safe_compare
+from sovl_logger import Logger, LoggerConfig
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -37,19 +37,22 @@ COMMAND_CATEGORIES = {
 }
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(f'sovl_run_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-    ]
+logger_config = LoggerConfig(
+    log_file=f'sovl_run_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log',
+    max_size_mb=10,
+    compress_old=True,
+    max_in_memory_logs=1000,
+    rotation_count=5
 )
-logger = logging.getLogger(__name__)
+logger = Logger(logger_config)
 
 def signal_handler(signum, frame):
     """Handle system signals for graceful shutdown."""
-    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    logger.log_event(
+        event_type="signal_received",
+        message=f"Received signal {signum}, initiating graceful shutdown...",
+        level="info"
+    )
     cleanup_resources()
     sys.exit(0)
 
@@ -67,26 +70,41 @@ def validate_config_file(config_path: str) -> bool:
         required_sections = ['model', 'state', 'error_config', 'monitor']
         for section in required_sections:
             if section not in config:
-                logger.error(f"Missing required configuration section: {section}")
+                logger.log_error(
+                    error_msg=f"Missing required configuration section: {section}",
+                    error_type="config_validation_error"
+                )
                 return False
                 
         # Validate model configuration
         if 'model_path' not in config['model']:
-            logger.error("Missing required model configuration: model_path")
+            logger.log_error(
+                error_msg="Missing required model configuration: model_path",
+                error_type="config_validation_error"
+            )
             return False
             
         # Validate monitor configuration
         monitor_config = config.get('monitor', {})
         if not isinstance(monitor_config.get('update_interval', 1.0), (int, float)):
-            logger.error("Invalid monitor.update_interval in configuration")
+            logger.log_error(
+                error_msg="Invalid monitor.update_interval in configuration",
+                error_type="config_validation_error"
+            )
             return False
             
         return True
     except json.JSONDecodeError:
-        logger.error(f"Invalid JSON format in configuration file: {config_path}")
+        logger.log_error(
+            error_msg=f"Invalid JSON format in configuration file: {config_path}",
+            error_type="config_validation_error"
+        )
         return False
     except Exception as e:
-        logger.error(f"Error validating configuration file: {str(e)}")
+        logger.log_error(
+            error_msg=f"Error validating configuration file: {str(e)}",
+            error_type="config_validation_error"
+        )
         return False
 
 def initialize_context(args) -> SystemContext:
@@ -94,21 +112,38 @@ def initialize_context(args) -> SystemContext:
     try:
         # Validate configuration file
         if not os.path.exists(args.config):
-            logger.error(f"Configuration file not found: {args.config}")
+            logger.log_error(
+                error_msg=f"Configuration file not found: {args.config}",
+                error_type="config_validation_error"
+            )
             sys.exit(1)
             
         if not validate_config_file(args.config):
-            logger.error("Configuration validation failed")
+            logger.log_error(
+                error_msg="Configuration validation failed",
+                error_type="config_validation_error"
+            )
             sys.exit(1)
             
         # Validate device
         if args.device == "cuda":
             if not torch.cuda.is_available():
-                logger.error("CUDA is not available. Please use --device cpu")
+                logger.log_error(
+                    error_msg="CUDA is not available. Please use --device cpu",
+                    error_type="device_validation_error"
+                )
                 sys.exit(1)
-            logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+            logger.log_event(
+                event_type="device_selected",
+                message=f"Using CUDA device: {torch.cuda.get_device_name(0)}",
+                level="info"
+            )
         else:
-            logger.info("Using CPU device")
+            logger.log_event(
+                event_type="device_selected",
+                message="Using CPU device",
+                level="info"
+            )
             
         # Create output directory if it doesn't exist
         output_dir = Path("output")
@@ -116,34 +151,61 @@ def initialize_context(args) -> SystemContext:
         
         return SystemContext(config_path=args.config, device=args.device)
     except Exception as e:
-        logger.error(f"Failed to initialize context: {str(e)}")
+        logger.log_error(
+            error_msg=f"Failed to initialize context: {str(e)}",
+            error_type="context_initialization_error"
+        )
         sys.exit(1)
 
 def initialize_components(context) -> tuple:
     """Initialize core SOVL components with enhanced error handling and progress tracking."""
     try:
         # Initialize model loader
-        logger.info("Initializing model loader...")
+        logger.log_event(
+            event_type="component_initialization",
+            message="Initializing model loader...",
+            level="info"
+        )
         model_loader = ModelLoader(context)
         
         # Load model
-        logger.info("Loading model...")
+        logger.log_event(
+            event_type="component_initialization",
+            message="Loading model...",
+            level="info"
+        )
         model = model_loader.load_model()
         
         # Initialize state tracker
-        logger.info("Initializing state tracker...")
+        logger.log_event(
+            event_type="component_initialization",
+            message="Initializing state tracker...",
+            level="info"
+        )
         state_tracker = StateTracker(context)
         
         # Initialize error manager
-        logger.info("Initializing error manager...")
+        logger.log_event(
+            event_type="component_initialization",
+            message="Initializing error manager...",
+            level="info"
+        )
         error_manager = ErrorManager(context, state_tracker)
         
         # Initialize memory monitor
-        logger.info("Initializing memory monitor...")
+        logger.log_event(
+            event_type="component_initialization",
+            message="Initializing memory monitor...",
+            level="info"
+        )
         memory_monitor = MemoryMonitor(context)
         
         # Initialize curiosity engine
-        logger.info("Initializing curiosity engine...")
+        logger.log_event(
+            event_type="component_initialization",
+            message="Initializing curiosity engine...",
+            level="info"
+        )
         curiosity_engine = CuriosityEngine(
             config_handler=context.config_handler,
             model_loader=model_loader,
@@ -153,37 +215,71 @@ def initialize_components(context) -> tuple:
             device=context.device
         )
         
-        logger.info("All components initialized successfully")
+        logger.log_event(
+            event_type="component_initialization",
+            message="All components initialized successfully",
+            level="info"
+        )
         return model_loader, model, state_tracker, error_manager, memory_monitor, curiosity_engine
     except Exception as e:
-        logger.error(f"Failed to initialize components: {str(e)}")
+        logger.log_error(
+            error_msg=f"Failed to initialize components: {str(e)}",
+            error_type="component_initialization_error"
+        )
         raise
 
 def cleanup_resources(context=None, model=None):
     """Release system resources with enhanced logging and error handling."""
     try:
-        logger.info("Starting cleanup...")
+        logger.log_event(
+            event_type="cleanup",
+            message="Starting cleanup...",
+            level="info"
+        )
         
         if model is not None:
-            logger.info("Cleaning up model...")
+            logger.log_event(
+                event_type="cleanup",
+                message="Cleaning up model...",
+                level="info"
+            )
             del model
             
         if torch.cuda.is_available():
-            logger.info("Clearing CUDA cache...")
+            logger.log_event(
+                event_type="cleanup",
+                message="Clearing CUDA cache...",
+                level="info"
+            )
             torch.cuda.empty_cache()
             
         if context is not None:
-            logger.info("Cleaning up context...")
+            logger.log_event(
+                event_type="cleanup",
+                message="Cleaning up context...",
+                level="info"
+            )
             context.cleanup()
             
-        logger.info("Cleanup completed successfully")
+        logger.log_event(
+            event_type="cleanup",
+            message="Cleanup completed successfully",
+            level="info"
+        )
     except Exception as e:
-        logger.error(f"Error during cleanup: {str(e)}")
+        logger.log_error(
+            error_msg=f"Error during cleanup: {str(e)}",
+            error_type="cleanup_error"
+        )
 
 def run_system(args, context, model, model_loader, state_tracker, error_manager, memory_monitor, curiosity_engine):
     """Run the SOVL system with enhanced monitoring and error handling."""
     try:
-        logger.info("Initializing SOVL system...")
+        logger.log_event(
+            event_type="system_start",
+            message="Initializing SOVL system...",
+            level="info"
+        )
         sovl_system = SOVLSystem(
             context=context,
             config_handler=context.config_handler,
@@ -194,11 +290,19 @@ def run_system(args, context, model, model_loader, state_tracker, error_manager,
             error_manager=error_manager
         )
         
-        logger.info("Enabling memory management...")
+        logger.log_event(
+            event_type="system_start",
+            message="Enabling memory management...",
+            level="info"
+        )
         sovl_system.toggle_memory(True)
 
         # Initialize system monitor
-        logger.info("Initializing system monitor...")
+        logger.log_event(
+            event_type="system_start",
+            message="Initializing system monitor...",
+            level="info"
+        )
         system_monitor = SystemMonitor(
             memory_manager=memory_monitor,
             training_manager=curiosity_engine.training_manager,
@@ -209,7 +313,11 @@ def run_system(args, context, model, model_loader, state_tracker, error_manager,
         system_monitor.start_monitoring()
 
         # Start CLI in a separate thread
-        logger.info("Starting interactive CLI...")
+        logger.log_event(
+            event_type="system_start",
+            message="Starting interactive CLI...",
+            level="info"
+        )
         cli_thread = threading.Thread(
             target=run_cli,
             args=(sovl_system,),
@@ -218,49 +326,102 @@ def run_system(args, context, model, model_loader, state_tracker, error_manager,
         cli_thread.start()
 
         # Pre-flight checks
-        logger.info("Running pre-flight checks...")
+        logger.log_event(
+            event_type="system_start",
+            message="Running pre-flight checks...",
+            level="info"
+        )
         model_size = sum(p.numel() for p in model.parameters()) * 4 / 1024**2
-        logger.info(f"Model size: {model_size:.2f} MB")
+        logger.log_event(
+            event_type="system_start",
+            message=f"Model size: {model_size:.2f} MB",
+            level="info"
+        )
         
         if not memory_monitor.check_memory_health(model_size):
-            logger.error("Insufficient memory to run the system")
+            logger.log_error(
+                error_msg="Insufficient memory to run the system",
+                error_type="memory_error"
+            )
             sys.exit(1)
 
         if args.test:
-            logger.info("Running in test mode...")
+            logger.log_event(
+                event_type="system_start",
+                message="Running in test mode...",
+                level="info"
+            )
             if not context.config_handler.validate():
-                logger.error("Configuration validation failed")
+                logger.log_error(
+                    error_msg="Configuration validation failed",
+                    error_type="config_validation_error"
+                )
                 sys.exit(1)
-            logger.info("Test mode completed successfully")
+            logger.log_event(
+                event_type="system_start",
+                message="Test mode completed successfully",
+                level="info"
+            )
             return
 
         # Run the selected mode
         if args.mode == "train":
-            logger.info("Starting training mode...")
+            logger.log_event(
+                event_type="system_start",
+                message="Starting training mode...",
+                level="info"
+            )
             train_data = load_training_data(args.train_data) if args.train_data else None
             valid_data = load_training_data(args.valid_data) if args.valid_data else None
             
-            logger.info(f"Training parameters: epochs={args.epochs}, batch_size={args.batch_size}")
+            logger.log_event(
+                event_type="system_start",
+                message=f"Training parameters: epochs={args.epochs}, batch_size={args.batch_size}",
+                level="info"
+            )
             results = sovl_system.curiosity_engine.run_training_cycle(
                 train_data=train_data,
                 valid_data=valid_data,
                 epochs=args.epochs,
                 batch_size=args.batch_size
             )
-            logger.info(f"Training completed. Results: {results}")
+            logger.log_event(
+                event_type="system_start",
+                message=f"Training completed. Results: {results}",
+                level="info"
+            )
             
         elif args.mode == "generate":
-            logger.info("Starting generation mode...")
+            logger.log_event(
+                event_type="system_start",
+                message="Starting generation mode...",
+                level="info"
+            )
             question = sovl_system.generate_curiosity_question()
-            logger.info(f"Generated question: {question}")
+            logger.log_event(
+                event_type="system_start",
+                message=f"Generated question: {question}",
+                level="info"
+            )
             
         elif args.mode == "dream":
-            logger.info("Starting dream mode...")
+            logger.log_event(
+                event_type="system_start",
+                message="Starting dream mode...",
+                level="info"
+            )
             success = sovl_system.dream()
-            logger.info(f"Dream cycle {'succeeded' if success else 'failed'}")
+            logger.log_event(
+                event_type="system_start",
+                message=f"Dream cycle {'succeeded' if success else 'failed'}",
+                level="info"
+            )
             
     except Exception as e:
-        logger.error(f"Error during system execution: {str(e)}")
+        logger.log_error(
+            error_msg=f"Error during system execution: {str(e)}",
+            error_type="system_execution_error"
+        )
         raise
     finally:
         # Stop monitoring when done
@@ -578,7 +739,10 @@ def execute_command(sovl_system: SOVLSystem, command: str, args: List[str] = Non
         return False
         
     except Exception as e:
-        logger.error(f"Error executing command {command}: {str(e)}")
+        logger.log_error(
+            error_msg=f"Error executing command {command}: {str(e)}",
+            error_type="command_execution_error"
+        )
         print(f"Error: {str(e)}")
         return False
 
@@ -667,7 +831,10 @@ def main():
         run_system(args, context, *components)
         logger.info("SOVL system completed successfully")
     except Exception as e:
-        logger.error(f"Failed to run SOVL system: {str(e)}")
+        logger.log_error(
+            error_msg=f"Failed to run SOVL system: {str(e)}",
+            error_type="main_execution_error"
+        )
         if hasattr(context, 'logger'):
             context.logger.log_error(
                 error_msg=f"Failed to run SOVL system: {str(e)}",
