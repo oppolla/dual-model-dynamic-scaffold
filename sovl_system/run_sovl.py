@@ -157,6 +157,45 @@ class SOVLRunner:
             )
             return False
     
+    def _on_config_change(self) -> None:
+        """Handle configuration changes and update system components."""
+        try:
+            self.logger.log_event(
+                event_type="config_change",
+                message="Configuration changed, updating system...",
+                level="info"
+            )
+            
+            # Update optimizer settings if changed
+            if self.optimizer:
+                optimizer_config = self.context.config_manager.get("training.optimizer", {})
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = optimizer_config.get('learning_rate', param_group['lr'])
+                    param_group['weight_decay'] = optimizer_config.get('weight_decay', param_group['weight_decay'])
+            
+            # Update scheduler settings if changed
+            if self.scheduler:
+                scheduler_config = self.context.config_manager.get("training.scheduler", {})
+                if hasattr(self.scheduler, 'warmup_steps'):
+                    self.scheduler.warmup_steps = scheduler_config.get('num_warmup_steps', self.scheduler.warmup_steps)
+            
+            # Update checkpoint interval
+            self.checkpoint_interval = self.context.config_manager.get("training.checkpoint_interval", CHECKPOINT_INTERVAL)
+            
+            # Update max patience for early stopping
+            self.max_patience = self.context.config_manager.get("training.max_patience", 3)
+            
+            self.logger.log_event(
+                event_type="config_change",
+                message="Configuration update completed",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Error updating configuration: {str(e)}",
+                error_type="config_update_error"
+            )
+
     def _initialize_context(self, args: argparse.Namespace) -> SystemContext:
         """Initialize system context with validation and error handling."""
         if not os.path.exists(args.config):
@@ -166,14 +205,20 @@ class SOVLRunner:
             )
             sys.exit(1)
             
-        if not self._validate_config_file(args.config, self.logger):
+        config_manager = ConfigManager(args.config, self.logger)
+        
+        # Subscribe to configuration changes
+        config_manager.subscribe(self._on_config_change)
+        
+        # Validate configuration using ConfigManager
+        try:
+            config_manager.validate_or_raise()
+        except ValueError as e:
             self.logger.log_error(
-                error_msg="Configuration validation failed",
+                error_msg=f"Configuration validation failed: {str(e)}",
                 error_type="config_validation_error"
             )
             sys.exit(1)
-            
-        config_manager = ConfigManager(args.config, self.logger)
         
         if args.device == "cuda" and not torch.cuda.is_available():
             self.logger.log_error(
@@ -266,13 +311,13 @@ class SOVLRunner:
                         context=context,
                         state_tracker=components[2],
                         config_manager=context.config_manager,
-                        error_cooldown=1.0,
-                        max_recent_errors=100
+                        error_cooldown=context.config_manager.get("error_config.error_cooldown", 1.0),
+                        max_recent_errors=context.config_manager.get("error_config.max_recent_errors", 100)
                     )
                     self.error_manager = component
                 elif name == "curiosity engine":
                     component = component_class(
-                        config_handler=context.config_handler,
+                        config_handler=context.config_manager,
                         model_loader=components[0],
                         state_tracker=components[2],
                         error_manager=self.error_manager,
@@ -361,6 +406,10 @@ class SOVLRunner:
                 message="Starting cleanup...",
                 level="info"
             )
+            
+            # Unsubscribe from configuration changes
+            if self.context and self.context.config_manager:
+                self.context.config_manager.unsubscribe(self._on_config_change)
             
             # Use ModelManager cleanup
             if self.model_manager:
