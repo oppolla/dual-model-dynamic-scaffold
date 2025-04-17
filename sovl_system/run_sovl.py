@@ -28,6 +28,7 @@ from sovl_conductor import SOVLOrchestrator
 from sovl_memory import MemoryManager
 from sovl_state import StateManager, SOVLState
 from sovl_error import ErrorManager, ErrorContext
+from sovl_manager import ModelManager
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -56,10 +57,10 @@ class SOVLRunner:
         self.components = None
         self.orchestrator = None
         self.state_manager = None
-        self.error_manager = None  # Add error manager
-        self.tokenizer = None  # Add tokenizer
-        self.optimizer = None  # Add optimizer
-        self.scheduler = None  # Add scheduler
+        self.error_manager = None
+        self.model_manager = None
+        self.optimizer = None
+        self.scheduler = None
         self.last_checkpoint_time = None
         self.checkpoint_interval = CHECKPOINT_INTERVAL
         self.metrics_history = []
@@ -195,6 +196,13 @@ class SOVLRunner:
             (MemoryManager, "memory manager")
         ]
         
+        # Initialize ModelManager first
+        self.model_manager = ModelManager(
+            config_manager=context.config_manager,
+            logger=self.logger,
+            device=context.device
+        )
+        
         for component_class, name in component_classes:
             if component_class is None:  # Handle model loading
                 self.logger.log_event(
@@ -202,29 +210,14 @@ class SOVLRunner:
                     message="Loading model...",
                     level="info"
                 )
-                model = components[0].load_model()
-                components.append(model)
+                # Use ModelManager to load models
+                self.model_manager.load_models()
+                self.model = self.model_manager.get_base_model()
+                components.append(self.model)
                 
-                # Initialize tokenizer after model is loaded
-                try:
-                    from transformers import AutoTokenizer
-                    model_name = context.config_manager.get("model.name", "gpt2")
-                    self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-                    self.logger.log_event(
-                        event_type="tokenizer_initialization",
-                        message=f"Tokenizer initialized from {model_name}",
-                        level="info"
-                    )
-                    
-                    # Initialize optimizer and scheduler
-                    self._initialize_optimizer(model)
-                    
-                except Exception as e:
-                    self.logger.log_error(
-                        error_msg=f"Failed to initialize model components: {str(e)}",
-                        error_type="model_initialization_error"
-                    )
-                    raise
+                # Initialize optimizer and scheduler
+                self._initialize_optimizer(self.model)
+                
             else:
                 self.logger.log_event(
                     event_type="component_initialization",
@@ -332,23 +325,10 @@ class SOVLRunner:
                 level="info"
             )
             
-            if self.model:
-                self.logger.log_event(
-                    event_type="cleanup",
-                    message="Cleaning up model...",
-                    level="info"
-                )
-                del self.model
-                self.model = None
-                
-            if torch.cuda.is_available():
-                self.logger.log_event(
-                    event_type="cleanup",
-                    message="Clearing CUDA cache...",
-                    level="info"
-                )
-                torch.cuda.empty_cache()
-                
+            # Use ModelManager cleanup
+            if self.model_manager:
+                self.model_manager.cleanup()
+            
             if self.context:
                 self.logger.log_event(
                     event_type="cleanup",
@@ -408,15 +388,8 @@ class SOVLRunner:
             print(f"Error: {str(e)}")
             return False
     
-    def save_checkpoint(self, force: bool = False) -> bool:
-        """Save system state checkpoint.
-        
-        Args:
-            force: If True, save checkpoint regardless of interval
-            
-        Returns:
-            bool: True if checkpoint was saved, False otherwise
-        """
+    def save_checkpoint(self, force: bool = False, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
+        """Save system state checkpoint."""
         current_time = time.time()
         if not force and self.last_checkpoint_time is not None:
             if current_time - self.last_checkpoint_time < self.checkpoint_interval:
@@ -430,28 +403,36 @@ class SOVLRunner:
             )
             
             # Validate component serialization before saving
-            for idx, component in enumerate(self.components):
-                if not self._validate_component_serialization(component, f"component_{idx}"):
+            for name, component in self.components.items():
+                if not self._validate_component_serialization(component, name):
                     self.logger.log_error(
-                        error_msg=f"Cannot save checkpoint: Component at index {idx} serialization validation failed",
+                        error_msg=f"Cannot save checkpoint: Component {name} serialization validation failed",
                         error_type="checkpoint_error"
                     )
                     return False
             
-            # Save model state
+            # Save model state using ModelManager
             model_path = None
-            if self.model is not None:
-                model_path = Path("checkpoints") / f"model_{int(current_time)}.pt"
-                model_path.parent.mkdir(exist_ok=True)
-                torch.save(self.model.state_dict(), model_path)
+            if self.model_manager:
+                model_path = self.model_manager.save_model_state(current_time)
                 
             # Save system state
             state_path = Path("checkpoints") / f"state_{int(current_time)}.json"
             state_data = {
                 "timestamp": current_time,
-                "model_path": str(model_path) if self.model is not None else None,
-                "components": {name: component.to_dict() for name, component in self.components.items()}
+                "model_path": str(model_path) if model_path else None,
+                "components": {
+                    name: component.to_dict() 
+                    for name, component in self.components.items()
+                    if self._validate_component_serialization(component, name)
+                }
             }
+            
+            # Save optimizer state if provided
+            if optimizer is not None:
+                optimizer_path = Path("checkpoints") / f"optimizer_{int(current_time)}.pt"
+                torch.save(optimizer.state_dict(), optimizer_path)
+                state_data["optimizer_path"] = str(optimizer_path)
             
             with open(state_path, 'w') as f:
                 json.dump(state_data, f)
@@ -471,15 +452,8 @@ class SOVLRunner:
             )
             return False
             
-    def load_checkpoint(self, checkpoint_path: str) -> bool:
-        """Load system state from checkpoint.
-        
-        Args:
-            checkpoint_path: Path to checkpoint file
-            
-        Returns:
-            bool: True if checkpoint was loaded successfully, False otherwise
-        """
+    def load_checkpoint(self, checkpoint_path: str, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
+        """Load system state from checkpoint."""
         try:
             self.logger.log_event(
                 event_type="checkpoint",
@@ -490,16 +464,36 @@ class SOVLRunner:
             with open(checkpoint_path, 'r') as f:
                 state_data = json.load(f)
                 
-            # Load model state
-            if state_data["model_path"] is not None:
-                model_path = Path(state_data["model_path"])
-                if model_path.exists():
-                    self.model.load_state_dict(torch.load(model_path))
+            # Load model state using ModelManager
+            if self.model_manager and state_data["model_path"] is not None:
+                self.model_manager.load_model_state(state_data["model_path"])
+                self.model = self.model_manager.get_base_model()
+                    
+            # Load optimizer state if provided
+            if optimizer is not None and "optimizer_path" in state_data:
+                optimizer_path = Path(state_data["optimizer_path"])
+                if optimizer_path.exists():
+                    optimizer.load_state_dict(torch.load(optimizer_path))
                     
             # Load component states
             for name, component_data in state_data["components"].items():
                 if name in self.components:
-                    self.components[name].from_dict(component_data)
+                    component = self.components[name]
+                    if self._validate_component_serialization(component, name):
+                        try:
+                            component.from_dict(component_data)
+                        except Exception as e:
+                            self.logger.log_error(
+                                error_msg=f"Failed to load state for component {name}: {str(e)}",
+                                error_type="checkpoint_error"
+                            )
+                            return False
+                    else:
+                        self.logger.log_error(
+                            error_msg=f"Cannot load state for component {name}: Serialization validation failed",
+                            error_type="checkpoint_error"
+                        )
+                        return False
                     
             self.last_checkpoint_time = state_data["timestamp"]
             self.logger.log_event(
