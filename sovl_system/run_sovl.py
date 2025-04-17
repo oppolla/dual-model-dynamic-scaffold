@@ -16,8 +16,11 @@ from sovl_main import SystemContext, SOVLSystem, ModelLoader, StateTracker, Erro
 from sovl_io import load_training_data, InsufficientDataError
 from sovl_monitor import SystemMonitor
 from sovl_cli import CommandHandler, run_cli
-from sovl_utils import safe_compare
+from sovl_utils import safe_compare, memory_usage, log_memory_usage, dynamic_batch_size, detect_repetitions, adjust_temperature, synchronized, validate_components, sync_component_states, validate_component_states, initialize_component_state
 from sovl_logger import Logger, LoggerConfig
+from sovl_config import ConfigManager
+from sovl_conductor import SOVLOrchestrator
+from sovl_memory import MemoryManager
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -125,6 +128,9 @@ def initialize_context(args) -> SystemContext:
             )
             sys.exit(1)
             
+        # Initialize ConfigManager
+        config_manager = ConfigManager(args.config, logger)
+        
         # Validate device
         if args.device == "cuda":
             if not torch.cuda.is_available():
@@ -149,7 +155,7 @@ def initialize_context(args) -> SystemContext:
         output_dir = Path("output")
         output_dir.mkdir(exist_ok=True)
         
-        return SystemContext(config_path=args.config, device=args.device)
+        return SystemContext(config_path=args.config, device=args.device, config_manager=config_manager)
     except Exception as e:
         logger.log_error(
             error_msg=f"Failed to initialize context: {str(e)}",
@@ -215,12 +221,34 @@ def initialize_components(context) -> tuple:
             device=context.device
         )
         
+        # Initialize MemoryManager
+        logger.log_event(
+            event_type="component_initialization",
+            message="Initializing memory manager...",
+            level="info"
+        )
+        memory_manager = MemoryManager(context.config_manager, context.device, context.logger)
+        
+        # Validate components
+        validate_components(
+            model_loader=model_loader,
+            model=model,
+            state_tracker=state_tracker,
+            error_manager=error_manager,
+            memory_monitor=memory_monitor,
+            curiosity_engine=curiosity_engine,
+            memory_manager=memory_manager
+        )
+        
+        # Initialize component states
+        initialize_component_state(state_tracker, [model_loader, model, state_tracker, error_manager, memory_monitor, curiosity_engine, memory_manager])
+        
         logger.log_event(
             event_type="component_initialization",
             message="All components initialized successfully",
             level="info"
         )
-        return model_loader, model, state_tracker, error_manager, memory_monitor, curiosity_engine
+        return model_loader, model, state_tracker, error_manager, memory_monitor, curiosity_engine, memory_manager
     except Exception as e:
         logger.log_error(
             error_msg=f"Failed to initialize components: {str(e)}",
@@ -272,7 +300,7 @@ def cleanup_resources(context=None, model=None):
             error_type="cleanup_error"
         )
 
-def run_system(args, context, model, model_loader, state_tracker, error_manager, memory_monitor, curiosity_engine):
+def run_system(args, context, model, model_loader, state_tracker, error_manager, memory_monitor, curiosity_engine, memory_manager):
     """Run the SOVL system with enhanced monitoring and error handling."""
     try:
         logger.log_event(
@@ -280,143 +308,13 @@ def run_system(args, context, model, model_loader, state_tracker, error_manager,
             message="Initializing SOVL system...",
             level="info"
         )
-        sovl_system = SOVLSystem(
-            context=context,
-            config_handler=context.config_handler,
-            model_loader=model_loader,
-            curiosity_engine=curiosity_engine,
-            memory_monitor=memory_monitor,
-            state_tracker=state_tracker,
-            error_manager=error_manager
-        )
+        # Initialize SOVLOrchestrator
+        orchestrator = SOVLOrchestrator(config_path=args.config, log_file=logger_config.log_file)
+        orchestrator.initialize_system()
         
-        logger.log_event(
-            event_type="system_start",
-            message="Enabling memory management...",
-            level="info"
-        )
-        sovl_system.toggle_memory(True)
-
-        # Initialize system monitor
-        logger.log_event(
-            event_type="system_start",
-            message="Initializing system monitor...",
-            level="info"
-        )
-        system_monitor = SystemMonitor(
-            memory_manager=memory_monitor,
-            training_manager=curiosity_engine.training_manager,
-            curiosity_manager=curiosity_engine.curiosity_manager,
-            config_manager=context.config_handler,
-            logger=context.logger
-        )
-        system_monitor.start_monitoring()
-
-        # Start CLI in a separate thread
-        logger.log_event(
-            event_type="system_start",
-            message="Starting interactive CLI...",
-            level="info"
-        )
-        cli_thread = threading.Thread(
-            target=run_cli,
-            args=(sovl_system,),
-            daemon=True  # Terminates when the main thread exits
-        )
-        cli_thread.start()
-
-        # Pre-flight checks
-        logger.log_event(
-            event_type="system_start",
-            message="Running pre-flight checks...",
-            level="info"
-        )
-        model_size = sum(p.numel() for p in model.parameters()) * 4 / 1024**2
-        logger.log_event(
-            event_type="system_start",
-            message=f"Model size: {model_size:.2f} MB",
-            level="info"
-        )
+        # Run the system using the orchestrator
+        orchestrator.run()
         
-        if not memory_monitor.check_memory_health(model_size):
-            logger.log_error(
-                error_msg="Insufficient memory to run the system",
-                error_type="memory_error"
-            )
-            sys.exit(1)
-
-        if args.test:
-            logger.log_event(
-                event_type="system_start",
-                message="Running in test mode...",
-                level="info"
-            )
-            if not context.config_handler.validate():
-                logger.log_error(
-                    error_msg="Configuration validation failed",
-                    error_type="config_validation_error"
-                )
-                sys.exit(1)
-            logger.log_event(
-                event_type="system_start",
-                message="Test mode completed successfully",
-                level="info"
-            )
-            return
-
-        # Run the selected mode
-        if args.mode == "train":
-            logger.log_event(
-                event_type="system_start",
-                message="Starting training mode...",
-                level="info"
-            )
-            train_data = load_training_data(args.train_data) if args.train_data else None
-            valid_data = load_training_data(args.valid_data) if args.valid_data else None
-            
-            logger.log_event(
-                event_type="system_start",
-                message=f"Training parameters: epochs={args.epochs}, batch_size={args.batch_size}",
-                level="info"
-            )
-            results = sovl_system.curiosity_engine.run_training_cycle(
-                train_data=train_data,
-                valid_data=valid_data,
-                epochs=args.epochs,
-                batch_size=args.batch_size
-            )
-            logger.log_event(
-                event_type="system_start",
-                message=f"Training completed. Results: {results}",
-                level="info"
-            )
-            
-        elif args.mode == "generate":
-            logger.log_event(
-                event_type="system_start",
-                message="Starting generation mode...",
-                level="info"
-            )
-            question = sovl_system.generate_curiosity_question()
-            logger.log_event(
-                event_type="system_start",
-                message=f"Generated question: {question}",
-                level="info"
-            )
-            
-        elif args.mode == "dream":
-            logger.log_event(
-                event_type="system_start",
-                message="Starting dream mode...",
-                level="info"
-            )
-            success = sovl_system.dream()
-            logger.log_event(
-                event_type="system_start",
-                message=f"Dream cycle {'succeeded' if success else 'failed'}",
-                level="info"
-            )
-            
     except Exception as e:
         logger.log_error(
             error_msg=f"Error during system execution: {str(e)}",
