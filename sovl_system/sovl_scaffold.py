@@ -20,246 +20,130 @@ from sovl_io import ConfigurationError
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
     
-    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Logger):
-        """
-        Initialize the ScaffoldTokenMapper with base and scaffold tokenizers.
-        
-        Args:
-            base_tokenizer: The base model's tokenizer
-            scaffold_tokenizer: The scaffold model's tokenizer
-            logger: Logger instance for structured logging
-        """
-        self._base_tokenizer = base_tokenizer
-        self._scaffold_tokenizer = scaffold_tokenizer
-        self._logger = logger
-        self._token_map: Dict[int, Dict[str, Union[List[int], float]]] = {}
-        self._special_token_map: Dict[int, int] = {}
-        self._token_map_lock = threading.Lock()
-        self._special_token_map_lock = threading.Lock()
-        
+    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any):
+        self.base_tokenizer = base_tokenizer
+        self.scaffold_tokenizer = scaffold_tokenizer
+        self.logger = logger
+        self.token_map = defaultdict(lambda: {'ids': [scaffold_tokenizer.unk_token_id], 'weight': 1.0})
         self._initialize_token_maps()
-        self._validate_token_maps()
         
-        self._logger.record_event(
-            event_type="scaffold_token_mapper_initialized",
-            message="Scaffold token mapper initialized successfully",
-            level="info",
-            additional_info={
-                "base_vocab_size": len(self._base_tokenizer),
-                "scaffold_vocab_size": len(self._scaffold_tokenizer),
-                "token_map_size": len(self._token_map),
-                "special_token_map_size": len(self._special_token_map)
-            }
-        )
-        
-    def _initialize_token_maps(self) -> None:
-        """Initialize both regular and special token mappings."""
-        self._build_token_map()
-        self._initialize_special_token_map()
-        
-    def _build_token_map(self) -> None:
-        """Build the main token mapping between base and scaffold tokenizers."""
-        with self._token_map_lock:
-            try:
-                for base_token, base_id in self._base_tokenizer.get_vocab().items():
-                    normalized = self._normalize_token(base_token)
-                    scaffold_ids = self._scaffold_tokenizer.encode(
-                        normalized, add_special_tokens=False, max_length=3, truncation=True
-                    ) or [self._scaffold_tokenizer.unk_token_id]
-                    self._token_map[base_id] = {"ids": scaffold_ids, "weight": 1.0}
-                    
-                self._logger.record_event(
-                    event_type="token_map_built",
-                    message="Token map built successfully",
-                    level="info",
-                    additional_info={"map_size": len(self._token_map), "timestamp": time.time()}
-                )
-            except Exception as e:
-                self._log_error("token_map_error", f"Failed to build token map: {str(e)}")
-                raise
-            
-    def _initialize_special_token_map(self) -> None:
-        """Initialize mapping for special tokens."""
-        with self._special_token_map_lock:
-            try:
-                self._special_token_map = {
-                    self._base_tokenizer.pad_token_id: self._scaffold_tokenizer.pad_token_id,
-                    self._base_tokenizer.eos_token_id: (
-                        self._scaffold_tokenizer.eos_token_id or self._scaffold_tokenizer.sep_token_id
-                    ),
-                    self._base_tokenizer.unk_token_id: self._scaffold_tokenizer.unk_token_id,
-                }
-                
-                self._logger.record_event(
-                    event_type="special_token_map_initialized",
-                    message="Special token map initialized successfully",
-                    level="info",
-                    additional_info={
-                        "map_size": len(self._special_token_map),
-                        "mappings": {
-                            "pad_token": self._special_token_map.get(self._base_tokenizer.pad_token_id),
-                            "eos_token": self._special_token_map.get(self._base_tokenizer.eos_token_id),
-                            "unk_token": self._special_token_map.get(self._base_tokenizer.unk_token_id)
-                        }
-                    }
-                )
-            except Exception as e:
-                self._log_error("token_map_error", f"Failed to initialize special token map: {str(e)}")
-                raise
-            
-    def _validate_token_maps(self) -> None:
-        """Validate that token maps are properly initialized."""
+    def _initialize_token_maps(self):
+        """Initialize token maps between base and scaffold tokenizers."""
         try:
-            if not self._token_map:
-                raise ValueError("Token map is empty")
-            if not self._special_token_map:
-                raise ValueError("Special token map is empty")
+            # Build main token map
+            self._build_token_map()
+            
+            # Initialize special token map
+            self._initialize_special_token_map()
+            
+            # Validate token maps
+            if not self._validate_token_maps():
+                raise ValueError("Token map validation failed")
                 
-            base_vocab_size = len(self._base_tokenizer)
-            scaffold_vocab_size = len(self._scaffold_tokenizer)
-            
-            self._validate_special_tokens(base_vocab_size, scaffold_vocab_size)
-            self._validate_regular_tokens(base_vocab_size, scaffold_vocab_size)
-            
-            self._logger.record_event(
-                event_type="token_maps_validated",
-                message="Token maps validated successfully",
+            self.logger.record_event(
+                event_type="token_map_initialized",
+                message="Token maps initialized successfully",
                 level="info",
                 additional_info={
-                    "base_vocab_size": base_vocab_size,
-                    "scaffold_vocab_size": scaffold_vocab_size,
-                    "token_map_size": len(self._token_map),
-                    "special_token_map_size": len(self._special_token_map),
+                    "map_size": len(self.token_map),
                     "timestamp": time.time()
                 }
             )
+            
         except Exception as e:
-            self._log_error("token_map_validation_failed", f"Token map validation failed: {str(e)}")
-            raise
-        
-    def _validate_special_tokens(self, base_vocab_size: int, scaffold_vocab_size: int) -> None:
-        """Validate special token mappings."""
-        required_special_tokens = ['pad_token_id', 'eos_token_id', 'unk_token_id']
-        for token in required_special_tokens:
-            base_id = getattr(self._base_tokenizer, token, None)
-            if base_id is None:
-                raise ValueError(f"Base tokenizer missing {token}")
-            if base_id not in self._special_token_map:
-                raise ValueError(f"Special token {token} not mapped")
-                
-        for base_id, scaffold_id in self._special_token_map.items():
-            if not (0 <= base_id < base_vocab_size):
-                raise ValueError(f"Invalid base token ID in special token map: {base_id}")
-            if not (0 <= scaffold_id < scaffold_vocab_size):
-                raise ValueError(f"Invalid scaffold token ID in special token map: {scaffold_id}")
-            
-    def _validate_regular_tokens(self, base_vocab_size: int, scaffold_vocab_size: int) -> None:
-        """Validate regular token mappings."""
-        for base_id, mapping in self._token_map.items():
-            if not (0 <= base_id < base_vocab_size):
-                raise ValueError(f"Invalid base token ID in token map: {base_id}")
-            for scaffold_id in mapping["ids"]:
-                if not (0 <= scaffold_id < scaffold_vocab_size):
-                    raise ValueError(f"Invalid scaffold token ID in token map: {scaffold_id}")
-                    
-    def _normalize_token(self, token: str) -> str:
-        """Normalize token for mapping."""
-        return token.replace("Ġ", "").replace("##", "")
-        
-    def _log_error(self, event_type: str, message: str) -> None:
-        """Log an error with consistent formatting."""
-        self._logger.record_event(
-            event_type=event_type,
-            message=message,
-            level="error",
-            additional_info={
-                "error": message,
-                "stack_trace": traceback.format_exc(),
-                "timestamp": time.time()
-            }
-        )
-        
-    def get_token_map(self) -> Dict[int, Dict[str, Union[List[int], float]]]:
-        """Get the complete token mapping."""
-        return self._token_map
-        
-    def get_special_token_map(self) -> Dict[int, int]:
-        """Get the special token mapping."""
-        return self._special_token_map
-        
-    def tokenize_and_map(self, prompts: Union[str, List[str]], max_length: Optional[int] = None) -> Dict[str, torch.Tensor]:
-        """Tokenize prompts and map to scaffold token space."""
-        try:
-            prompts = [prompts] if isinstance(prompts, str) else prompts
-            max_length = max_length or 128
-            
-            base_inputs = self._base_tokenizer(
-                prompts,
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-                return_tensors='pt'
-            ).to('cuda' if torch.cuda.is_available() else 'cpu')
-            
-            scaffold_inputs = self.map_sequence(base_inputs['input_ids'])
-            
-            return {
-                'input_ids': scaffold_inputs,
-                'attention_mask': base_inputs['attention_mask']
-            }
-        except Exception as e:
-            self._log_error("tokenization_error", f"Tokenization and mapping failed: {str(e)}")
-            raise ValueError(f"Tokenization and mapping failed: {str(e)}")
-            
-    def map_sequence(self, sequence: torch.Tensor) -> torch.Tensor:
-        """Map a sequence of tokens from base to scaffold tokenizer."""
-        try:
-            device = sequence.device
-            sequence_list = sequence.tolist()
-            mapped_tokens = []
-            
-            for token_id in sequence_list:
-                if token_id in self._special_token_map:
-                    mapped_tokens.append(self._special_token_map[token_id])
-                else:
-                    with self._token_map_lock:
-                        mapped_tokens.append(
-                            self._token_map[token_id]["ids"][0] if token_id in self._token_map
-                            else self._scaffold_tokenizer.unk_token_id
-                        )
-            
-            result = torch.tensor(mapped_tokens, device=device)
-            
-            del sequence_list, mapped_tokens
-            torch.cuda.empty_cache()
-            
-            return result
-        except Exception as e:
-            self._log_error("sequence_mapping_error", f"Error mapping sequence: {str(e)}")
-            raise
-
-    def update_token_map_memory(self, prompt: str, confidence: float) -> None:
-        """Update token map memory based on prompt confidence."""
-        try:
-            base_inputs = self._base_tokenizer(
-                prompt, return_tensors='pt'
-            ).to('cuda' if torch.cuda.is_available() else 'cpu')
-            base_ids = base_inputs['input_ids'][0].tolist()
-            
-            with self._token_map_lock:
-                for base_id in base_ids:
-                    if base_id in self._token_map:
-                        current_weight = self._token_map[base_id]['weight']
-                        self._token_map[base_id]['weight'] = min(1.0, current_weight + (confidence * 0.1))
-                
-            self._logger.record_event(
-                event_type="token_map_updated",
-                message="Token map updated successfully",
-                level="info",
-                additional_info={"confidence": confidence}
+            self.logger.record_event(
+                event_type="token_map_error",
+                message=f"Failed to initialize token maps: {str(e)}",
+                level="error",
+                additional_info={"timestamp": time.time()}
             )
+            raise
+            
+    def _build_token_map(self):
+        """Build main token mapping."""
+        for base_token, base_id in self.base_tokenizer.get_vocab().items():
+            normalized = base_token.replace("Ġ", "").replace("##", "")
+            scaffold_ids = self.scaffold_tokenizer.encode(
+                normalized, add_special_tokens=False, max_length=3, truncation=True
+            ) or [self.scaffold_tokenizer.unk_token_id]
+            self.token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
+            
+    def _initialize_special_token_map(self):
+        """Initialize special token mapping."""
+        special_token_map = {
+            self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id,
+            self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id or self.scaffold_tokenizer.sep_token_id,
+            self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
+        }
+        
+        for base_id, scaffold_id in special_token_map.items():
+            self.token_map[base_id] = {'ids': [scaffold_id], 'weight': 1.0}
+            
+    def _validate_token_maps(self) -> bool:
+        """Validate token maps integrity."""
+        if not self.token_map:
+            return False
+            
+        required_tokens = ['pad_token_id', 'eos_token_id', 'unk_token_id']
+        for token in required_tokens:
+            if not any(t['ids'][0] == getattr(self.scaffold_tokenizer, token) 
+                      for t in self.token_map.values()):
+                return False
+                
+        if not all(t['ids'] for t in self.token_map.values()):
+            return False
+            
+        return True
+        
+    def get_token_map(self) -> Dict:
+        """Get the token map."""
+        return dict(self.token_map)
+        
+    def validate_token_maps(self) -> bool:
+        """Validate token maps."""
+        return self._validate_token_maps()
+        
+    def tokenize_and_map(self, prompt: str) -> Tuple[List[int], List[float]]:
+        """Tokenize prompt and map to scaffold token space."""
+        try:
+            base_tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
+            scaffold_ids = []
+            weights = []
+            
+            for base_id in base_tokens:
+                mapping = self.token_map[base_id]
+                scaffold_ids.extend(mapping['ids'])
+                weights.extend([mapping['weight']] * len(mapping['ids']))
+                
+            return scaffold_ids, weights
+            
         except Exception as e:
-            self._log_error("token_map_memory_update_failed", f"Token map memory update failed: {str(e)}")
+            self.logger.record_event(
+                event_type="token_mapping_error",
+                message=f"Failed to map tokens: {str(e)}",
+                level="error",
+                additional_info={"timestamp": time.time()}
+            )
+            raise
+            
+    def update_token_map_memory(self, prompt: str, confidence: float):
+        """Update token map based on prompt confidence."""
+        try:
+            base_tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
+            for base_id in base_tokens:
+                if base_id in self.token_map:
+                    self.token_map[base_id]['weight'] = max(
+                        self.token_map[base_id]['weight'],
+                        confidence
+                    )
+                    
+        except Exception as e:
+            self.logger.record_event(
+                event_type="token_map_update_error",
+                message=f"Failed to update token map: {str(e)}",
+                level="error",
+                additional_info={"timestamp": time.time()}
+            )
             raise
 
 def build_scaffold_token_mapping(base_tokenizer: Any, scaffold_tokenizer: Any, logger: Logger) -> ScaffoldTokenMapper:
@@ -1433,39 +1317,8 @@ class ScaffoldProvider:
     def build_token_map(self, base_tokenizer: Any, scaffold_tokenizer: Any) -> Dict:
         """Build token mapping between base and scaffold models."""
         try:
-            token_mapper = defaultdict(lambda: [scaffold_tokenizer.unk_token_id])
-            
-            for base_token, base_id in base_tokenizer.get_vocab().items():
-                normalized = base_token.replace("Ġ", "").replace("##", "")
-                scaffold_ids = scaffold_tokenizer.encode(
-                    normalized, add_special_tokens=False, max_length=3, truncation=True
-                ) or [scaffold_tokenizer.unk_token_id]
-                token_mapper[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
-            
-            special_token_map = {
-                base_tokenizer.pad_token_id: scaffold_tokenizer.pad_token_id,
-                base_tokenizer.eos_token_id: scaffold_tokenizer.eos_token_id or scaffold_tokenizer.sep_token_id,
-                base_tokenizer.unk_token_id: scaffold_tokenizer.unk_token_id,
-            }
-            
-            for base_id, scaffold_id in special_token_map.items():
-                token_mapper[base_id] = {'ids': [scaffold_id], 'weight': 1.0}
-            
-            if not token_mapper:
-                raise ValueError("Token map is empty")
-                
-            self._logger.record_event(
-                event_type="token_map_built",
-                message="Token map built successfully",
-                level="info",
-                additional_info={
-                    "map_size": len(token_mapper),
-                    "special_tokens": len(special_token_map),
-                    "timestamp": time.time()
-                }
-            )
-            
-            return token_mapper
+            token_mapper = ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, self._logger)
+            return token_mapper.get_token_map()
         except Exception as e:
             self._error_handler.handle_scaffold_error(e, {"operation": "token_map_building"})
             raise
@@ -1479,15 +1332,11 @@ class ScaffoldProvider:
                 
             required_tokens = ['pad_token_id', 'eos_token_id', 'unk_token_id']
             scaffold_tokenizer = self._scaffold_state["scaffold_model"].tokenizer
-            for token in required_tokens:
-                if not any(t['ids'][0] == getattr(scaffold_tokenizer, token) 
-                          for t in token_map.values()):
-                    return False
-                    
-            if not all(t['ids'] for t in token_map.values()):
-                return False
-                
-            return True
+            base_tokenizer = self._scaffold_state["scaffold_model"].base_tokenizer
+            
+            token_mapper = ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, self._logger)
+            return token_mapper.validate_token_maps()
+            
         except Exception as e:
             self._error_handler.handle_scaffold_error(e, {"operation": "token_map_validation"})
             return False
