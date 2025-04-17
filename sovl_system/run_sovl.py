@@ -48,7 +48,7 @@ COMMAND_CATEGORIES = {
 }
 
 class SOVLRunner:
-    """Main class to manage SOVL system execution with improved separation of concerns."""
+    """Main class to manage SOVL system execution."""
     
     def __init__(self):
         self.logger = self._setup_logger()
