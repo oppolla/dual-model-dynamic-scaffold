@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from sovl_utils import NumericalGuard, safe_divide
 from sovl_logger import Logger
 from sovl_config import ConfigManager
+from transformers import PreTrainedTokenizer
 
 
 class LogitsError(Exception):
@@ -740,13 +741,29 @@ class SOVLProcessor:
         return None
     
 class SoulLogitsProcessor(LogitsProcessor):
-    """Boosts token probabilities for .soul file keywords during generation."""
+    """Boosts token probabilities for .soul file keywords during generation.
+
+    Args:
+        soul_keywords: Dictionary mapping keywords to their boost weights.
+        tokenizer: Tokenizer for encoding keywords.
+        logger: Logger for error reporting.
+    """
     
-    def __init__(self, soul_keywords: Dict[str, float], tokenizer: PreTrainedTokenizer):
+    def __init__(self, soul_keywords: Dict[str, float], tokenizer: PreTrainedTokenizer, logger: Logger):
         self.soul_keywords = soul_keywords
         self.tokenizer = tokenizer
+        self.logger = logger
 
     def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        """Apply hypersensitive boost to token probabilities for .soul keywords.
+
+        Args:
+            input_ids: Input token IDs (batch_size, seq_len).
+            scores: Logits scores (batch_size, vocab_size).
+
+        Returns:
+            Modified scores with boosted probabilities.
+        """
         try:
             for keyword, weight in self.soul_keywords.items():
                 token_ids = self.tokenizer.encode(keyword, add_special_tokens=False)
@@ -754,11 +771,14 @@ class SoulLogitsProcessor(LogitsProcessor):
                     scores[:, token_id] += weight * 2.0  # Hypersensitive boost
             return scores
         except Exception as e:
-            # Log error but don't interrupt generation
             self.logger.log_error(
                 error_msg=f"Failed to apply soul logits processing: {str(e)}",
                 error_type="soul_logits_error",
                 stack_trace=traceback.format_exc(),
-                additional_info={"keywords": self.soul_keywords}
+                additional_info={
+                    "keywords": self.soul_keywords,
+                    "input_ids_shape": str(input_ids.shape),
+                    "scores_shape": str(scores.shape)
+                }
             )
             return scores
