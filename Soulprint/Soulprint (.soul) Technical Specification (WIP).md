@@ -4,6 +4,7 @@
 ## Contents
 
 1. Introduction & Philosophy
+   
   1.1 Purpose of Soulprint
   1.2 Concept of AI Rebirth
   1.3 Ethical Framework (Phoenix Protocol)
