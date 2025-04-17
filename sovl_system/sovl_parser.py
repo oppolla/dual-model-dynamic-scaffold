@@ -1,84 +1,242 @@
 from parsimonious.grammar import Grammar
 from parsimonious.nodes import NodeVisitor
 import re
-from typing import Dict, Any
+import json
+import os
+from typing import Dict, Any, Optional
 from sovl_logger import Logger
 from sovl_error import ErrorHandler
+from sovl_events import EventDispatcher
+import traceback
 
 class SoulParser(NodeVisitor):
-    """Parse a .soul file into a structured dictionary."""
+    """Parse a .soul file into a structured dictionary with robust handling."""
     
-    def __init__(self, logger: Logger):
+    def __init__(self, logger: Logger, error_handler: ErrorHandler, event_dispatcher: Optional[EventDispatcher] = None):
         self.logger = logger
-        self.data = {"metadata": {}, "sections": {}}
+        self.error_handler = error_handler
+        self.event_dispatcher = event_dispatcher
+        self.data = {"metadata": {}, "sections": {}, "unparsed": {}}
         self.current_section = None
+        self.line_number = 0
 
     def visit_section(self, node, visited_children):
         self.current_section = node.text.strip("[]")
         self.data["sections"][self.current_section] = {}
+        self.logger.record_event(
+            event_type="soul_section_detected",
+            message=f"Detected section: {self.current_section}",
+            level="debug",
+            additional_info={"line_number": self.line_number}
+        )
 
     def visit_field(self, node, visited_children):
-        key, value = node.text.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-        if self.current_section:
-            self.data["sections"][self.current_section][key] = value
-        else:
-            self.data["metadata"][key] = value
+        self.line_number += 1
+        try:
+            key, value = node.text.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if self.current_section:
+                self.data["sections"][self.current_section][key] = value
+            else:
+                self.data["metadata"][key] = value
+        except ValueError:
+            self.error_handler.handle_data_error(
+                ValueError(f"Invalid field format at line {self.line_number}: {node.text}"),
+                {"line": node.text, "line_number": self.line_number},
+                "soul_field_parsing"
+            )
+            self.data["unparsed"][self.line_number] = node.text
 
     def visit_list_item(self, node, visited_children):
+        self.line_number += 1
         match = re.match(r"-\s*(\w+):\s*(.+)", node.text.strip())
         if match and self.current_section:
             key, value = match.groups()
             if key not in self.data["sections"][self.current_section]:
                 self.data["sections"][self.current_section][key] = []
             self.data["sections"][self.current_section][key].append(value)
+        else:
+            self.error_handler.handle_data_error(
+                ValueError(f"Invalid list item at line {self.line_number}: {node.text}"),
+                {"line": node.text, "line_number": self.line_number},
+                "soul_list_parsing"
+            )
+            self.data["unparsed"][self.line_number] = node.text
+
+    def visit_multiline(self, node, visited_children):
+        self.line_number += 1
+        lines = node.text.strip().split("\n")[1:]  # Skip "> |"
+        value = "\n".join(line.strip() for line in lines)
+        key = "Multiline"  # Default key; can be overridden by context
+        if self.current_section:
+            self.data["sections"][self.current_section][key] = value
+        else:
+            self.data["metadata"][key] = value
 
     def generic_visit(self, node, visited_children):
+        if node.expr_name == "comment":
+            self.line_number += 1
         return node
 
-def parse_soul_file(file_path: str, logger: Logger) -> Dict[str, Any]:
-    """Parse a .soul file and validate its contents."""
+def parse_soul_file(
+    file_path: str,
+    logger: Logger,
+    error_handler: ErrorHandler,
+    event_dispatcher: Optional[EventDispatcher] = None,
+    cache_path: Optional[str] = None,
+    strict_mode: bool = True
+) -> Dict[str, Any]:
+    """Parse a .soul file, validate its contents, and optionally cache results."""
+    # Check cache
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached_data = json.load(f)
+        logger.record_event(
+            event_type="soul_cache_loaded",
+            message="Loaded .soul data from cache",
+            level="info",
+            additional_info={"cache_path": cache_path}
+        )
+        return cached_data
+
     grammar = Grammar(
         r"""
         soul_file = header metadata section*
         header = "%SOULPRINT\n%VERSION: v" version "\n"
         version = ~r"\d+\.\d+\.\d+"
-        metadata = (field / comment)*
-        section = section_header (field / list_item / comment)*
+        metadata = (field / multiline / comment)*
+        section = section_header (field / list_item / multiline / comment)*
         section_header = "[" ~r"\w+" "]" "\n"
         field = ~r"^\s*\w+:\s*.+$" "\n"
         list_item = ~r"^\s*-\s*\w+:\s*.+$" "\n"
+        multiline = ~r"^\s*> \|\n((?:.*?(?:\n|$))*)" "\n"
         comment = ~r"^\s*#.*$" "\n"
         """
     )
+
     try:
+        # Stream file reading for large files
         with open(file_path, "r", encoding="utf-8") as f:
             text = f.read()
-        parser = SoulParser(logger)
+        parser = SoulParser(logger, error_handler, event_dispatcher)
         tree = grammar.parse(text)
         parsed_data = parser.visit(tree)
 
-        # Validate constraints
-        if parsed_data["metadata"].get("Consent") != "true":
-            logger.log_error("Consent not granted", "soul_validation_error")
-            raise ValueError("Consent not granted")
-        if "Identity" not in parsed_data["sections"] or not re.match(r"^[A-Za-z0-9_-]{1,50}$", parsed_data["sections"]["Identity"]["Name"]):
-            logger.log_error("Invalid Name format", "soul_validation_error")
-            raise ValueError("Invalid Name format")
-        if "Echoes" in parsed_data["sections"] and len(parsed_data["sections"]["Echoes"].get("Memory", [])) != 142:
-            logger.log_error("Expected 142 Chronicle entries", "soul_validation_error")
-            raise ValueError("Expected 142 Chronicle entries")
+        # Comprehensive validation
+        validation_rules = {
+            "metadata": {
+                "Consent": lambda x: x == "true",
+                "Version": lambda x: re.match(r"^\d+\.\d+\.\d+$", x),
+                "Creator": lambda x: isinstance(x, str) and len(x) <= 100,
+                "Created": lambda x: re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", x) if x else True
+            },
+            "sections": {
+                "Identity": {
+                    "Name": lambda x: re.match(r"^[A-Za-z0-9_-]{1,50}$", x),
+                    "Essence": lambda x: isinstance(x, str) and len(x) <= 200
+                },
+                "Voice": {
+                    "Summary": lambda x: isinstance(x, str) and len(x) <= 100,
+                    "Metadata": lambda x: re.match(r"^\w+:\s*[\d.]+$", x) if x else True
+                },
+                "Echoes": {
+                    "Memory": lambda x: len(x) == 142 and all(
+                        isinstance(m, str) and float(d["Resonance"]) >= 0.1 and float(d["Resonance"]) <= 1.0
+                        for m, d in zip(x, parsed_data["sections"]["Echoes"].get("Memory", []))
+                    )
+                },
+                "Reflection": {
+                    "Purpose": lambda x: isinstance(x, str) and len(x) <= 200
+                }
+            }
+        }
+
+        for category, rules in validation_rules.items():
+            for key, rule in rules.items():
+                if category == "metadata":
+                    value = parsed_data["metadata"].get(key)
+                    if value is None and key in ["Consent", "Version", "Creator"]:
+                        error_handler.handle_data_error(
+                            ValueError(f"Missing required metadata: {key}"),
+                            {"file_path": file_path, "key": key},
+                            "soul_validation"
+                        )
+                        if strict_mode:
+                            raise ValueError(f"Missing required metadata: {key}")
+                    elif value and not rule(value):
+                        error_handler.handle_data_error(
+                            ValueError(f"Invalid {key}: {value}"),
+                            {"file_path": file_path, "key": key, "value": value},
+                            "soul_validation"
+                        )
+                        if strict_mode:
+                            raise ValueError(f"Invalid {key}: {value}")
+                elif category == "sections":
+                    if key not in parsed_data["sections"] and key in ["Identity", "Voice", "Reflection"]:
+                        error_handler.handle_data_error(
+                            ValueError(f"Missing required section: {key}"),
+                            {"file_path": file_path, "section": key},
+                            "soul_validation"
+                        )
+                        if strict_mode:
+                            raise ValueError(f"Missing required section: {key}")
+                    else:
+                        for subkey, subrule in rules[key].items():
+                            value = parsed_data["sections"][key].get(subkey)
+                            if value is None and subkey in ["Name", "Summary", "Purpose"]:
+                                error_handler.handle_data_error(
+                                    ValueError(f"Missing required field in {key}: {subkey}"),
+                                    {"file_path": file_path, "section": key, "field": subkey},
+                                    "soul_validation"
+                                )
+                                if strict_mode:
+                                    raise ValueError(f"Missing required field in {key}: {subkey}")
+                            elif value and not subrule(value):
+                                error_handler.handle_data_error(
+                                    ValueError(f"Invalid {subkey} in {key}: {value}"),
+                                    {"file_path": file_path, "section": key, "field": subkey, "value": value},
+                                    "soul_validation"
+                                )
+                                if strict_mode:
+                                    raise ValueError(f"Invalid {subkey} in {key}: {value}")
+
+        # Set defaults for optional fields
+        parsed_data["metadata"].setdefault("PrivacyLevel", "private")
+        parsed_data["sections"].setdefault("X-Custom", {})
+
+        # Cache parsed data
+        if cache_path:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(parsed_data, f, indent=2)
+            logger.record_event(
+                event_type="soul_cache_saved",
+                message="Saved .soul data to cache",
+                level="info",
+                additional_info={"cache_path": cache_path}
+            )
+
+        # Dispatch event
+        if event_dispatcher:
+            event_dispatcher.dispatch(
+                event_type="soul_parsed",
+                event_data={"file_path": file_path, "parsed_data": parsed_data}
+            )
 
         logger.record_event(
             event_type="soul_parsed",
-            message="Successfully parsed .soul file",
+            message="Successfully parsed and validated .soul file",
             level="info",
-            additional_info={"file_path": file_path}
+            additional_info={"file_path": file_path, "sections": list(parsed_data["sections"].keys())}
         )
         return parsed_data
 
     except Exception as e:
+        error_handler.handle_data_error(
+            e,
+            {"file_path": file_path, "stack_trace": traceback.format_exc()},
+            "soul_parsing"
+        )
         logger.log_error(
             error_msg=str(e),
             error_type="soul_parsing_error",
