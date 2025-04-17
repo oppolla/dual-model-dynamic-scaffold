@@ -8,6 +8,20 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 import random
 import time
+import re
+import nltk
+from nltk.corpus import wordnet
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+
+# Download required NLTK data
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('wordnet')
+    nltk.download('averaged_perceptron_tagger')
 
 class InsufficientDataError(Exception):
     """Raised when loaded data doesn't meet minimum entry requirements."""
@@ -367,6 +381,121 @@ class JSONLLoader:
             )
             raise DataValidationError(f"Failed to load JSONL file: {str(e)}")
 
+class TextPreprocessor:
+    """Handles text preprocessing operations."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        self.config_manager = config_manager
+        self.logger = logger
+        self.lemmatizer = WordNetLemmatizer()
+        
+        # Load preprocessing configuration
+        self._load_config()
+        
+    def _load_config(self) -> None:
+        """Load preprocessing configuration."""
+        self.remove_special_chars = self.config_manager.get(
+            "preprocessing.remove_special_chars", True)
+        self.lowercase = self.config_manager.get(
+            "preprocessing.lowercase", True)
+        self.remove_extra_spaces = self.config_manager.get(
+            "preprocessing.remove_extra_spaces", True)
+        self.max_length = self.config_manager.get(
+            "preprocessing.max_length", 512)
+            
+    def preprocess_text(self, text: str) -> str:
+        """Apply preprocessing steps to text."""
+        try:
+            if not isinstance(text, str):
+                return ""
+                
+            # Remove special characters
+            if self.remove_special_chars:
+                text = re.sub(r'[^\w\s]', ' ', text)
+                
+            # Convert to lowercase
+            if self.lowercase:
+                text = text.lower()
+                
+            # Remove extra spaces
+            if self.remove_extra_spaces:
+                text = re.sub(r'\s+', ' ', text).strip()
+                
+            # Truncate if needed
+            if len(text) > self.max_length:
+                text = text[:self.max_length]
+                
+            return text
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Error preprocessing text: {str(e)}",
+                error_type="preprocessing_error"
+            )
+            return text
+
+class TextAugmenter:
+    """Handles text augmentation operations."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        self.config_manager = config_manager
+        self.logger = logger
+        
+        # Load augmentation configuration
+        self._load_config()
+        
+    def _load_config(self) -> None:
+        """Load augmentation configuration."""
+        self.synonym_replacement_prob = self.config_manager.get(
+            "augmentation.synonym_replacement_prob", 0.3)
+        self.word_dropout_prob = self.config_manager.get(
+            "augmentation.word_dropout_prob", 0.1)
+        self.max_augmentations = self.config_manager.get(
+            "augmentation.max_augmentations", 3)
+            
+    def get_synonyms(self, word: str) -> List[str]:
+        """Get synonyms for a word using WordNet."""
+        synonyms = []
+        for syn in wordnet.synsets(word):
+            for lemma in syn.lemmas():
+                if lemma.name() != word:
+                    synonyms.append(lemma.name())
+        return list(set(synonyms))
+        
+    def augment_text(self, text: str) -> List[str]:
+        """Generate augmented versions of the text."""
+        try:
+            augmented_texts = []
+            words = word_tokenize(text)
+            
+            # Synonym replacement
+            if random.random() < self.synonym_replacement_prob:
+                for _ in range(self.max_augmentations):
+                    new_words = words.copy()
+                    for i, word in enumerate(new_words):
+                        if random.random() < 0.3:  # 30% chance to replace each word
+                            synonyms = self.get_synonyms(word)
+                            if synonyms:
+                                new_words[i] = random.choice(synonyms)
+                    augmented_texts.append(' '.join(new_words))
+                    
+            # Word dropout
+            if random.random() < self.word_dropout_prob:
+                for _ in range(self.max_augmentations):
+                    new_words = [word for word in words 
+                               if random.random() > 0.1]  # 10% chance to drop each word
+                    if new_words:  # Only add if we have words left
+                        augmented_texts.append(' '.join(new_words))
+                        
+            return augmented_texts
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Error augmenting text: {str(e)}",
+                error_type="augmentation_error"
+            )
+            return []
+
 def load_and_split_data(config_manager: ConfigManager, logger: Logger, train_data: List, valid_split_ratio: float) -> Tuple[List, List]:
     """
     Load and split the training data into training and validation sets.
@@ -494,14 +623,46 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
         # Load training data
         train_data = loader.load_jsonl(seed_file, min_entries=min_entries)
         
+        # Initialize preprocessor and augmenter
+        preprocessor = TextPreprocessor(config_manager, logger)
+        augmenter = TextAugmenter(config_manager, logger)
+        
+        # Preprocess and augment data
+        processed_data = []
+        for entry in train_data:
+            # Preprocess text
+            processed_entry = {
+                "prompt": preprocessor.preprocess_text(entry["prompt"]),
+                "response": preprocessor.preprocess_text(entry["response"])
+            }
+            processed_data.append(processed_entry)
+            
+            # Generate augmented versions
+            augmented_prompts = augmenter.augment_text(entry["prompt"])
+            augmented_responses = augmenter.augment_text(entry["response"])
+            
+            # Add augmented versions
+            for aug_prompt in augmented_prompts:
+                processed_data.append({
+                    "prompt": aug_prompt,
+                    "response": entry["response"]  # Keep original response
+                })
+            for aug_response in augmented_responses:
+                processed_data.append({
+                    "prompt": entry["prompt"],  # Keep original prompt
+                    "response": aug_response
+                })
+        
         # Split data
-        train_data, valid_data = load_and_split_data(config_manager, logger, train_data, valid_split_ratio)
+        train_data, valid_data = load_and_split_data(config_manager, logger, processed_data, valid_split_ratio)
         
         # Log successful data loading
         logger.log_training_event(
             event_type="training_data_loaded",
-            message="Training data loaded successfully",
+            message="Training data loaded and augmented successfully",
             additional_info={
+                "original_samples": len(train_data),
+                "augmented_samples": len(processed_data) - len(train_data),
                 "train_samples": len(train_data),
                 "valid_samples": len(valid_data),
                 "min_entries": min_entries,
