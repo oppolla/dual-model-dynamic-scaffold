@@ -638,9 +638,7 @@ Jumbo Mode: Produces a ~900,000-character file by increasing follow-up depth and
 
 ## Parser and Rebirth Implementation
 
-The parsing and rebirth system transforms the .soul file into a set of deterministic parameters that initialize a new AI instance while preserving its core identity. There are two implementations of the .soul file. 
-
-The first is the hypersensitive fine-tuning approach which deeply embeds the .soul file's traits into the model's weights using LoRA (Low-Rank Adaptation) for efficient yet persistent personality integration.
+The parsing and rebirth system transforms the .soul file into a set of deterministic parameters that initialize a new AI instance while preserving its core identity. There are two implementations of the .soul file: 
 
 ### Hypersensitive Fine-Tuning Approach
 
