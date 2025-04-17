@@ -25,7 +25,11 @@ from sovl_utils import (
     detect_repetitions,
     safe_compare,
     float_gt,
-    synchronized
+    synchronized,
+    validate_components,
+    initialize_component_state,
+    sync_component_states,
+    validate_component_states
 )
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
 from sovl_memory import MemoryManager
@@ -1098,7 +1102,7 @@ class SOVLSystem:
         """
         try:
             # Validate required components
-            self._validate_components(
+            validate_components(
                 context=context,
                 config_handler=config_handler,
                 model_loader=model_loader,
@@ -1147,148 +1151,21 @@ class SOVLSystem:
             )
             raise
 
-    def _validate_components(self, **components) -> None:
-        """Validate that all required components are properly initialized."""
-        for name, component in components.items():
-            if component is None:
-                raise ValueError(f"Required component {name} is None")
-            if not hasattr(component, '__class__'):
-                raise ValueError(f"Component {name} is not a valid object")
-
     def _initialize_component_state(self) -> None:
         """Initialize state for all components."""
         try:
-            # Initialize state tracker if needed
-            if not self.state_tracker.state:
-                self.state_tracker.initialize_state()
-            
-            # Sync state between components
-            self._sync_component_states()
-            
-            # Validate component states
-            self._validate_component_states()
-            
+            components = [
+                self.curiosity_engine,
+                self.memory_monitor,
+                self.model_loader
+            ]
+            initialize_component_state(self.state_tracker, components)
         except Exception as e:
             self.context.logger.log_error(
                 error_msg=f"Failed to initialize component state: {str(e)}",
                 error_type="component_state_initialization_error",
                 stack_trace=traceback.format_exc()
             )
-            raise
-
-    def _sync_component_states(self) -> None:
-        """Synchronize state between components."""
-        try:
-            # Sync state with curiosity engine
-            if hasattr(self.curiosity_engine, 'state_tracker'):
-                self.curiosity_engine.state_tracker = self.state_tracker
-            
-            # Sync state with memory monitor
-            if hasattr(self.memory_monitor, 'state_tracker'):
-                self.memory_monitor.state_tracker = self.state_tracker
-            
-            # Sync state with model loader
-            if hasattr(self.model_loader, 'state_tracker'):
-                self.model_loader.state_tracker = self.state_tracker
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to sync component states: {str(e)}",
-                error_type="component_state_sync_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
-
-    def _validate_component_states(self) -> None:
-        """Validate that all components have consistent state."""
-        try:
-            # Validate state tracker
-            if not self.state_tracker.state:
-                raise ValueError("State tracker state not initialized")
-            
-            # Validate state hashes
-            state_hash = self.state_tracker.state.state_hash
-            for component in [self.curiosity_engine, self.memory_monitor, self.model_loader]:
-                if hasattr(component, 'state_tracker') and component.state_tracker.state.state_hash != state_hash:
-                    raise ValueError(f"State hash mismatch in {component.__class__.__name__}")
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to validate component states: {str(e)}",
-                error_type="component_state_validation_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
-
-    @classmethod
-    def create_from_config(cls, config_path: str, device: str = "cuda") -> 'SOVLSystem':
-        """
-        Factory method to create a SOVLSystem instance from configuration.
-        
-        Args:
-            config_path: Path to the configuration file
-            device: Device to use for tensor operations
-            
-        Returns:
-            SOVLSystem: A new instance initialized with components created from config
-        """
-        try:
-            # Initialize shared context
-            context = SystemContext(config_path, device)
-            
-            # Initialize state tracker and error manager first
-            state_tracker = StateTracker()
-            error_manager = ErrorManager()
-            
-            # Initialize components with explicit dependencies
-            config_handler = ConfigHandler(
-                config_path=config_path,
-                logger=context.logger,
-                state_tracker=state_tracker
-            )
-            
-            model_loader = ModelLoader(
-                config_handler=config_handler,
-                logger=context.logger,
-                device=context.device
-            )
-            
-            curiosity_engine = CuriosityEngine(
-                config_handler=config_handler,
-                model_loader=model_loader,
-                state_tracker=state_tracker,
-                error_manager=error_manager,
-                logger=context.logger,
-                device=context.device
-            )
-            
-            memory_monitor = MemoryMonitor(
-                logger=context.logger,
-                device=context.device
-            )
-            
-            # Create and return new instance with all components
-            return cls(
-                context=context,
-                config_handler=config_handler,
-                model_loader=model_loader,
-                curiosity_engine=curiosity_engine,
-                memory_monitor=memory_monitor,
-                state_tracker=state_tracker,
-                error_manager=error_manager
-            )
-            
-        except Exception as e:
-            if 'context' in locals() and hasattr(context, 'logger'):
-                context.logger.log_error(
-                    error_msg=f"Failed to create SOVL system from config: {str(e)}",
-                    error_type="system_creation_error",
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "config_path": config_path,
-                        "device": device
-                    }
-                )
             raise
 
     @synchronized("_lock")

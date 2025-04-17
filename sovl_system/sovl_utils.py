@@ -323,3 +323,79 @@ def synchronized(lock: Optional[Lock] = None) -> Callable:
                 return func(self, *args, **kwargs)
         return wrapper
     return decorator
+
+def validate_components(**components) -> None:
+    """
+    Validate that all required components are properly initialized.
+    
+    Args:
+        **components: Components to validate with their names as keys
+        
+    Raises:
+        ValueError: If any component is None or invalid
+    """
+    for name, component in components.items():
+        if component is None:
+            raise ValueError(f"Required component {name} is None")
+        if not hasattr(component, '__class__'):
+            raise ValueError(f"Component {name} is not a valid object")
+
+def sync_component_states(state_tracker: Any, components: List[Any]) -> None:
+    """
+    Synchronize state between components.
+    
+    Args:
+        state_tracker: The main state tracker instance
+        components: List of components to sync state with
+        
+    Raises:
+        ValueError: If state synchronization fails
+    """
+    try:
+        for component in components:
+            if hasattr(component, 'state_tracker'):
+                component.state_tracker = state_tracker
+    except Exception as e:
+        raise ValueError(f"Failed to sync component states: {str(e)}")
+
+def validate_component_states(state_tracker: Any, components: List[Any]) -> None:
+    """
+    Validate that all components have consistent state.
+    
+    Args:
+        state_tracker: The main state tracker instance
+        components: List of components to validate
+        
+    Raises:
+        ValueError: If state validation fails
+    """
+    try:
+        if not state_tracker.state:
+            raise ValueError("State tracker state not initialized")
+        
+        state_hash = state_tracker.state.state_hash
+        for component in components:
+            if hasattr(component, 'state_tracker') and component.state_tracker.state.state_hash != state_hash:
+                raise ValueError(f"State hash mismatch in {component.__class__.__name__}")
+    except Exception as e:
+        raise ValueError(f"Failed to validate component states: {str(e)}")
+
+def initialize_component_state(state_tracker: Any, components: List[Any]) -> None:
+    """
+    Initialize state for all components.
+    
+    Args:
+        state_tracker: The main state tracker instance
+        components: List of components to initialize
+        
+    Raises:
+        ValueError: If state initialization fails
+    """
+    try:
+        if not state_tracker.state:
+            state_tracker.initialize_state()
+        
+        sync_component_states(state_tracker, components)
+        validate_component_states(state_tracker, components)
+    except Exception as e:
+        raise ValueError(f"Failed to initialize component state: {str(e)}")
