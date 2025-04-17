@@ -27,6 +27,7 @@ from sovl_config import ConfigManager
 from sovl_conductor import SOVLOrchestrator
 from sovl_memory import MemoryManager
 from sovl_state import StateManager, SOVLState
+from sovl_error import ErrorManager, ErrorContext
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -55,8 +56,13 @@ class SOVLRunner:
         self.components = None
         self.orchestrator = None
         self.state_manager = None
+        self.error_manager = None  # Add error manager
         self.last_checkpoint_time = None
         self.checkpoint_interval = CHECKPOINT_INTERVAL
+        self.metrics_history = []
+        self.best_validation_loss = float('inf')
+        self.patience = 0
+        self.max_patience = 3
         
     @staticmethod
     def _setup_logger() -> Logger:
@@ -201,12 +207,21 @@ class SOVLRunner:
                     message=f"Initializing {name}...",
                     level="info"
                 )
-                if name == "curiosity engine":
+                if name == "error manager":
+                    component = ErrorManager(
+                        context=context,
+                        state_tracker=components[2],
+                        config_manager=context.config_manager,
+                        error_cooldown=1.0,
+                        max_recent_errors=100
+                    )
+                    self.error_manager = component
+                elif name == "curiosity engine":
                     component = component_class(
                         config_handler=context.config_handler,
                         model_loader=components[0],
                         state_tracker=components[2],
-                        error_manager=components[3],
+                        error_manager=self.error_manager,
                         logger=context.logger,
                         device=context.device
                     )
@@ -221,7 +236,7 @@ class SOVLRunner:
                 components.append(component)
         
         validate_components(*components)
-        initialize_component_state(components[2], components)  # StateTracker is components[2]
+        initialize_component_state(components[2], components)
         
         self.logger.log_event(
             event_type="component_initialization",
@@ -411,6 +426,193 @@ class SOVLRunner:
             )
             return False
     
+    def _run_validation(self, valid_data: List[Dict[str, Any]], batch_size: int) -> Dict[str, float]:
+        """Run validation loop and compute metrics."""
+        try:
+            self.logger.log_event(
+                event_type="validation_start",
+                message="Starting validation...",
+                level="info"
+            )
+            
+            self.model.eval()
+            total_loss = 0.0
+            total_batches = 0
+            metrics = {metric: 0.0 for metric in self.context.config_manager.get("training.metrics_to_track", ["loss", "accuracy", "confidence"])}
+            
+            with torch.no_grad():
+                for i in range(0, len(valid_data), batch_size):
+                    try:
+                        batch = valid_data[i:i + batch_size]
+                        if not batch:
+                            continue
+                            
+                        # Prepare batch
+                        inputs = self._prepare_batch(batch)
+                        
+                        # Forward pass
+                        outputs = self.model(**inputs)
+                        loss = self._calculate_loss(outputs, inputs)
+                        
+                        # Update metrics
+                        total_loss += loss.item()
+                        total_batches += 1
+                        
+                        # Calculate additional metrics
+                        if "accuracy" in metrics:
+                            preds = outputs.logits.argmax(dim=-1)
+                            mask = inputs["labels"] != -100
+                            correct = (preds[mask] == inputs["labels"][mask]).sum().item()
+                            total = mask.sum().item()
+                            metrics["accuracy"] += correct / total if total > 0 else 0.0
+                            
+                        if "perplexity" in metrics:
+                            metrics["perplexity"] += torch.exp(loss).item()
+                            
+                        if "confidence" in metrics:
+                            probs = torch.softmax(outputs.logits, dim=-1)
+                            max_probs = probs.max(dim=-1)[0]
+                            metrics["confidence"] += max_probs[mask].mean().item()
+                            
+                    except Exception as e:
+                        # Use error manager to handle validation errors
+                        error_context = ErrorContext(
+                            error_type="validation_error",
+                            error_message=str(e),
+                            stack_trace=traceback.format_exc(),
+                            timestamp=datetime.now(),
+                            additional_info={
+                                "batch_index": i,
+                                "batch_size": batch_size,
+                                "total_batches": total_batches
+                            }
+                        )
+                        self.error_manager.handle_error(
+                            error=e,
+                            error_type="validation",
+                            context=error_context
+                        )
+                        continue
+            
+            # Average metrics
+            if total_batches > 0:
+                metrics["loss"] = total_loss / total_batches
+                for metric in metrics:
+                    if metric != "loss":
+                        metrics[metric] /= total_batches
+            
+            # Log validation results
+            self.logger.log_event(
+                event_type="validation_complete",
+                message="Validation completed",
+                level="info",
+                additional_info={
+                    "metrics": metrics,
+                    "total_batches": total_batches
+                }
+            )
+            
+            return metrics
+            
+        except Exception as e:
+            # Use error manager to handle critical validation errors
+            error_context = ErrorContext(
+                error_type="critical_validation_error",
+                error_message=str(e),
+                stack_trace=traceback.format_exc(),
+                timestamp=datetime.now(),
+                additional_info={
+                    "total_batches": total_batches,
+                    "metrics": metrics
+                }
+            )
+            self.error_manager.handle_error(
+                error=e,
+                error_type="validation",
+                context=error_context
+            )
+            raise
+
+    def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        """Prepare batch for model input."""
+        try:
+            # Tokenize and prepare inputs
+            texts = [item["text"] for item in batch]
+            inputs = self.context.tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=self.context.config_manager.get("training.max_seq_length", 512),
+                return_tensors="pt"
+            )
+            
+            # Move to device
+            inputs = {k: v.to(self.context.device) for k, v in inputs.items()}
+            
+            # Prepare labels
+            inputs["labels"] = inputs["input_ids"].clone()
+            inputs["labels"][inputs["labels"] == self.context.tokenizer.pad_token_id] = -100
+            
+            return inputs
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Batch preparation error: {str(e)}",
+                error_type="batch_preparation_error"
+            )
+            raise
+
+    def _calculate_loss(self, outputs: torch.Tensor, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Calculate loss for the model outputs."""
+        try:
+            return torch.nn.functional.cross_entropy(
+                outputs.logits.view(-1, outputs.logits.size(-1)),
+                inputs["labels"].view(-1),
+                ignore_index=-100
+            )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Loss calculation error: {str(e)}",
+                error_type="loss_calculation_error"
+            )
+            raise
+
+    def _update_metrics_history(self, metrics: Dict[str, float], epoch: int) -> None:
+        """Update metrics history and handle early stopping."""
+        try:
+            # Add metrics to history
+            self.metrics_history.append({
+                "epoch": epoch,
+                "metrics": metrics,
+                "timestamp": time.time()
+            })
+            
+            # Check for early stopping
+            if metrics["loss"] < self.best_validation_loss:
+                self.best_validation_loss = metrics["loss"]
+                self.patience = 0
+            else:
+                self.patience += 1
+                
+            # Log metrics update
+            self.logger.log_event(
+                event_type="metrics_update",
+                message=f"Metrics updated for epoch {epoch}",
+                level="info",
+                additional_info={
+                    "metrics": metrics,
+                    "best_validation_loss": self.best_validation_loss,
+                    "patience": self.patience
+                }
+            )
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Metrics update error: {str(e)}",
+                error_type="metrics_update_error"
+            )
+            raise
+
     def run(self):
         """Main execution method with enhanced argument parsing."""
         parser = argparse.ArgumentParser(
