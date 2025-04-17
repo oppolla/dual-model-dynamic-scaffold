@@ -2,7 +2,7 @@ import json
 import os
 import gzip
 import hashlib
-from typing import Any, Optional, Dict, List, Union, Callable
+from typing import Any, Optional, Dict, List, Union, Callable, Tuple, NamedTuple
 from dataclasses import dataclass
 from threading import Lock
 import traceback
@@ -214,8 +214,35 @@ class FileHandler:
                 time.sleep(0.1)
         return False
 
+class ConfigKey(NamedTuple):
+    """Represents a configuration key with section and field."""
+    section: str
+    field: str
+
+    def __str__(self) -> str:
+        return f"{self.section}.{self.field}"
+
+class ConfigKeys:
+    """Type-safe configuration keys."""
+    # Processor Config
+    PROCESSOR_MIN_REP_LENGTH = ConfigKey("processor_config", "min_rep_length")
+    
+    # Controls Config
+    CONTROLS_MEMORY_THRESHOLD = ConfigKey("controls_config", "memory_threshold")
+    
+    # Add more keys as needed...
+
 class ConfigManager:
-    """Manages SOVLSystem configuration with validation, thread safety, and persistence."""
+    """Manages SOVLSystem configuration with validation, thread safety, and persistence.
+    
+    Example usage:
+        # Old way (string literals)
+        min_rep_length = config_manager.get("processor_config.min_rep_length")
+        
+        # New way (type-safe)
+        from sovl_config import ConfigKeys
+        min_rep_length = config_manager.get(ConfigKeys.PROCESSOR_MIN_REP_LENGTH)
+    """
 
     DEFAULT_SCHEMA = [
         # core_config
@@ -417,8 +444,11 @@ class ConfigManager:
             self._frozen = False
             self._log_event("config_unfrozen", "Configuration unfrozen", "info", {"timestamp": time.time()})
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: Union[str, ConfigKey], default: Any = None) -> Any:
+        """Get a configuration value with type-safe key support."""
         with self.lock:
+            if isinstance(key, ConfigKey):
+                key = str(key)
             value = self.store.get_value(key, default)
             if value == {} or value is None:
                 self._log_event("config_warning", f"Key '{key}' is empty or missing. Using default: {default}", "warning", {
