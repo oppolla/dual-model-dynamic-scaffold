@@ -10,6 +10,7 @@ from sovl_utils import NumericalGuard, safe_divide
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from transformers import PreTrainedTokenizer
+from sovl_confidence import ConfidenceCalculator, ErrorManager, SystemContext, CuriosityManager
 
 
 class LogitsError(Exception):
@@ -272,6 +273,9 @@ class SOVLProcessor:
         self.logger = logger
         self.device = device
         
+        # Initialize confidence calculator
+        self.confidence_calculator = ConfidenceCalculator(config_manager, logger)
+        
         # Initialize message queue for curiosity parameters
         self._curiosity_queue = deque(maxlen=100)
         self._last_curiosity_update = 0.0
@@ -326,186 +330,75 @@ class SOVLProcessor:
                 
             return None
 
-    def calculate_confidence(self, timestamp: Optional[float] = None) -> float:
-        """Calculate confidence score with curiosity pressure consideration."""
-        try:
-            # Get current curiosity pressure if available
-            pressure = self._get_curiosity_params(timestamp)
-            
-            # Base confidence calculation
-            confidence = self._calculate_base_confidence()
-            
-            # Adjust confidence based on curiosity pressure if available
-            if pressure is not None:
-                # Higher pressure reduces confidence to encourage exploration
-                confidence = confidence * (1.0 - pressure * 0.5)
-            
-            return max(0.0, min(1.0, confidence))
-            
-        except Exception as e:
-            self.logger.log_event(
-                "confidence_calculation_failed",
-                {"error": str(e)},
-                level="error"
-            )
-            return 0.5  # Default to neutral confidence
-
-    def _calculate_base_confidence(self) -> float:
-        """Calculate base confidence score."""
-        # Implementation of _calculate_base_confidence method
-        # This method should return a float representing the base confidence score
-        # based on the current state of the processor
-        # For example, it could be based on the current logits, confidence history, etc.
-        # This is a placeholder and should be implemented based on your specific requirements
-        return 0.5  # Placeholder return, actual implementation needed
-
-    # Confidence Calculation Methods
     def calculate_confidence(
         self,
         logits: Union[torch.Tensor, List[torch.Tensor]],
         generated_ids: Optional[torch.Tensor] = None,
         temperament_influence: Optional[float] = None,
-        timestamp: Optional[float] = None
-    ) -> torch.Tensor:
+        timestamp: Optional[float] = None,
+        state: Optional[SOVLState] = None,
+        error_manager: Optional[ErrorManager] = None,
+        context: Optional[SystemContext] = None,
+        curiosity_manager: Optional[CuriosityManager] = None
+    ) -> float:
         """
-        Calculate batched confidence scores.
+        Calculate confidence score using the integrated confidence calculator.
 
         Args:
             logits: Input logits (batch, seq_len, vocab_size).
             generated_ids: Optional mask for valid positions (batch, seq_len).
             temperament_influence: Temperament score (-1.0 to 1.0).
             timestamp: Optional timestamp for curiosity parameter synchronization.
+            state: Current SOVL state.
+            error_manager: Error handling manager.
+            context: System context.
+            curiosity_manager: Optional curiosity manager.
 
         Returns:
-            Confidence scores (batch,).
+            float: Confidence score between 0.0 and 1.0.
 
         Raises:
             LogitsError: If processing fails.
         """
         try:
             with self._lock, NumericalGuard():
-                # Get curiosity pressure from queue if available
+                # Validate inputs
+                logits = self._validator.validate_logits(logits)
+                generated_ids = self._validator.validate_generated_ids(generated_ids, logits)
+                
+                # Get current curiosity pressure if available
                 curiosity_pressure = None
                 if timestamp is not None and timestamp - self._last_curiosity_update >= self._curiosity_update_interval:
                     curiosity_pressure = self._get_curiosity_params()
                 
-                return self._compute_confidence(
-                    logits, generated_ids, temperament_influence, curiosity_pressure
+                # Calculate confidence using the confidence calculator
+                confidence = self.confidence_calculator.calculate_confidence_score(
+                    logits=logits,
+                    generated_ids=generated_ids,
+                    state=state,
+                    error_manager=error_manager,
+                    context=context,
+                    curiosity_manager=curiosity_manager
                 )
+                
+                # Apply additional adjustments if needed
+                if curiosity_pressure is not None:
+                    confidence *= (1.0 - curiosity_pressure * self.CURIOSITY_BOOST)
+                
+                if temperament_influence is not None:
+                    confidence *= (1.0 + temperament_influence * self.TEMPERAMENT_SCALE)
+                
+                # Ensure confidence is within bounds
+                confidence = max(self.MIN_CONFIDENCE, min(self.MAX_CONFIDENCE, confidence))
+                
+                # Log the confidence calculation
+                self._log_confidence(confidence, logits, temperament_influence, curiosity_pressure)
+                
+                return confidence
+                
         except Exception as e:
-            self._log_confidence_error(e, logits, generated_ids, temperament_influence, None)
+            self._log_confidence_error(e, logits, generated_ids, temperament_influence, curiosity_pressure)
             raise LogitsError(f"Confidence calculation failed: {str(e)}")
-
-    def _compute_confidence(
-        self,
-        logits: Union[torch.Tensor, List[torch.Tensor]],
-        generated_ids: Optional[torch.Tensor],
-        temperament_influence: Optional[float],
-        curiosity_pressure: Optional[float]
-    ) -> torch.Tensor:
-        """Core confidence computation logic."""
-        logits = self._validator.validate_logits(logits)
-        generated_ids = self._validator.validate_generated_ids(generated_ids, logits)
-
-        probs = torch.softmax(logits, dim=-1)
-        max_probs = probs.max(dim=-1).values
-
-        conf = self._aggregate_confidence(max_probs, generated_ids)
-        conf = self._adjust_for_distribution(conf, max_probs)
-        conf = self._apply_temperament(conf, temperament_influence)
-        conf = self._apply_curiosity(conf, curiosity_pressure)
-        
-        # Apply repetition penalty if enabled
-        if self.config.enable_rep_detection and generated_ids is not None:
-            rep_indices = self.detect_repetitions(generated_ids)
-            if rep_indices is not None:
-                conf = conf * (1.0 - self.config.rep_confidence_penalty)
-        
-        conf = self._smooth_confidence(conf)
-
-        self._log_confidence(conf, logits, temperament_influence, curiosity_pressure)
-        return conf.squeeze()
-
-    def _aggregate_confidence(self, max_probs: torch.Tensor, generated_ids: Optional[torch.Tensor]) -> torch.Tensor:
-        """Aggregate confidence scores."""
-        if generated_ids is not None:
-            mask = (generated_ids != self.PADDING_ID).float().to(self.device)
-            return safe_divide(
-                (max_probs * mask).sum(dim=1),
-                mask.sum(dim=1),
-                default=self.config.flat_distribution_confidence
-            )
-        return max_probs.mean(dim=1)
-
-    def _adjust_for_distribution(self, conf: torch.Tensor, max_probs: torch.Tensor) -> torch.Tensor:
-        """Adjust confidence for flat distributions."""
-        low_conf = max_probs.var(dim=-1) < self.config.confidence_var_threshold
-        conf = conf.clone()
-        conf[low_conf] = self.config.flat_distribution_confidence
-        return conf
-
-    def _apply_temperament(self, conf: torch.Tensor, temperament: Optional[float]) -> torch.Tensor:
-        """Apply temperament influence."""
-        if temperament is not None:
-            if not (-1.0 <= temperament <= 1.0):
-                raise ValueError(f"Temperament must be in [-1.0, 1.0], got {temperament}")
-            conf = conf * (1.0 + temperament * self.TEMPERAMENT_SCALE)
-        return conf
-
-    def _apply_curiosity(self, conf: torch.Tensor, curiosity: Optional[float]) -> torch.Tensor:
-        """Apply curiosity pressure."""
-        if curiosity is not None:
-            if not (0.0 <= curiosity <= 1.0):
-                raise ValueError(f"Curiosity must be in [0.0, 1.0], got {curiosity}")
-            conf = conf + curiosity * self.CURIOSITY_BOOST
-            conf = torch.clamp(conf, self.MIN_CONFIDENCE, self.MAX_CONFIDENCE)
-        return conf
-
-    def _smooth_confidence(self, conf: torch.Tensor) -> torch.Tensor:
-        """Apply confidence smoothing based on history."""
-        # Note: Confidence history is now managed by SOVLState
-        return conf
-
-    def _log_confidence(
-        self,
-        conf: torch.Tensor,
-        logits: torch.Tensor,
-        temperament: Optional[float],
-        curiosity: Optional[float]
-    ) -> None:
-        """Log confidence calculation event."""
-        self.logger.record_event(
-            event_type="confidence_calculated",
-            message="Confidence calculation completed",
-            level="info",
-            additional_info={
-                "confidence": conf.tolist(),
-                "logits_shape": logits.shape,
-                "temperament_influence": temperament,
-                "curiosity_pressure": curiosity
-            }
-        )
-
-    def _log_confidence_error(
-        self,
-        error: Exception,
-        logits: Union[torch.Tensor, List[torch.Tensor]],
-        generated_ids: Optional[torch.Tensor],
-        temperament: Optional[float],
-        curiosity: Optional[float]
-    ) -> None:
-        """Log confidence calculation errors."""
-        self.logger.log_error(
-            error_msg="Confidence calculation failed",
-            error_type="confidence_error",
-            stack_trace=traceback.format_exc(),
-            additional_info={
-                "logits_shape": str(getattr(logits, 'shape', 'N/A')),
-                "generated_ids_shape": str(getattr(generated_ids, 'shape', 'N/A')),
-                "temperament_influence": temperament,
-                "curiosity_pressure": curiosity
-            }
-        )
 
     # Configuration and State Management
     def tune(self, **kwargs) -> None:
@@ -724,6 +617,47 @@ class SOVLProcessor:
         
         return None
     
+    def _log_confidence(
+        self,
+        conf: float,
+        logits: torch.Tensor,
+        temperament: Optional[float],
+        curiosity: Optional[float]
+    ) -> None:
+        """Log confidence calculation event."""
+        self.logger.record_event(
+            event_type="confidence_calculated",
+            message="Confidence calculation completed",
+            level="info",
+            additional_info={
+                "confidence": conf,
+                "logits_shape": logits.shape,
+                "temperament_influence": temperament,
+                "curiosity_pressure": curiosity
+            }
+        )
+
+    def _log_confidence_error(
+        self,
+        error: Exception,
+        logits: Union[torch.Tensor, List[torch.Tensor]],
+        generated_ids: Optional[torch.Tensor],
+        temperament: Optional[float],
+        curiosity: Optional[float]
+    ) -> None:
+        """Log confidence calculation errors."""
+        self.logger.log_error(
+            error_msg="Confidence calculation failed",
+            error_type="confidence_error",
+            stack_trace=traceback.format_exc(),
+            additional_info={
+                "logits_shape": str(getattr(logits, 'shape', 'N/A')),
+                "generated_ids_shape": str(getattr(generated_ids, 'shape', 'N/A')),
+                "temperament_influence": temperament,
+                "curiosity_pressure": curiosity
+            }
+        )
+
 class SoulLogitsProcessor(LogitsProcessor):
     """Boosts token probabilities for .soul file keywords during generation.
 
