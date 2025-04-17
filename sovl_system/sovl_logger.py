@@ -5,12 +5,13 @@ import uuid
 import time
 import logging
 from datetime import datetime
-from threading import Lock
+from threading import Lock, RLock
 from typing import List, Dict, Union, Optional, Callable, Any, Tuple
 from dataclasses import dataclass
 import torch
 from logging.handlers import RotatingFileHandler
 import traceback
+from collections import deque
 
 @dataclass
 class LoggerConfig:
@@ -246,180 +247,60 @@ class _FileHandler:
                     stack_trace=traceback.format_exc()
                 )
 
-class Logger:
-    """Main logger class for the SOVL system."""
+class ILoggerClient:
+    """Interface for logger clients to ensure consistent interaction."""
+    def log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        raise NotImplementedError
+
+    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, **kwargs) -> None:
+        raise NotImplementedError
+
+class LogManager:
+    """Singleton manager for logging operations."""
+    _instance = None
+    _lock = RLock()
     
-    def __init__(self, config: LoggerConfig, fallback_logger: Logger = None):
-        """Initialize logger with configuration."""
-        self.config = config
-        self.fallback_logger = fallback_logger
-        self._log_cache = {}
-        self._log_buffer = []
-        self._last_prune_time = time.time()
-        self._validator = _LogValidator(fallback_logger)
-        self._file_handler = _FileHandler(config, fallback_logger)
-        self._min_level = "info"
-        self._load_existing()
-
-    def _load_existing(self) -> None:
-        """Load existing logs from file."""
-        try:
-            if os.path.exists(self.config.log_file):
-                with open(self.config.log_file, 'r') as f:
-                    for line in f:
-                        try:
-                            entry = json.loads(line)
-                            if self._validator.validate_entry(entry):
-                                self._log_buffer.append(entry)
-                        except json.JSONDecodeError:
-                            continue
-        except Exception as e:
-            if self.fallback_logger:
-                self.fallback_logger.log_error(
-                    error_msg=f"Failed to load existing logs: {str(e)}",
-                    error_type="log_loading_error",
-                    stack_trace=traceback.format_exc()
-                )
-
-    def _get_memory_stats(self) -> Dict[str, Any]:
-        """Get current memory statistics using PyTorch."""
-        stats = {
-            "gpu_allocated": None,
-            "gpu_reserved": None,
-            "gpu_memory_percent": None,
-            "system_memory": None
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if not hasattr(self, '_initialized'):
+            with self._lock:
+                if not hasattr(self, '_initialized'):
+                    self._log_queue = deque(maxlen=1000)
+                    self._config = LoggerConfig()
+                    self._file_handler = _FileHandler(self._config)
+                    self._validator = _LogValidator()
+                    self._write_lock = Lock()
+                    self._initialized = True
+    
+    def configure(self, config: LoggerConfig) -> None:
+        """Configure the logger with new settings."""
+        with self._lock:
+            self._config = config
+            self._file_handler = _FileHandler(config)
+    
+    def log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Thread-safe event logging."""
+        entry = {
+            'timestamp': time.time(),
+            'event_type': event_type,
+            'level': level,
+            'message': message,
+            **kwargs
         }
         
-        if torch.cuda.is_available():
-            try:
-                allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
-                reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # Convert to GB
-                total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
-                
-                stats.update({
-                    "gpu_allocated": allocated,
-                    "gpu_reserved": reserved,
-                    "gpu_memory_percent": (allocated / total) * 100 if total > 0 else None
-                })
-            except Exception as e:
-                self.fallback_logger.warning(f"Failed to get GPU memory stats: {str(e)}")
-        
-        return stats
-
-    def _should_prune(self) -> bool:
-        """Check if logs should be pruned based on memory usage."""
-        try:
-            memory_stats = self._get_memory_stats()
-            if memory_stats["gpu_memory_percent"] is not None:
-                return memory_stats["gpu_memory_percent"] > self.config.gpu_memory_threshold * 100
-            return False
-        except Exception as e:
-            self.fallback_logger.warning(f"Failed to check memory for pruning: {str(e)}")
-            return False
-
-    def _prune_old_logs(self) -> None:
-        """Prune old logs based on age and memory usage."""
-        try:
-            current_time = time.time()
-            self._log_buffer = [
-                entry for entry in self._log_buffer
-                if current_time - entry.get('timestamp', 0) < self.config.max_log_age_days * 86400
-            ]
-            
-            if self._get_memory_stats()['gpu_memory_percent'] > self.config.memory_threshold_mb:
-                self._log_buffer = self._log_buffer[-self.config.max_in_memory_logs:]
-                
-            self._last_prune_time = current_time
-            
-        except Exception as e:
-            if self.fallback_logger:
-                self.fallback_logger.log_error(
-                    error_msg=f"Failed to prune logs: {str(e)}",
-                    error_type="log_pruning_error",
-                    stack_trace=traceback.format_exc()
-                )
-
-    def set_min_level(self, level: str) -> None:
-        """Set minimum logging level."""
-        valid_levels = {'debug', 'info', 'warning', 'error', 'critical'}
-        if level.lower() not in valid_levels:
-            if self.fallback_logger:
-                self.fallback_logger.log_error(
-                    error_msg=f"Invalid logging level: {level}",
-                    error_type="invalid_log_level",
-                    stack_trace=None,
-                    additional_info={"valid_levels": list(valid_levels)}
-                )
-            return
-        self._min_level = level.lower()
-
-    def _should_log(self, level: str) -> bool:
-        """Check if message should be logged based on level."""
-        level_priority = {
-            'debug': 0,
-            'info': 1,
-            'warning': 2,
-            'error': 3,
-            'critical': 4
-        }
-        return level_priority.get(level.lower(), 0) >= level_priority.get(self._min_level, 0)
-
-    def _get_cached_log(self, key: str) -> Optional[Dict]:
-        """Get cached log entry."""
-        if key in self._log_cache:
-            entry = self._log_cache[key]
-            if time.time() - entry.get('timestamp', 0) < 3600:  # Cache for 1 hour
-                return entry
-            del self._log_cache[key]
-        return None
-
-    def _cache_log(self, key: str, entry: Dict) -> None:
-        """Cache log entry."""
-        self._log_cache[key] = entry
-        self._cleanup_cache()
-
-    def _cleanup_cache(self) -> None:
-        """Clean up expired cache entries."""
-        current_time = time.time()
-        expired_keys = [
-            key for key, entry in self._log_cache.items()
-            if current_time - entry.get('timestamp', 0) >= 3600
-        ]
-        for key in expired_keys:
-            del self._log_cache[key]
-
-    def _write_batch(self) -> None:
-        """Write buffered logs to file."""
-        try:
-            if not self._log_buffer:
-                return
-                
-            entries = self._log_buffer.copy()
-            self._log_buffer.clear()
-            
-            self._file_handler.write_batch(entries)
-            
-        except Exception as e:
-            if self.fallback_logger:
-                self.fallback_logger.log_error(
-                    error_msg=f"Failed to write log batch: {str(e)}",
-                    error_type="log_write_error",
-                    stack_trace=traceback.format_exc()
-                )
-
-    def log_error(
-        self,
-        error_msg: str,
-        error_type: str = None,
-        stack_trace: str = None,
-        conversation_id: str = None,
-        state_hash: str = None,
-        **kwargs
-    ) -> None:
-        """Log an error event."""
-        if not self._should_log('error'):
-            return
-            
+        with self._lock:
+            if self._validator.validate_entry(entry):
+                self._log_queue.append(entry)
+                self._write_batch()
+    
+    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, **kwargs) -> None:
+        """Thread-safe error logging."""
         entry = {
             'timestamp': time.time(),
             'event_type': 'error',
@@ -427,242 +308,71 @@ class Logger:
             'error_msg': error_msg,
             'error_type': error_type or 'unknown_error',
             'stack_trace': stack_trace,
-            'conversation_id': conversation_id,
-            'state_hash': state_hash,
             **kwargs
         }
         
-        if self._validator.validate_entry(entry):
-            self._log_buffer.append(entry)
-            self._write_batch()
-
-    def log_memory_usage(
-        self,
-        phase: str,
-        device: torch.device,
-        **kwargs
-    ) -> None:
-        """Log memory usage statistics."""
-        if not self._should_log('info'):
-            return
-            
-        entry = {
-            'timestamp': time.time(),
-            'event_type': 'memory_usage',
-            'level': 'info',
-            'phase': phase,
-            'device': str(device),
-            'memory_stats': self._get_memory_stats(),
-            **kwargs
-        }
-        
-        if self._validator.validate_entry(entry):
-            self._log_buffer.append(entry)
-            self._write_batch()
-
-    def log_memory_health(
-        self,
-        model_size: int,
-        trainer: Optional[SOVLTrainer] = None,
-        **kwargs
-    ) -> None:
-        """Log memory health status."""
-        if not self._should_log('info'):
-            return
-            
-        entry = {
-            'timestamp': time.time(),
-            'event_type': 'memory_health',
-            'level': 'info',
-            'model_size': model_size,
-            'trainer_state': trainer.state if trainer else None,
-            **kwargs
-        }
-        
-        if self._validator.validate_entry(entry):
-            self._log_buffer.append(entry)
-            self._write_batch()
-
-    def log_training_event(
-        self,
-        event_type: str,
-        epoch: int = None,
-        loss: float = None,
-        batch_size: int = None,
-        data_exposure: float = None,
-        conversation_id: str = None,
-        state_hash: str = None,
-        **kwargs
-    ) -> None:
-        """Log a training-related event."""
-        if not self._should_log('info'):
-            return
-            
-        entry = {
-            'timestamp': time.time(),
-            'event_type': event_type,
-            'level': 'info',
-            'epoch': epoch,
-            'loss': loss,
-            'batch_size': batch_size,
-            'data_exposure': data_exposure,
-            'conversation_id': conversation_id,
-            'state_hash': state_hash,
-            **kwargs
-        }
-        
-        if self._validator.validate_entry(entry):
-            self._log_buffer.append(entry)
-            self._write_batch()
-
-    def log_generation_event(
-        self,
-        prompt: str,
-        response: str,
-        confidence_score: float,
-        generation_params: dict = None,
-        conversation_id: str = None,
-        state_hash: str = None,
-        **kwargs
-    ) -> None:
-        """Log a generation event."""
-        if not self._should_log('info'):
-            return
-            
-        entry = {
-            'timestamp': time.time(),
-            'event_type': 'generation',
-            'level': 'info',
-            'prompt': prompt,
-            'response': response,
-            'confidence_score': confidence_score,
-            'generation_params': generation_params,
-            'conversation_id': conversation_id,
-            'state_hash': state_hash,
-            **kwargs
-        }
-        
-        if self._validator.validate_entry(entry):
-            self._log_buffer.append(entry)
-            self._write_batch()
-
-    def log_cleanup_event(
-        self,
-        phase: str,
-        success: bool,
-        error: str = None,
-        conversation_id: str = None,
-        state_hash: str = None,
-        **kwargs
-    ) -> None:
-        """Log a cleanup event."""
-        if not self._should_log('info'):
-            return
-            
-        entry = {
-            'timestamp': time.time(),
-            'event_type': 'cleanup',
-            'level': 'info',
-            'phase': phase,
-            'success': success,
-            'error': error,
-            'conversation_id': conversation_id,
-            'state_hash': state_hash,
-            **kwargs
-        }
-        
-        if self._validator.validate_entry(entry):
-            self._log_buffer.append(entry)
-            self._write_batch()
-
-    def log_curiosity_event(
-        self,
-        event_type: str,
-        question: str = None,
-        score: float = None,
-        spontaneous: bool = False,
-        answered: bool = False,
-        conversation_id: str = None,
-        state_hash: str = None,
-        **kwargs
-    ) -> None:
-        """Log a curiosity-related event."""
-        if not self._should_log('info'):
-            return
-            
-        entry = {
-            'timestamp': time.time(),
-            'event_type': event_type,
-            'level': 'info',
-            'question': question,
-            'score': score,
-            'spontaneous': spontaneous,
-            'answered': answered,
-            'conversation_id': conversation_id,
-            'state_hash': state_hash,
-            **kwargs
-        }
-        
-        if self._validator.validate_entry(entry):
-            self._log_buffer.append(entry)
-            self._write_batch()
-
-    def get_memory_stats(self) -> Dict[str, Any]:
-        """Get memory statistics."""
-        return {
-            'log_buffer_size': len(self._log_buffer),
-            'cache_size': len(self._log_cache),
-            'memory_usage_mb': self._get_memory_stats()['gpu_memory_percent'],
-            'last_prune_time': self._last_prune_time
-        }
-
-    def cleanup(self) -> None:
-        """Clean up logger resources."""
-        try:
-            self._write_batch()
-            self._log_buffer.clear()
-            self._log_cache.clear()
-            
-            if self._file_handler:
-                self._file_handler.cleanup()
-                
-        except Exception as e:
-            if self.fallback_logger:
-                self.fallback_logger.log_error(
-                    error_msg=f"Failed to cleanup logger: {str(e)}",
-                    error_type="logger_cleanup_error",
-                    stack_trace=traceback.format_exc()
-                )
-
-    def record(self, data: Dict[str, Any]) -> None:
-        """Record a log entry with memory statistics."""
-        try:
-            # Add memory stats to the log entry
-            memory_stats = self._get_memory_stats()
-            data.update(memory_stats)
-            
-            # Add timestamp if not present
-            if "timestamp" not in data:
-                data["timestamp"] = time.time()
-            
-            # Add event type if not present
-            if "event" not in data:
-                data["event"] = "log_entry"
-            
-            # Add to buffer
-            self._log_buffer.append(data)
-            
-            # Write to file if buffer is full
-            if len(self._log_buffer) >= self.config.max_in_memory_logs:
+        with self._lock:
+            if self._validator.validate_entry(entry):
+                self._log_queue.append(entry)
                 self._write_batch()
-                
-        except Exception as e:
-            if self.fallback_logger:
-                self.fallback_logger.log_error(
-                    error_msg=f"Failed to record log entry: {str(e)}",
-                    error_type="record_error",
-                    stack_trace=traceback.format_exc()
-                )
+    
+    def _write_batch(self) -> None:
+        """Thread-safe batch writing."""
+        with self._write_lock:
+            if not self._log_queue:
+                return
+            
+            entries = list(self._log_queue)
+            self._log_queue.clear()
+            
+            try:
+                self._file_handler.write_batch(entries)
+            except Exception as e:
+                logging.error(f"Failed to write log batch: {str(e)}")
+
+class Logger(ILoggerClient):
+    """Main logger class for the SOVL system."""
+    _instance = None
+    _lock = RLock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if not hasattr(self, '_initialized'):
+            with self._lock:
+                if not hasattr(self, '_initialized'):
+                    self._manager = LogManager()
+                    self._initialized = True
+    
+    def configure(self, config: LoggerConfig) -> None:
+        """Configure the logger with new settings."""
+        self._manager.configure(config)
+    
+    def log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Log an event."""
+        self._manager.log_event(event_type, message, level, **kwargs)
+    
+    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, **kwargs) -> None:
+        """Log an error."""
+        self._manager.log_error(error_msg, error_type, stack_trace, **kwargs)
+    
+    def get_logs(self, start_time: float = None, end_time: float = None, 
+                event_type: str = None, level: str = None) -> List[Dict[str, Any]]:
+        """Get logs matching the specified criteria."""
+        return self._manager.get_logs(start_time, end_time, event_type, level)
+    
+    def clear_logs(self) -> None:
+        """Clear all logs."""
+        self._manager.clear_logs()
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get logging statistics."""
+        return self._manager.get_stats()
 
 class LoggingManager:
     """Manages logging setup and configuration for the SOVL system."""
