@@ -1,10 +1,3 @@
-# sovl_interfaces.py
-"""
-Interface module to resolve circular dependency between sovl_conductor.py and sovl_main.py.
-Defines abstract interfaces for SOVLSystem and SOVLOrchestrator, and provides a mediator
-to coordinate interactions.
-"""
-
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
 import torch
