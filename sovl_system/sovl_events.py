@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from threading import Lock
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, Union, cast
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 import traceback
@@ -27,6 +27,7 @@ class EventDispatcher:
         - Thread-safe operations using locks.
         - Prioritized event handlers (higher priority executed first).
         - Synchronous (`notify`) and asynchronous (`async_notify`) notification.
+        - Channel-based pub/sub pattern support.
         - Optional event metadata (timestamp, event_id).
         - Validation of event types and handlers.
         - Duplicate subscription detection and warning.
@@ -37,6 +38,7 @@ class EventDispatcher:
 
     __slots__ = (
         '_subscribers',
+        '_channels',
         '_lock',
         '_logger',
         '_notification_depth',
@@ -54,6 +56,7 @@ class EventDispatcher:
         """
         self._config_manager = config_manager
         self._subscribers: Dict[str, List[Tuple[int, EventHandler]]] = defaultdict(list)
+        self._channels: Dict[str, asyncio.Queue] = defaultdict(asyncio.Queue)
         self._lock = Lock()
         self._logger = logger or Logger(LoggerConfig(log_file="sovl_events.log"))
         self._notification_depth: int = 0
@@ -474,3 +477,76 @@ class EventDispatcher:
             message="Finished processing deferred unsubscriptions.",
             level="debug"
         )
+
+    def publish(self, channel: str, event: Any) -> None:
+        """
+        Publish an event to a specific channel.
+
+        Args:
+            channel: The channel to publish the event to.
+            event: The event data to publish.
+        """
+        valid_channel = self._validate_event_type(channel)
+        with self._locked():
+            self._channels[valid_channel].put_nowait(event)
+            self._logger.record_event(
+                event_type="publish",
+                message=f"Published event to channel '{valid_channel}'",
+                level="debug"
+            )
+
+    async def subscribe_channel(self, channel: str) -> Generator[Any, None, None]:
+        """
+        Subscribe to a specific channel and yield events.
+
+        Args:
+            channel: The channel to subscribe to.
+
+        Yields:
+            Events published to the channel.
+        """
+        valid_channel = self._validate_event_type(channel)
+        while True:
+            try:
+                event = await self._channels[valid_channel].get()
+                yield event
+                self._channels[valid_channel].task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._log_error(
+                    Exception(f"Error in channel subscription for '{valid_channel}': {str(e)}"),
+                    "channel_subscription",
+                    traceback.format_exc()
+                )
+                break
+
+    def get_channel(self, channel: str) -> asyncio.Queue:
+        """
+        Get the queue for a specific channel.
+
+        Args:
+            channel: The channel to get the queue for.
+
+        Returns:
+            The queue for the specified channel.
+        """
+        valid_channel = self._validate_event_type(channel)
+        return self._channels[valid_channel]
+
+    def cleanup_channel(self, channel: str) -> None:
+        """
+        Clean up a specific channel.
+
+        Args:
+            channel: The channel to clean up.
+        """
+        valid_channel = self._validate_event_type(channel)
+        with self._locked():
+            if valid_channel in self._channels:
+                del self._channels[valid_channel]
+                self._logger.record_event(
+                    event_type="channel_cleanup",
+                    message=f"Cleaned up channel '{valid_channel}'",
+                    level="debug"
+                )
