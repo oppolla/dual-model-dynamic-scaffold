@@ -138,15 +138,12 @@ class TemperamentSystem:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_update_error",
-                message=f"Failed to update temperament: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "conversation_id": self.state.conversation_id,
-                    "state_hash": self.state.state_hash
-                }
+            self.logger.log_error(
+                error_msg=f"Failed to update temperament: {str(e)}",
+                error_type="temperament_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=self.state.conversation_id,
+                state_hash=self.state.state_hash
             )
             raise
             
@@ -273,11 +270,10 @@ class TemperamentAdjuster:
                 self._initialize_temperament_system()
                 
         except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_config_change_error",
-                message=f"Failed to handle config change: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
+            self.logger.log_error(
+                error_msg=f"Failed to handle config change: {str(e)}",
+                error_type="temperament_config_error",
+                stack_trace=traceback.format_exc()
             )
             
     def _on_state_update(self, state: SOVLState) -> None:
@@ -290,7 +286,11 @@ class TemperamentAdjuster:
                 self.logger.record_event(
                     event_type="temperament_history_reset",
                     message="Temperament history reset due to inconsistency",
-                    level="info"
+                    level="info",
+                    additional_info={
+                        "conversation_id": state.conversation_id,
+                        "state_hash": state.state_hash
+                    }
                 )
             
             # Update state with current temperament
@@ -304,11 +304,12 @@ class TemperamentAdjuster:
             self.event_dispatcher.notify("temperament_updated", state)
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="state_synchronization_error",
-                message=f"Failed to synchronize state: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
+            self.logger.log_error(
+                error_msg=f"Failed to synchronize state: {str(e)}",
+                error_type="temperament_state_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=state.conversation_id,
+                state_hash=state.state_hash
             )
             raise
             
@@ -327,7 +328,9 @@ class TemperamentAdjuster:
                     additional_info={
                         "current_score": state.temperament_score,
                         "last_history_score": state.temperament_history[-1],
-                        "history_length": len(state.temperament_history)
+                        "history_length": len(state.temperament_history),
+                        "conversation_id": state.conversation_id,
+                        "state_hash": state.state_hash
                     }
                 )
                 return False
@@ -341,7 +344,9 @@ class TemperamentAdjuster:
                     level="warning",
                     additional_info={
                         "parameter_hash": current_hash,
-                        "last_parameter_hash": self._last_parameter_hash
+                        "last_parameter_hash": self._last_parameter_hash,
+                        "conversation_id": state.conversation_id,
+                        "state_hash": state.state_hash
                     }
                 )
                 return False
@@ -349,11 +354,12 @@ class TemperamentAdjuster:
             return True
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_validation_error",
-                message=f"Failed to validate state consistency: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
+            self.logger.log_error(
+                error_msg=f"Failed to validate state consistency: {str(e)}",
+                error_type="temperament_validation_error",
+                stack_trace=traceback.format_exc(),
+                conversation_id=state.conversation_id,
+                state_hash=state.state_hash
             )
             return False
             
@@ -388,11 +394,10 @@ class TemperamentAdjuster:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_system_error",
-                message=f"Failed to initialize temperament system: {str(e)}",
-                level="error",
-                additional_info={"error": str(e)}
+            self.logger.log_error(
+                error_msg=f"Failed to initialize temperament system: {str(e)}",
+                error_type="temperament_system_error",
+                stack_trace=traceback.format_exc()
             )
             raise
             

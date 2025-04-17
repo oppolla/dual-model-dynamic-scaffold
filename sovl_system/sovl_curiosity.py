@@ -81,13 +81,14 @@ class Curiosity:
         """Clamp score between 0.0 and 1.0."""
         return max(0.0, min(1.0, score))
 
-    def _log_error(self, message: str) -> None:
-        """Log error if logger is available."""
+    def _log_error(self, message: str, **kwargs) -> None:
+        """Log error with standardized format."""
         if self.logger:
             self.logger.log_error(
                 error_msg=message,
                 error_type="curiosity_error",
-                stack_trace=traceback.format_exc()
+                stack_trace=traceback.format_exc(),
+                **kwargs
             )
 
 
@@ -149,13 +150,14 @@ class CuriosityCallbacks:
             except Exception as e:
                 self._log_error(f"Callback {event} failed: {str(e)}")
 
-    def _log_error(self, message: str) -> None:
-        """Log error if logger is available."""
+    def _log_error(self, message: str, **kwargs) -> None:
+        """Log error with standardized format."""
         if self.logger:
             self.logger.log_error(
                 error_msg=message,
                 error_type="curiosity_error",
-                stack_trace=traceback.format_exc()
+                stack_trace=traceback.format_exc(),
+                **kwargs
             )
 
 
@@ -200,6 +202,8 @@ class CuriosityManager:
         # Log device initialization
         self._log_event(
             "device_initialized",
+            message="Curiosity manager device initialized",
+            level="info",
             device=str(self.device),
             device_type=self.device.type
         )
@@ -366,55 +370,32 @@ class CuriosityManager:
             )
             raise
 
-    def _log_event(self, event_type: str, **kwargs) -> None:
-        """Log an event with standardized metadata."""
-        try:
-            metadata = {
-                "event_type": event_type,
-                "timestamp": time.time(),
-                "device": str(self.device),
-                "conversation_id": self.conversation_id,
-                "state_hash": self.state_hash,
-                **kwargs
-            }
-            self.logger.info(f"Curiosity event: {json.dumps(metadata)}")
-        except Exception as e:
-            self._log_error(f"Failed to log event: {str(e)}", event_type=event_type, **kwargs)
+    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Log an event with standardized fields."""
+        self.logger.record_event(
+            event_type=event_type,
+            message=message,
+            level=level,
+            additional_info=kwargs
+        )
 
-    def _log_warning(self, event_type: str, **kwargs) -> None:
-        """Log a warning with standardized metadata."""
-        try:
-            metadata = {
-                "event_type": event_type,
-                "timestamp": time.time(),
-                "device": str(self.device),
-                "conversation_id": self.conversation_id,
-                "state_hash": self.state_hash,
-                **kwargs
-            }
-            self.logger.warning(f"Curiosity warning: {json.dumps(metadata)}")
-        except Exception as e:
-            self.logger.error(f"Failed to log curiosity warning: {str(e)}")
+    def _log_warning(self, event_type: str, message: str, **kwargs) -> None:
+        """Log a warning with standardized format."""
+        self.logger.record_event(
+            event_type=event_type,
+            message=message,
+            level="warning",
+            additional_info=kwargs
+        )
 
-    def _log_error(self, message: str, error_type: str = "curiosity_error", **kwargs) -> None:
-        """Log an error with standardized metadata."""
-        try:
-            self.logger.log_error(
-                error_msg=message,
-                error_type=error_type,
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "device": str(self.device),
-                    "conversation_id": self.conversation_id,
-                    "state_hash": self.state_hash,
-                    **kwargs
-                }
-            )
-        except Exception as e:
-            # Fallback logging if primary logging fails
-            print(f"Failed to log error: {str(e)}")
-            print(f"Original error: {message}")
-            print(f"Stack trace: {traceback.format_exc()}")
+    def _log_error(self, message: str, **kwargs) -> None:
+        """Log an error with standardized format."""
+        self.logger.log_error(
+            error_msg=message,
+            error_type="curiosity_error",
+            stack_trace=traceback.format_exc(),
+            **kwargs
+        )
 
     def update_metrics(self, metric_name: str, value: float) -> bool:
         """Update curiosity metrics."""

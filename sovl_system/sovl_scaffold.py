@@ -42,14 +42,17 @@ class ScaffoldTokenMapper:
         self._validate_token_maps()
         
         # Log successful initialization
-        self.logger.record({
-            "event": "scaffold_token_mapper_initialized",
-            "base_vocab_size": len(self.base_tokenizer),
-            "scaffold_vocab_size": len(self.scaffold_tokenizer),
-            "token_map_size": len(self.token_map),
-            "special_token_map_size": len(self.special_token_map),
-            "timestamp": time.time()
-        })
+        self.logger.record_event(
+            event_type="scaffold_token_mapper_initialized",
+            message="Scaffold token mapper initialized successfully",
+            level="info",
+            additional_info={
+                "base_vocab_size": len(self.base_tokenizer),
+                "scaffold_vocab_size": len(self.scaffold_tokenizer),
+                "token_map_size": len(self.token_map),
+                "special_token_map_size": len(self.special_token_map)
+            }
+        )
         
     def _build_token_map(self):
         """Build the main token mapping between base and scaffold tokenizers."""
@@ -64,16 +67,24 @@ class ScaffoldTokenMapper:
                 ) or [self.scaffold_tokenizer.unk_token_id]
                 self.token_map[base_id] = {"ids": scaffold_ids, "weight": 1.0}
                 
-            self.logger.record({
-                "event": "token_map_built",
-                "map_size": len(self.token_map),
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="token_map_built",
+                message="Token map built successfully",
+                level="info",
+                additional_info={
+                    "map_size": len(self.token_map),
+                    "timestamp": time.time()
+                }
+            )
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to build token map: {str(e)}",
-                error_type="token_map_error",
-                stack_trace=traceback.format_exc()
+            self.logger.record_event(
+                event_type="token_map_error",
+                message=f"Failed to build token map: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
             )
             raise
             
@@ -86,16 +97,28 @@ class ScaffoldTokenMapper:
                 self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
             }
             
-            self.logger.record({
-                "event": "special_token_map_initialized",
-                "map_size": len(self.special_token_map),
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="special_token_map_initialized",
+                message="Special token map initialized successfully",
+                level="info",
+                additional_info={
+                    "map_size": len(self.special_token_map),
+                    "mappings": {
+                        "pad_token": self.special_token_map.get(self.base_tokenizer.pad_token_id),
+                        "eos_token": self.special_token_map.get(self.base_tokenizer.eos_token_id),
+                        "unk_token": self.special_token_map.get(self.base_tokenizer.unk_token_id)
+                    }
+                }
+            )
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to initialize special token map: {str(e)}",
-                error_type="token_map_error",
-                stack_trace=traceback.format_exc()
+            self.logger.record_event(
+                event_type="token_map_error",
+                message=f"Failed to initialize special token map: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc()
+                }
             )
             raise
             
@@ -135,21 +158,30 @@ class ScaffoldTokenMapper:
                     if not (0 <= scaffold_id < scaffold_vocab_size):
                         raise ValueError(f"Invalid scaffold token ID in token map: {scaffold_id}")
                     
-            self.logger.record({
-                "event": "token_maps_validated",
-                "base_vocab_size": base_vocab_size,
-                "scaffold_vocab_size": scaffold_vocab_size,
-                "token_map_size": len(self.token_map),
-                "special_token_map_size": len(self.special_token_map),
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="token_maps_validated",
+                message="Token maps validated successfully",
+                level="info",
+                additional_info={
+                    "base_vocab_size": base_vocab_size,
+                    "scaffold_vocab_size": scaffold_vocab_size,
+                    "token_map_size": len(self.token_map),
+                    "special_token_map_size": len(self.special_token_map),
+                    "timestamp": time.time()
+                }
+            )
             
         except Exception as e:
-            self.logger.record({
-                "error": f"Token map validation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="token_map_validation_failed",
+                message=f"Token map validation failed: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
         
     def _normalize_token(self, token: str) -> str:
@@ -215,9 +247,23 @@ class ScaffoldTokenMapper:
                     new_weight = min(1.0, current_weight + (confidence * 0.1))
                     self.token_map[base_id]['weight'] = new_weight
                 
-            self.logger.info(f"Token map updated with confidence: {confidence}")
+            self.logger.record_event(
+                event_type="token_map_updated",
+                message="Token map updated successfully",
+                level="info",
+                additional_info={
+                    "confidence": confidence
+                }
+            )
         except Exception as e:
-            self.logger.error(f"Token map memory update failed: {str(e)}")
+            self.logger.record_event(
+                event_type="token_map_memory_update_failed",
+                message=f"Token map memory update failed: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e)
+                }
+            )
             raise
 
 def build_scaffold_token_mapping(base_tokenizer, scaffold_tokenizer) -> ScaffoldTokenMapper:
@@ -263,12 +309,16 @@ class SparseMaskFactory:
                     raise ValueError(f"Unknown sparse pattern: {sparse_pattern}")
         except Exception as e:
             if logger:
-                logger.record({
-                    "error": f"Sparse mask creation failed: {str(e)}",
-                    "sparse_pattern": sparse_pattern,
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
-                })
+                logger.record_event(
+                    event_type="sparse_mask_creation_failed",
+                    message=f"Sparse mask creation failed: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "sparse_pattern": sparse_pattern,
+                        "timestamp": time.time(),
+                        "stack_trace": traceback.format_exc()
+                    }
+                )
             raise
 
 class AttentionMaskPreparer:
@@ -303,12 +353,16 @@ class AttentionMaskPreparer:
                 return attention_mask.to(device)
         except Exception as e:
             if logger:
-                logger.record({
-                    "error": f"Attention mask preparation failed: {str(e)}",
-                    "mask_shape": list(attention_mask.shape) if attention_mask is not None else None,
-                    "timestamp": time.time(),
-                    "stack_trace": traceback.format_exc()
-                })
+                logger.record_event(
+                    event_type="attention_mask_preparation_failed",
+                    message=f"Attention mask preparation failed: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "mask_shape": list(attention_mask.shape) if attention_mask is not None else None,
+                        "timestamp": time.time(),
+                        "stack_trace": traceback.format_exc()
+                    }
+                )
             raise
 
 class LayerDiscoveryStrategy:
@@ -356,11 +410,16 @@ class LayerDiscoveryStrategy:
 
             return candidates, names
         except Exception as e:
-            self.logger.record({
-                "error": f"Layer discovery failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="layer_discovery_failed",
+                message=f"Layer discovery failed: {str(e)}",
+                level="error",
+                additional_info={
+                    "mode": str(mode),
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
 class CrossAttentionLayer(nn.Module):
@@ -399,13 +458,17 @@ class CrossAttentionLayer(nn.Module):
         self.weight_history = []
         
         # Log successful initialization
-        self.logger.record({
-            "event": "cross_attention_layer_initialized",
-            "device": str(self.device),
-            "hidden_size": self.hidden_size,
-            "num_heads": self.num_heads,
-            "timestamp": time.time()
-        })
+        self.logger.record_event(
+            event_type="cross_attention_layer_initialized",
+            message="Cross attention layer initialized successfully",
+            level="info",
+            additional_info={
+                "device": str(self.device),
+                "hidden_size": self.hidden_size,
+                "num_heads": self.num_heads,
+                "timestamp": time.time()
+            }
+        )
         
     def _load_config(self, hidden_size: Optional[int], num_heads: Optional[int]) -> None:
         """Load and validate configuration."""
@@ -422,15 +485,19 @@ class CrossAttentionLayer(nn.Module):
         if self.hidden_size % self.num_heads != 0:
             raise ValueError(f"Hidden size {self.hidden_size} must be divisible by num_heads {self.num_heads}")
             
-        self.logger.record({
-            "event": "cross_attention_config_loaded",
-            "hidden_size": self.hidden_size,
-            "num_heads": self.num_heads,
-            "head_dim": self.head_dim,
-            "max_weight": self.max_weight,
-            "min_weight": self.min_weight,
-            "timestamp": time.time()
-        })
+        self.logger.record_event(
+            event_type="cross_attention_config_loaded",
+            message="Cross attention config loaded successfully",
+            level="info",
+            additional_info={
+                "hidden_size": self.hidden_size,
+                "num_heads": self.num_heads,
+                "head_dim": self.head_dim,
+                "max_weight": self.max_weight,
+                "min_weight": self.min_weight,
+                "timestamp": time.time()
+            }
+        )
         
     def _init_projections(self) -> None:
         """Initialize projection layers."""
@@ -612,10 +679,14 @@ class CrossAttentionLayer(nn.Module):
                 memory_tensors, memory_weight, dynamic_factor, use_cache
             )
         except Exception as e:
-            self.logger.record({
-                "error": f"CrossAttentionLayer forward pass failed: {str(e)}",
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="cross_attention_layer_forward_pass_failed",
+                message=f"CrossAttentionLayer forward pass failed: {str(e)}",
+                level="error",
+                additional_info={
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
 class CrossAttentionInjector:
@@ -646,11 +717,15 @@ class CrossAttentionInjector:
                 # Backup original state
                 original_state = {name: param.clone() for name, param in base_model.named_parameters()}
                 
-                self.logger.record({
-                    "event": "cross_attention_injection_start",
-                    "layers": layer_indices,
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="cross_attention_injection_start",
+                    message="Cross-attention injection started",
+                    level="info",
+                    additional_info={
+                        "layers": layer_indices,
+                        "timestamp": time.time()
+                    }
+                )
                 
                 # Inject layers
                 for layer_idx in layer_indices:
@@ -669,20 +744,28 @@ class CrossAttentionInjector:
                             param.data.copy_(original_state[name])
                     raise RuntimeError("Cross-attention injection verification failed")
                 
-                self.logger.record({
-                    "event": "cross_attention_injection_complete",
-                    "status": "success",
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="cross_attention_injection_complete",
+                    message="Cross-attention injection completed successfully",
+                    level="info",
+                    additional_info={
+                        "status": "success",
+                        "timestamp": time.time()
+                    }
+                )
                 
                 return base_model
                 
         except Exception as e:
-            self.logger.record({
-                "error": f"Cross-attention injection failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="cross_attention_injection_failed",
+                message=f"Cross-attention injection failed: {str(e)}",
+                level="error",
+                additional_info={
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
     def _inject_single_layer(
@@ -720,19 +803,27 @@ class CrossAttentionInjector:
             if not self._verify_single_layer(model, layer_idx):
                 raise RuntimeError(f"Layer {layer_idx} injection verification failed")
                 
-            self.logger.record({
-                "event": "layer_injected",
-                "layer_idx": layer_idx,
-                "strategy": injection_strategy,
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="layer_injected",
+                message="Layer injected successfully",
+                level="info",
+                additional_info={
+                    "layer_idx": layer_idx,
+                    "strategy": injection_strategy,
+                    "timestamp": time.time()
+                }
+            )
             
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to inject layer {layer_idx}: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="layer_injection_failed",
+                message=f"Failed to inject layer {layer_idx}: {str(e)}",
+                level="error",
+                additional_info={
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
     def get_cross_attention_layers(self, model: nn.Module, mode: Union[str, List[int]]) -> List[int]:
@@ -764,21 +855,29 @@ class CrossAttentionInjector:
                 else:  # balanced
                     layers = list(range(total_layers // 3, 2 * total_layers // 3))
 
-            self.logger.record({
-                "event": "layer_selection",
-                "mode": str(mode),
-                "selected_layers": layers,
-                "total_layers": total_layers if isinstance(mode, str) else len(self.find_model_layers(model)[0]),
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="layer_selection",
+                message="Layer selection completed successfully",
+                level="info",
+                additional_info={
+                    "mode": str(mode),
+                    "selected_layers": layers,
+                    "total_layers": total_layers if isinstance(mode, str) else len(self.find_model_layers(model)[0]),
+                    "timestamp": time.time()
+                }
+            )
             return layers
         except Exception as e:
-            self.logger.record({
-                "error": f"Layer selection failed: {str(e)}",
-                "mode": str(mode),
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="layer_selection_failed",
+                message=f"Layer selection failed: {str(e)}",
+                level="error",
+                additional_info={
+                    "mode": str(mode),
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
     def find_model_layers(self, model: nn.Module) -> Tuple[List[nn.Module], List[str]]:
@@ -836,12 +935,16 @@ class CrossAttentionInjector:
                         
                     return (output,) + base_output[1:] if isinstance(base_output, tuple) else output
                 except Exception as e:
-                    self.parent.logger.record({
-                        "error": f"WrappedLayer forward failed: {str(e)}",
-                        "hidden_states_shape": list(hidden_states.shape),
-                        "timestamp": time.time(),
-                        "stack_trace": traceback.format_exc()
-                    })
+                    self.parent.logger.record_event(
+                        event_type="wrapped_layer_forward_failed",
+                        message=f"WrappedLayer forward failed: {str(e)}",
+                        level="error",
+                        additional_info={
+                            "hidden_states_shape": list(hidden_states.shape),
+                            "timestamp": time.time(),
+                            "stack_trace": traceback.format_exc()
+                        }
+                    )
                     raise
 
         return WrappedLayer(original_layer, cross_attn_layer, scaffold_model, token_map, self, strategy)
@@ -888,20 +991,29 @@ class CrossAttentionInjector:
                         continue
                     
             # Log verification results
-            self.logger.record({
-                "event": "cross_attention_verification",
-                "expected_layers": list(expected_layers),
-                "found_layers": list(found_layers),
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="cross_attention_verification",
+                message="Cross-attention verification completed",
+                level="info",
+                additional_info={
+                    "expected_layers": list(expected_layers),
+                    "found_layers": list(found_layers),
+                    "timestamp": time.time()
+                }
+            )
 
             # Check if all expected layers were found
             if not expected_layers.issubset(found_layers):
                 missing_layers = expected_layers - found_layers
-                self.logger.record({
-                    "warning": f"Missing cross-attention layers: {missing_layers}",
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="missing_cross_attention_layers",
+                    message=f"Missing cross-attention layers: {missing_layers}",
+                    level="warning",
+                    additional_info={
+                        "missing_layers": list(missing_layers),
+                        "timestamp": time.time()
+                    }
+                )
                 return False
 
             # Verify layer dimensions and structure
@@ -909,26 +1021,41 @@ class CrossAttentionInjector:
                 try:
                     layer = model.transformer.h[layer_idx]
                     if not hasattr(layer, 'cross_attention'):
-                        self.logger.record({
-                            "warning": f"Layer {layer_idx} missing cross_attention attribute",
-                            "timestamp": time.time()
-                        })
+                        self.logger.record_event(
+                            event_type="layer_missing_cross_attention_attribute",
+                            message=f"Layer {layer_idx} missing cross_attention attribute",
+                            level="warning",
+                            additional_info={
+                                "layer_idx": layer_idx,
+                                "timestamp": time.time()
+                            }
+                        )
                         return False
 
                     # Verify dimensions match
                     if layer.cross_attention.hidden_size != base_config.hidden_size:
-                        self.logger.record({
-                            "warning": f"Layer {layer_idx} dimension mismatch",
-                            "timestamp": time.time()
-                        })
+                        self.logger.record_event(
+                            event_type="layer_dimension_mismatch",
+                            message=f"Layer {layer_idx} dimension mismatch",
+                            level="warning",
+                            additional_info={
+                                "layer_idx": layer_idx,
+                                "timestamp": time.time()
+                            }
+                        )
                         return False
 
                     # Verify attention heads match
                     if layer.cross_attention.num_attention_heads != base_config.num_attention_heads:
-                        self.logger.record({
-                            "warning": f"Layer {layer_idx} attention heads mismatch",
-                            "timestamp": time.time()
-                        })
+                        self.logger.record_event(
+                            event_type="layer_attention_heads_mismatch",
+                            message=f"Layer {layer_idx} attention heads mismatch",
+                            level="warning",
+                            additional_info={
+                                "layer_idx": layer_idx,
+                                "timestamp": time.time()
+                            }
+                        )
                         return False
                 except Exception as e:
                     self.error_handler.handle_cross_attention_error(e, layer_idx)
@@ -947,18 +1074,26 @@ class CrossAttentionInjector:
                     {k: v for k, v in state_dict.items() if 'cross_attn' in k or 'scaffold_proj' in k},
                     path
                 )
-                self.logger.record({
-                    "event": "save_state",
-                    "path": path,
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="save_state",
+                    message="Cross-attention state saved successfully",
+                    level="info",
+                    additional_info={
+                        "path": path,
+                        "timestamp": time.time()
+                    }
+                )
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to save cross-attention state: {str(e)}",
-                "path": path,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="save_state_failed",
+                message=f"Failed to save cross-attention state: {str(e)}",
+                level="error",
+                additional_info={
+                    "path": path,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
     def load_state(self, path: str, model: nn.Module):
@@ -969,18 +1104,26 @@ class CrossAttentionInjector:
                 checkpoint_dict = torch.load(path, map_location=model.device)
                 state_dict.update({k: v for k, v in checkpoint_dict.items() if k in state_dict})
                 model.load_state_dict(state_dict)
-                self.logger.record({
-                    "event": "load_state",
-                    "path": path,
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="load_state",
+                    message="Cross-attention state loaded successfully",
+                    level="info",
+                    additional_info={
+                        "path": path,
+                        "timestamp": time.time()
+                    }
+                )
         except Exception as e:
-            self.logger.record({
-                "error": f"Failed to load cross-attention state: {str(e)}",
-                "path": path,
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
+            self.logger.record_event(
+                event_type="load_state_failed",
+                message=f"Failed to load cross-attention state: {str(e)}",
+                level="error",
+                additional_info={
+                    "path": path,
+                    "timestamp": time.time(),
+                    "stack_trace": traceback.format_exc()
+                }
+            )
             raise
 
     def inject_cross_attention(
@@ -1007,11 +1150,14 @@ class CrossAttentionInjector:
         """
         try:
             if not cross_attn_config.get("enable_cross_attention", True):
-                self.logger.record({
-                    "event": "cross_attention",
-                    "status": "disabled",
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="cross_attention",
+                    message="Cross-attention disabled",
+                    level="info",
+                    additional_info={
+                        "timestamp": time.time()
+                    }
+                )
                 return
 
             print("Injecting cross-attention layers...")
@@ -1033,10 +1179,14 @@ class CrossAttentionInjector:
             if not self.verify_injection(model, layers_to_inject, model.config):
                 raise ValueError("Cross-attention layer verification failed")
                 
-            self.logger.record({
-                "event": "cross_attention_injected",
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="cross_attention_injected",
+                message="Cross-attention injection completed successfully",
+                level="info",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
             print("Cross-attention injection complete.")
             
         except Exception as e:
@@ -1100,6 +1250,7 @@ class ScaffoldProvider:
             self.logger.record_event(
                 event_type="scaffold_error",
                 message="Failed to get scaffold context",
+                level="error",
                 additional_info={
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
@@ -1115,6 +1266,7 @@ class ScaffoldProvider:
             self.logger.record_event(
                 event_type="scaffold_error",
                 message="Failed to validate scaffold config",
+                level="error",
                 additional_info={
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
@@ -1130,6 +1282,7 @@ class ScaffoldProvider:
             self.logger.record_event(
                 event_type="scaffold_error",
                 message="Failed to initialize scaffold state",
+                level="error",
                 additional_info={
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
@@ -1145,6 +1298,7 @@ class ScaffoldProvider:
             self.logger.record_event(
                 event_type="scaffold_error",
                 message="Failed to verify scaffold compatibility",
+                level="error",
                 additional_info={
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
@@ -1160,6 +1314,7 @@ class ScaffoldProvider:
             self.logger.record_event(
                 event_type="scaffold_error",
                 message="Failed to get scaffold stats",
+                level="error",
                 additional_info={
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
@@ -1175,6 +1330,7 @@ class ScaffoldProvider:
             self.logger.record_event(
                 event_type="scaffold_error",
                 message="Failed to reset scaffold state",
+                level="error",
                 additional_info={
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
@@ -1213,18 +1369,26 @@ class ScaffoldManager:
             
             for key in required_keys:
                 if not self.config_manager.has_key(key):
-                    self.logger.record({
-                        "error": f"Missing required scaffold config key: {key}",
-                        "timestamp": time.time()
-                    })
+                    self.logger.record_event(
+                        event_type="scaffold_config_error",
+                        message=f"Missing required scaffold config key: {key}",
+                        level="error",
+                        additional_info={
+                            "timestamp": time.time()
+                        }
+                    )
                     return False
 
             cross_attn_layers = self.config_manager.get("core_config.cross_attn_layers", [])
             if not isinstance(cross_attn_layers, list):
-                self.logger.record({
-                    "error": "cross_attn_layers must be a list",
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="scaffold_config_error",
+                    message="cross_attn_layers must be a list",
+                    level="error",
+                    additional_info={
+                        "timestamp": time.time()
+                    }
+                )
                 return False
 
             numeric_validations = {
@@ -1238,22 +1402,34 @@ class ScaffoldManager:
                 if self.config_manager.has_key(key):
                     value = self.config_manager.get(key)
                     if not isinstance(value, (int, float)):
-                        self.logger.record({
-                            "error": f"{key} must be numeric",
-                            "timestamp": time.time()
-                        })
+                        self.logger.record_event(
+                            event_type="scaffold_config_error",
+                            message=f"{key} must be numeric",
+                            level="error",
+                            additional_info={
+                                "timestamp": time.time()
+                            }
+                        )
                         return False
                     if min_val is not None and value < min_val:
-                        self.logger.record({
-                            "error": f"{key} must be >= {min_val}",
-                            "timestamp": time.time()
-                        })
+                        self.logger.record_event(
+                            event_type="scaffold_config_error",
+                            message=f"{key} must be >= {min_val}",
+                            level="error",
+                            additional_info={
+                                "timestamp": time.time()
+                            }
+                        )
                         return False
                     if max_val is not None and value > max_val:
-                        self.logger.record({
-                            "error": f"{key} must be <= {max_val}",
-                            "timestamp": time.time()
-                        })
+                        self.logger.record_event(
+                            event_type="scaffold_config_error",
+                            message=f"{key} must be <= {max_val}",
+                            level="error",
+                            additional_info={
+                                "timestamp": time.time()
+                            }
+                        )
                         return False
 
             self.validation_cache["config_valid"] = True
@@ -1288,15 +1464,19 @@ class ScaffoldManager:
                     device=self._device
                 )
                 
-                self.logger.record({
-                    "event": "scaffold_state_initialized",
-                    "hidden_size": self._hidden_size,
-                    "num_heads": self.num_heads,
-                    "num_layers": self.num_layers,
-                    "max_position_embeddings": self.scaffold_config.max_position_embeddings,
-                    "device": str(self._device),
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="scaffold_state_initialized",
+                    message="Scaffold state initialized successfully",
+                    level="info",
+                    additional_info={
+                        "hidden_size": self._hidden_size,
+                        "num_heads": self.num_heads,
+                        "num_layers": self.num_layers,
+                        "max_position_embeddings": self.scaffold_config.max_position_embeddings,
+                        "device": str(self._device),
+                        "timestamp": time.time()
+                    }
+                )
 
             return True
         except Exception as e:
@@ -1314,21 +1494,29 @@ class ScaffoldManager:
                 raise ValueError("Scaffold config not initialized")
 
             if self.scaffold_config.hidden_size % base_config.hidden_size != 0:
-                self.logger.record({
-                    "error": "Incompatible hidden sizes",
-                    "scaffold_size": self.scaffold_config.hidden_size,
-                    "base_size": base_config.hidden_size,
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="scaffold_compatibility_error",
+                    message="Incompatible hidden sizes",
+                    level="error",
+                    additional_info={
+                        "scaffold_size": self.scaffold_config.hidden_size,
+                        "base_size": base_config.hidden_size,
+                        "timestamp": time.time()
+                    }
+                )
                 return False
 
             if self.scaffold_config.num_attention_heads % base_config.num_attention_heads != 0:
-                self.logger.record({
-                    "error": "Incompatible number of attention heads",
-                    "scaffold_heads": self.scaffold_config.num_attention_heads,
-                    "base_heads": base_config.num_attention_heads,
-                    "timestamp": time.time()
-                })
+                self.logger.record_event(
+                    event_type="scaffold_compatibility_error",
+                    message="Incompatible number of attention heads",
+                    level="error",
+                    additional_info={
+                        "scaffold_heads": self.scaffold_config.num_attention_heads,
+                        "base_heads": base_config.num_attention_heads,
+                        "timestamp": time.time()
+                    }
+                )
                 return False
 
             return True
@@ -1366,10 +1554,14 @@ class ScaffoldManager:
             self.token_mapper = None
             self.scaffold_state = None
             self.validation_cache.clear()
-            self.logger.record({
-                "event": "scaffold_state_reset",
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="scaffold_state_reset",
+                message="Scaffold state reset successfully",
+                level="info",
+                additional_info={
+                    "timestamp": time.time()
+                }
+            )
 
     def build_token_map(self, base_tokenizer, scaffold_tokenizer):
         """Build token mapping between base and scaffold models."""
@@ -1402,12 +1594,16 @@ class ScaffoldManager:
             if not token_mapper:
                 raise ValueError("Token map is empty")
                 
-            self.logger.record({
-                "event": "token_map_built",
-                "map_size": len(token_mapper),
-                "special_tokens": len(special_token_map),
-                "timestamp": time.time()
-            })
+            self.logger.record_event(
+                event_type="token_map_built",
+                message="Token map built successfully",
+                level="info",
+                additional_info={
+                    "map_size": len(token_mapper),
+                    "special_tokens": len(special_token_map),
+                    "timestamp": time.time()
+                }
+            )
             
             return token_mapper
             
