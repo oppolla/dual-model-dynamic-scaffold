@@ -13,6 +13,7 @@ from datetime import datetime
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
+from sovl_records import ConfidenceHistory
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -681,6 +682,7 @@ class SOVLState(StateBase):
         self.device = device
         self._cache = {}
         self._last_update_time = time.time()
+        self._confidence_history = ConfidenceHistory(config_manager, logger)
         self._initialize_state()
 
     @synchronized("lock")
@@ -690,7 +692,6 @@ class SOVLState(StateBase):
             self.seen_prompts = set()
             self.temperament_score = 0.0
             self.last_temperament_score = 0.0
-            self.confidence_history = deque(maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 5))
             self.temperament_history = deque(maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5))
             self.dream_memory = deque(maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10))
             self.total_dream_memory_mb = 0.0
@@ -807,6 +808,18 @@ class SOVLState(StateBase):
             self.log_error(f"Failed to decompress tensor: {str(e)}", error_type="tensor_decompression_error")
             raise
 
+    def add_confidence(self, confidence: float) -> None:
+        """Add a confidence score to the history."""
+        self._confidence_history.add_confidence(confidence)
+
+    def get_confidence_history(self) -> Deque[float]:
+        """Get the confidence history."""
+        return self._confidence_history.get_confidence_history()
+
+    def clear_confidence_history(self) -> None:
+        """Clear the confidence history."""
+        self._confidence_history.clear_history()
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
         with self.lock:
@@ -815,7 +828,6 @@ class SOVLState(StateBase):
                 "seen_prompts": list(self.seen_prompts),
                 "temperament_score": self.temperament_score,
                 "last_temperament_score": self.last_temperament_score,
-                "confidence_history": list(self.confidence_history),
                 "temperament_history": list(self.temperament_history),
                 "dream_memory": [{
                     "tensor": self._compress_tensor(m["tensor"], target_device="cpu"),
@@ -825,7 +837,8 @@ class SOVLState(StateBase):
                 } for m in self.dream_memory],
                 "total_dream_memory_mb": self.total_dream_memory_mb,
                 "history": self.history.to_dict(),
-                "data_stats": self.data_stats.to_dict()
+                "data_stats": self.data_stats.to_dict(),
+                "confidence_history": self._confidence_history.to_dict()
             }
 
     @classmethod
@@ -840,8 +853,6 @@ class SOVLState(StateBase):
             state.seen_prompts = set(data.get("seen_prompts", []))
             state.temperament_score = data.get("temperament_score", 0.0)
             state.last_temperament_score = data.get("last_temperament_score", 0.0)
-            state.confidence_history = deque(data.get("confidence_history", []),
-                                           maxlen=config_manager.get("controls_config.confidence_history_maxlen", 5))
             state.temperament_history = deque(data.get("temperament_history", []),
                                             maxlen=config_manager.get("controls_config.temperament_history_maxlen", 5))
             state.dream_memory = deque(maxlen=config_manager.get("controls_config.dream_memory_maxlen", 10))
@@ -856,6 +867,8 @@ class SOVLState(StateBase):
             state.history = ConversationHistory.from_dict(data.get("history", {}),
                                                        maxlen=config_manager.get("controls_config.max_messages", 100))
             state.data_stats = DataStats.from_dict(data.get("data_stats", {}))
+            if "confidence_history" in data:
+                state._confidence_history.from_dict(data["confidence_history"])
             state._validate_state()
         return state
 
@@ -911,7 +924,8 @@ class SOVLState(StateBase):
             ),
             "total_dream_memory_mb": self.total_dream_memory_mb,
             "history": self.history.to_dict(),
-            "data_stats": self.data_stats.to_dict()
+            "data_stats": self.data_stats.to_dict(),
+            "confidence_history": self._confidence_history.to_dict()
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 

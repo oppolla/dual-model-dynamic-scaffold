@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from sovl_utils import NumericalGuard, safe_divide
 from sovl_logger import Logger
 from sovl_config import ConfigManager
+from sovl_records import ConfidenceHistory
 from transformers import PreTrainedTokenizer
 from sovl_confidence import ConfidenceCalculator, ErrorManager, SystemContext, CuriosityManager
 
@@ -273,8 +274,9 @@ class SOVLProcessor:
         self.logger = logger
         self.device = device
         
-        # Initialize confidence calculator
+        # Initialize confidence calculator and history
         self.confidence_calculator = ConfidenceCalculator(config_manager, logger)
+        self._confidence_history = ConfidenceHistory(config_manager, logger)
         
         # Initialize message queue for curiosity parameters
         self._curiosity_queue = deque(maxlen=100)
@@ -391,6 +393,9 @@ class SOVLProcessor:
                 # Ensure confidence is within bounds
                 confidence = max(self.MIN_CONFIDENCE, min(self.MAX_CONFIDENCE, confidence))
                 
+                # Add to history
+                self._confidence_history.add_confidence(confidence)
+                
                 # Log the confidence calculation
                 self._log_confidence(confidence, logits, temperament_influence, curiosity_pressure)
                 
@@ -400,37 +405,13 @@ class SOVLProcessor:
             self._log_confidence_error(e, logits, generated_ids, temperament_influence, curiosity_pressure)
             raise LogitsError(f"Confidence calculation failed: {str(e)}")
 
-    # Configuration and State Management
-    def tune(self, **kwargs) -> None:
-        """
-        Update processor configuration.
+    def get_confidence_history(self) -> Deque[float]:
+        """Get the confidence history."""
+        return self._confidence_history.get_confidence_history()
 
-        Args:
-            **kwargs: Configuration parameters to update.
-        """
-        try:
-            with self._lock:
-                old_config = vars(self.config).copy()
-                self.config.update(self.config_manager, **kwargs)
-                
-                self.logger.log_training_event(
-                    event_type="processor_tuned",
-                    message="Processor configuration updated",
-                    level="info",
-                    additional_info={
-                        "old_config": old_config,
-                        "new_config": vars(self.config)
-                    }
-                )
-        except Exception as e:
-            self.logger.log_error(
-                error_type="tuning_error",
-                message="Processor tuning failed",
-                error=str(e),
-                stack_trace=traceback.format_exc(),
-                additional_info={"kwargs": kwargs}
-            )
-            raise
+    def clear_confidence_history(self) -> None:
+        """Clear the confidence history."""
+        self._confidence_history.clear_history()
 
     def get_state(self) -> Dict[str, Any]:
         """Export processor state."""
@@ -440,7 +421,8 @@ class SOVLProcessor:
                 "token_mapping": {
                     "scaffold_unk_id": self.scaffold_unk_id,
                     "token_map": self.token_map
-                }
+                },
+                "confidence_history": self._confidence_history.to_dict()
             }
 
     def load_state(self, state: Dict[str, Any]) -> None:
@@ -457,6 +439,8 @@ class SOVLProcessor:
                 if "token_mapping" in state:
                     self.scaffold_unk_id = state["token_mapping"].get("scaffold_unk_id", 0)
                     self.token_map = state["token_mapping"].get("token_map", {})
+                if "confidence_history" in state:
+                    self._confidence_history.from_dict(state["confidence_history"])
                 
                 self.logger.log_training_event(
                     event_type="state_loaded",
@@ -480,6 +464,7 @@ class SOVLProcessor:
             self.config = ProcessorConfig.from_config_manager(self.config_manager)
             self.scaffold_unk_id = 0
             self.token_map = {}
+            self._confidence_history.clear_history()
             
             self.logger.log_training_event(
                 event_type="processor_reset",
