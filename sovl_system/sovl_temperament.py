@@ -142,10 +142,29 @@ class TemperamentSystem:
         """
         try:
             # Validate inputs
-            if not 0.0 <= new_score <= 1.0:
-                raise ValueError(f"Invalid temperament score: {new_score}")
-            if not 0.0 <= confidence <= 1.0:
-                raise ValueError(f"Invalid confidence: {confidence}")
+            if not isinstance(new_score, (int, float)) or not 0.0 <= new_score <= 1.0:
+                self.logger.record_event(
+                    event_type="temperament_update_invalid_score",
+                    message=f"Invalid temperament score: {new_score}. Ignoring update.",
+                    level="warning",
+                    additional_info={
+                        "lifecycle_stage": lifecycle_stage,
+                        "current_score": self.state.current_temperament
+                    }
+                )
+                return
+
+            if not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
+                self.logger.record_event(
+                    event_type="temperament_update_invalid_confidence",
+                    message=f"Invalid confidence: {confidence}. Ignoring update.",
+                    level="warning",
+                    additional_info={
+                        "lifecycle_stage": lifecycle_stage,
+                        "current_score": self.state.current_temperament
+                    }
+                )
+                return
                 
             # Get configuration values
             smoothing_factor = self.temperament_config.get("controls_config.temp_smoothing_factor")
@@ -178,7 +197,9 @@ class TemperamentSystem:
                 level="error",
                 additional_info={
                     "error": str(e),
-                    "stack_trace": traceback.format_exc()
+                    "stack_trace": traceback.format_exc(),
+                    "lifecycle_stage": lifecycle_stage,
+                    "current_score": self.state.current_temperament
                 }
             )
             raise
