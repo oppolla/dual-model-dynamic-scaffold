@@ -8,10 +8,6 @@ import threading
 import traceback
 from dataclasses import dataclass
 from threading import Lock
-try:
-    import orjson  # Optional for faster JSON serialization
-except ImportError:
-    orjson = None
 from sovl_config import ConfigManager
 from sovl_logger import Logger, LoggingManager
 from sovl_utils import NumericalGuard, synchronized
