@@ -1004,10 +1004,11 @@ class CrossAttentionInjector:
 def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for scaffold generation."""
     try:
-        # Get the curiosity manager from the global state
-        sovl = SOVLSystem()
+        # Get the state from the existing system
+        from sovl_state import get_state
+        state = get_state()
         
-        if not sovl.curiosity:
+        if not state.curiosity:
             return 0.5
             
         # Generate query embedding from the logits
@@ -1015,10 +1016,10 @@ def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor
             query_embedding = logits.mean(dim=1)  # Simple mean pooling of logits
             
         # Use curiosity manager for confidence calculation
-        confidence = sovl.curiosity.compute_curiosity(
+        confidence = state.curiosity.compute_curiosity(
             base_conf=0.5,  # Default base confidence
             scaf_conf=0.5,  # Default scaffold confidence
-            state=sovl.state,
+            state=state,
             query_embedding=query_embedding,
             device=logits.device
         )

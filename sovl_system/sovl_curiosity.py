@@ -6,8 +6,11 @@ import threading
 import math
 import torch
 from torch import nn
-
 from sovl_error import ErrorHandler
+from sovl_state import SOVLState
+from sovl_config import ConfigManager
+from sovl_logger import Logger
+from sovl_trainer import LifecycleManager
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -244,7 +247,9 @@ class CuriosityManager:
         logger: Logger,
         error_manager: ErrorHandler,
         device: torch.device,
-        state_manager=None
+        state_manager=None,
+        lifecycle_manager=None,
+        temperament_system=None  # Add temperament system
     ):
         """Initialize the CuriosityManager with configuration and dependencies.
         
@@ -254,10 +259,8 @@ class CuriosityManager:
             error_manager: ErrorHandler instance for error handling
             device: torch.device for tensor operations
             state_manager: Optional state manager instance
-            
-        Raises:
-            ValueError: If config_manager, logger, or error_manager is None
-            TypeError: If config_manager is not a ConfigManager instance
+            lifecycle_manager: Optional lifecycle manager instance
+            temperament_system: Optional temperament system instance
         """
         if not config_manager:
             raise ValueError("config_manager cannot be None")
@@ -272,6 +275,8 @@ class CuriosityManager:
         self.logger = logger
         self.error_manager = error_manager
         self.state_manager = state_manager
+        self.lifecycle_manager = lifecycle_manager
+        self.temperament_system = temperament_system  # Store temperament system
         self.device = device
         self.metrics = defaultdict(list)
         self._initialized = False
@@ -1009,46 +1014,126 @@ class CuriosityManager:
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
-        """Compute curiosity score based on confidence and embeddings."""
+        """Compute curiosity score based on confidence and embeddings with temperament awareness."""
         try:
-            ignorance = self._compute_ignorance_score(base_conf, scaf_conf)
+            # Get lifecycle stage and parameters if available
+            lifecycle_stage = "unknown"
+            lifecycle_weight = 1.0
+            if self.lifecycle_manager:
+                lifecycle_stage = self.lifecycle_manager._lifecycle_stage
+                lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
             
             # Get memory embeddings with memory limits
             memory_embeddings = self._get_valid_memory_embeddings(state)
             
+            # Compute base curiosity score
+            ignorance = self._compute_ignorance_score(base_conf, scaf_conf)
             novelty = (
                 self._compute_novelty_score(memory_embeddings, query_embedding, device)
                 if memory_embeddings and query_embedding is not None
                 else 0.0
             )
             
-            score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
-            return self._clamp_score(score)
+            # Apply lifecycle-based adjustments
+            base_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
+            
+            # Apply temperament-based adjustments if available
+            if self.temperament_system:
+                current_score = self.temperament_system.current_score
+                mood_label = self.temperament_system.mood_label
+                
+                # Adjust score based on temperament
+                if mood_label == "Cautious":
+                    base_score *= 0.8  # Reduce curiosity in cautious mood
+                elif mood_label == "Curious":
+                    base_score *= 1.2  # Increase curiosity in curious mood
+                
+                # Apply temperament-based pressure adjustment
+                pressure_adjustment = self.temperament_system.adjust_parameter(
+                    base_value=base_score,
+                    parameter_type="temperature",
+                    curiosity_pressure=self.pressure
+                )
+                base_score = pressure_adjustment
+            
+            # Apply lifecycle weight
+            final_score = base_score * lifecycle_weight
+            
+            # Log the computation with temperament context
+            self._log_event(
+                "curiosity_computed",
+                message="Curiosity score computed with temperament context",
+                level="info",
+                additional_info={
+                    "base_score": base_score,
+                    "final_score": final_score,
+                    "lifecycle_stage": lifecycle_stage,
+                    "lifecycle_weight": lifecycle_weight,
+                    "ignorance": ignorance,
+                    "novelty": novelty,
+                    "memory_embeddings_count": len(memory_embeddings),
+                    "temperament_score": getattr(self.temperament_system, "current_score", None),
+                    "mood_label": getattr(self.temperament_system, "mood_label", None)
+                }
+            )
+            
+            return self._clamp_score(final_score)
             
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "compute_curiosity",
-                "base_conf": base_conf,
-                "scaf_conf": scaf_conf,
-                "memory_count": len(memory_embeddings) if 'memory_embeddings' in locals() else 0
-            })
+            self._log_error(f"Curiosity computation failed: {str(e)}")
             return 0.5
 
     def get_pressure(self) -> float:
-        """Get current pressure with validation and decay."""
+        """Get current pressure with validation, decay, and temperament awareness."""
         try:
             with self.lock:
+                # Get lifecycle stage if available
+                lifecycle_stage = "unknown"
+                if self.lifecycle_manager:
+                    lifecycle_stage = self.lifecycle_manager._lifecycle_stage
+                
                 # Apply natural decay
                 time_delta = time.time() - self.last_update
                 if time_delta > 0:
-                    self.pressure *= (self._pressure_decay_rate ** time_delta)
+                    decay_rate = self._pressure_decay_rate
+                    
+                    # Adjust decay rate based on temperament if available
+                    if self.temperament_system:
+                        mood_label = self.temperament_system.mood_label
+                        if mood_label == "Restless":
+                            decay_rate *= 0.8  # Faster decay in restless mood
+                        elif mood_label == "Balanced":
+                            decay_rate *= 1.0  # Normal decay
+                        elif mood_label == "Cautious":
+                            decay_rate *= 1.2  # Slower decay in cautious mood
+                    
+                    self.pressure *= (decay_rate ** time_delta)
                     self.last_update = time.time()
                 
                 # Ensure pressure stays within bounds
                 self.pressure = max(self._min_pressure, min(self._max_pressure, self.pressure))
                 
-                # Record pressure in history
-                self._pressure_history.append((time.time(), self.pressure))
+                # Record pressure in history with temperament context
+                self._pressure_history.append((
+                    time.time(),
+                    self.pressure,
+                    lifecycle_stage,
+                    getattr(self.temperament_system, "mood_label", None)
+                ))
+                
+                # Log pressure update with temperament context
+                self._log_event(
+                    "pressure_updated",
+                    message="Pressure updated with temperament context",
+                    level="info",
+                    additional_info={
+                        "current_pressure": self.pressure,
+                        "lifecycle_stage": lifecycle_stage,
+                        "time_delta": time_delta,
+                        "temperament_score": getattr(self.temperament_system, "current_score", None),
+                        "mood_label": getattr(self.temperament_system, "mood_label", None)
+                    }
+                )
                 
                 return self.pressure
                 
@@ -1057,10 +1142,15 @@ class CuriosityManager:
             return self._min_pressure  # Return minimum pressure on error
 
     def reduce_pressure(self, amount: float) -> None:
-        """Reduce pressure with validation and cooldown."""
+        """Reduce pressure with validation, cooldown, and lifecycle awareness."""
         try:
             with self.lock:
                 current_time = time.time()
+                
+                # Get lifecycle stage if available
+                lifecycle_stage = "unknown"
+                if self.lifecycle_manager:
+                    lifecycle_stage = self.lifecycle_manager._lifecycle_stage
                 
                 # Check cooldown
                 if current_time - self._last_pressure_change < self._pressure_change_cooldown:
@@ -1068,7 +1158,8 @@ class CuriosityManager:
                         "pressure_change_cooldown",
                         message="Pressure change too frequent",
                         last_change=self._last_pressure_change,
-                        current_time=current_time
+                        current_time=current_time,
+                        lifecycle_stage=lifecycle_stage
                     )
                     return
                 
@@ -1077,9 +1168,15 @@ class CuriosityManager:
                     self._log_warning(
                         "invalid_pressure_reduction",
                         message=f"Invalid pressure reduction amount: {amount}",
-                        amount=amount
+                        amount=amount,
+                        lifecycle_stage=lifecycle_stage
                     )
                     return
+                
+                # Adjust reduction amount based on lifecycle stage
+                if lifecycle_stage in self.config_manager.get("curiosity_config.lifecycle_params", {}):
+                    stage_params = self.config_manager.get(f"curiosity_config.lifecycle_params.{lifecycle_stage}")
+                    amount *= stage_params.get("reduction_factor", 1.0)
                 
                 # Calculate new pressure
                 new_pressure = self.pressure - amount
@@ -1090,7 +1187,8 @@ class CuriosityManager:
                         "pressure_min_reached",
                         message=f"Pressure reduction would go below minimum: {new_pressure}",
                         current_pressure=self.pressure,
-                        reduction=amount
+                        reduction=amount,
+                        lifecycle_stage=lifecycle_stage
                     )
                     new_pressure = self._min_pressure
                 
@@ -1099,13 +1197,14 @@ class CuriosityManager:
                 self._last_pressure_change = current_time
                 self.last_update = current_time
                 
-                # Log pressure change
+                # Log pressure change with lifecycle context
                 self._log_event(
                     "pressure_reduced",
                     message=f"Pressure reduced by {amount}",
                     old_pressure=self.pressure + amount,
                     new_pressure=self.pressure,
-                    reduction=amount
+                    reduction=amount,
+                    lifecycle_stage=lifecycle_stage
                 )
                 
         except Exception as e:
@@ -1123,7 +1222,7 @@ class CuriosityManager:
                         "history_size": 0
                     }
                 
-                pressures = [p for _, p in self._pressure_history]
+                pressures = [p for _, p, _, _ in self._pressure_history]
                 return {
                     "current_pressure": self.pressure,
                     "min_pressure": self._min_pressure,

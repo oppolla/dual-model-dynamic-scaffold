@@ -11,6 +11,7 @@ from sovl_config import ConfigManager, ConfigHandler
 from sovl_state import SOVLState
 from sovl_logger import Logger, LoggerConfig
 from sovl_events import EventDispatcher
+import math
 
 @dataclass
 class TemperamentConfig:
@@ -130,6 +131,8 @@ class TemperamentSystem:
         self.config_manager = config_manager
         self.temperament_config = TemperamentConfig(config_manager)
         self.logger = config_manager.logger
+        self._lifecycle_stage = "initialization"
+        self._last_lifecycle_update = time.time()
         
     def update(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
         """
@@ -170,10 +173,27 @@ class TemperamentSystem:
             smoothing_factor = self.temperament_config.get("controls_config.temp_smoothing_factor")
             feedback_strength = self.temperament_config.get("controls_config.conf_feedback_strength")
             
+            # Apply lifecycle-based adjustments
+            lifecycle_params = self.temperament_config.get("controls_config.lifecycle_params", {})
+            if lifecycle_stage in lifecycle_params:
+                stage_params = lifecycle_params[lifecycle_stage]
+                bias = stage_params.get("bias", 0.0)
+                decay = stage_params.get("decay", 1.0)
+                
+                # Apply bias and decay based on lifecycle stage
+                time_since_update = time.time() - self._last_lifecycle_update
+                decay_factor = math.exp(-decay * time_since_update)
+                new_score = (new_score + bias) * decay_factor
+                
+                # Ensure score remains in valid range
+                new_score = max(0.0, min(1.0, new_score))
+            
             # Update state with new score
             self.state.update_temperament(new_score)
+            self._lifecycle_stage = lifecycle_stage
+            self._last_lifecycle_update = time.time()
             
-            # Log the update
+            # Log the update with enhanced lifecycle context
             self.logger.record_event(
                 event_type="temperament_updated",
                 message="Temperament system updated",
@@ -186,7 +206,9 @@ class TemperamentSystem:
                     "conversation_id": self.state.conversation_id,
                     "state_hash": self.state.state_hash,
                     "smoothing_factor": smoothing_factor,
-                    "feedback_strength": feedback_strength
+                    "feedback_strength": feedback_strength,
+                    "time_since_last_update": time.time() - self._last_lifecycle_update,
+                    "lifecycle_params": lifecycle_params.get(lifecycle_stage, {})
                 }
             )
             
@@ -234,8 +256,10 @@ class TemperamentSystem:
             if curiosity_pressure is not None and not 0.0 <= curiosity_pressure <= 1.0:
                 raise ValueError(f"Curiosity pressure must be between 0.0 and 1.0, got {curiosity_pressure}")
             
-            # Get current temperament score
+            # Get current temperament score and lifecycle stage
             current_score = self.current_score
+            lifecycle_params = self.temperament_config.get("controls_config.lifecycle_params", {})
+            stage_params = lifecycle_params.get(self._lifecycle_stage, {})
             
             # Calculate adjustment based on parameter type
             if parameter_type == "temperature":
@@ -246,14 +270,18 @@ class TemperamentSystem:
                 if curiosity_pressure is not None:
                     adjustment += curiosity_pressure * 0.2  # Scale to +0.2
                 
+                # Apply lifecycle-based adjustments
+                if "temperature_bias" in stage_params:
+                    adjustment += stage_params["temperature_bias"]
+                
                 # Apply adjustment with bounds
                 adjusted_value = base_value + adjustment
                 adjusted_value = max(0.1, min(1.0, adjusted_value))
                 
-                # Log the adjustment
+                # Log the adjustment with lifecycle context
                 self.logger.record_event(
                     event_type="parameter_adjusted",
-                    message="Parameter adjusted",
+                    message="Parameter adjusted with lifecycle context",
                     level="info",
                     additional_info={
                         "parameter_type": parameter_type,
@@ -261,7 +289,9 @@ class TemperamentSystem:
                         "adjusted_value": adjusted_value,
                         "temperament_score": current_score,
                         "curiosity_pressure": curiosity_pressure,
-                        "adjustment": adjustment
+                        "lifecycle_stage": self._lifecycle_stage,
+                        "adjustment": adjustment,
+                        "lifecycle_params": stage_params
                     }
                 )
                 
@@ -278,7 +308,8 @@ class TemperamentSystem:
                 additional_info={
                     "parameter_type": parameter_type,
                     "base_value": base_value,
-                    "curiosity_pressure": curiosity_pressure
+                    "curiosity_pressure": curiosity_pressure,
+                    "lifecycle_stage": self._lifecycle_stage
                 }
             )
             return base_value  # Return base value on error
