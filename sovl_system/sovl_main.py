@@ -43,6 +43,7 @@ from sovl_logger import LoggingManager
 from sovl_grafter import PluginManager
 from sovl_confidence import calculate_confidence_score
 from sovl_events import EventDispatcher
+from sovl_interfaces import SystemInterface
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -1000,7 +1001,7 @@ class CuriosityEngine:
             additional_info=data
         )
 
-class SOVLSystem:
+class SOVLSystem(SystemInterface):
     """Main SOVL system class that manages all components and state."""
     
     def __init__(
@@ -1320,3 +1321,53 @@ class SOVLSystem:
                 stack_trace=traceback.format_exc()
             )
             return []
+
+    def get_state(self) -> Dict[str, Any]:
+        """Get the current system state."""
+        with self._lock:
+            return self.state_tracker.get_state()
+
+    def update_state(self, state_dict: Dict[str, Any]) -> None:
+        """Update the system state with the provided dictionary."""
+        with self._lock:
+            try:
+                self.state_tracker.update_state(state_dict)
+                self.context.logger.record_event(
+                    event_type="state_updated",
+                    message="System state updated successfully",
+                    level="info",
+                    additional_info={
+                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+                    }
+                )
+            except Exception as e:
+                self.context.logger.log_error(
+                    error_msg=f"Failed to update system state: {str(e)}",
+                    error_type="state_update_error",
+                    stack_trace=traceback.format_exc()
+                )
+                raise ValueError("Invalid state update") from e
+
+    def shutdown(self) -> None:
+        """Shutdown the system, saving state and releasing resources."""
+        with self._lock:
+            try:
+                # Save final state
+                self.state_tracker.state.save_state()
+                
+                # Release resources
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                self.context.logger.record_event(
+                    event_type="system_shutdown",
+                    message="System shutdown completed successfully",
+                    level="info"
+                )
+            except Exception as e:
+                self.context.logger.log_error(
+                    error_msg=f"Failed to shutdown system: {str(e)}",
+                    error_type="shutdown_error",
+                    stack_trace=traceback.format_exc()
+                )
+                raise RuntimeError("Failed to shutdown system") from e

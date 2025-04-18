@@ -18,11 +18,12 @@ from sovl_utils import calculate_confidence, detect_repetitions
 from sovl_grafter import PluginManager
 from collections import deque
 from sovl_state import StateManager
+from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediator
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
 
-class SOVLOrchestrator:
+class SOVLOrchestrator(OrchestratorInterface):
     """
     Orchestrates the initialization, execution, and shutdown of the SOVL system.
 
@@ -72,10 +73,9 @@ class SOVLOrchestrator:
             self.state = self.state_manager.load_state()
             
             # Initialize system early to ensure state consistency
-            self._system = None
-            self.initialize_system()
+            self._system: Optional[SystemInterface] = None
             
-            # Initialize error handler and plugin manager after system is ready
+            # Initialize error handler and plugin manager
             self.error_handler = ErrorHandler(self.logger)
             self.plugin_manager = PluginManager(
                 config_manager=self.config_manager,
@@ -86,8 +86,7 @@ class SOVLOrchestrator:
             self._lock = Lock()
             self._log_event("orchestrator_init_success", {
                 "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash,
-                "system_state_hash": self._system.state_tracker.state.state_hash if self._system else None
+                "state_hash": self.state.state_hash
             })
         except Exception as e:
             self._log_error("Orchestrator initialization failed", e)
@@ -349,142 +348,91 @@ class SOVLOrchestrator:
         except Exception as e:
             print(f"Failed to log error: {str(e)}")  # Fallback to print if logger fails
 
-    def set_system(self, system: 'SOVLSystem') -> None:
-        """Set the SOVL system reference and sync state."""
+    def set_system(self, system: SystemInterface) -> None:
+        """Set the system instance for orchestration."""
         with self._lock:
             self._system = system
-            self._sync_state_to_system()
-            self.plugin_manager.set_system(system)
             self._log_event("system_set", {
                 "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash,
-                "system_state_hash": system.state_tracker.state.state_hash
+                "state_hash": self.state.state_hash
             })
 
-    def _sync_state_to_system(self) -> None:
-        """Sync orchestrator state to system state."""
-        if self._system is None:
-            return
-            
-        try:
-            # Copy orchestrator state to system state
-            self._system.state_tracker.state.from_dict(
-                self.state.to_dict(),
-                self._system.device
-            )
-            
-            # Validate state synchronization
-            if self.state.state_hash != self._system.state_tracker.state.state_hash:
-                self._log_event("state_sync_mismatch", {
-                    "orchestrator_hash": self.state.state_hash,
-                    "system_hash": self._system.state_tracker.state.state_hash,
-                    "conversation_id": self.state.history.conversation_id
-                }, level="warning")
-                
-        except Exception as e:
-            self._log_error("State synchronization failed", e)
-            raise
+    def sync_state(self) -> None:
+        """Synchronize orchestrator state with the system state."""
+        with self._lock:
+            if not self._system:
+                return
+            try:
+                system_state = self._system.get_state()
+                self.state.from_dict(system_state, self.device)
+                self._log_event("state_synchronized", {
+                    "conversation_id": self.state.history.conversation_id,
+                    "state_hash": self.state.state_hash
+                })
+            except Exception as e:
+                self._log_error("State synchronization failed", e)
+                raise RuntimeError("Failed to synchronize state") from e
 
     def initialize_system(self) -> None:
         """Initialize the SOVL system with the current configuration."""
         try:
-            if self._system is None:
-                from sovl_main import SOVLSystem  # Import here to break circular dependency
-                self._system = SOVLSystem(
-                    self.config_manager.config_path,
-                    device=self.device
-                )
-                
-                # Sync state between orchestrator and system
-                self._sync_state_to_system()
-                
-                # Validate state in system components
-                self._validate_system_state()
-                
-                self._log_event("system_initialized", {
-                    "device": str(self.device),
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash,
-                    "system_state_hash": self._system.state_tracker.state.state_hash
-                })
-        except Exception as e:
-            self._log_error("System initialization failed", e)
-            raise
+            # Create mediator
+            self.mediator = SystemMediator(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                device=self.device
+            )
             
-    def _validate_system_state(self) -> None:
-        """Validate state in system components."""
-        try:
-            if not hasattr(self._system, 'state_tracker') or self._system.state_tracker.state is None:
-                raise StateError("System state not initialized")
-                
-            state = self._system.state_tracker.state
+            # Register orchestrator with mediator
+            self.mediator.register_orchestrator(self)
             
-            # Validate required state attributes
-            required_attributes = [
-                'history', 'dream_memory', 'seen_prompts', 'token_map',
-                'temperament_score', 'confidence_history', 'curiosity'
-            ]
+            # Create system components
+            from sovl_main import SOVLSystem, SystemContext, ConfigHandler, ModelLoader, CuriosityEngine, MemoryMonitor, StateTracker, ErrorManager
             
-            missing_attributes = [attr for attr in required_attributes 
-                                if not hasattr(state, attr)]
-            if missing_attributes:
-                raise StateError(f"Missing required state attributes: {missing_attributes}")
-                
-            # Validate conversation ID consistency
-            if state.history.conversation_id != self.state.history.conversation_id:
-                self._log_event("state_sync_mismatch", {
-                    "orchestrator_hash": self.state.state_hash,
-                    "system_hash": self._system.state_tracker.state.state_hash,
-                    "conversation_id": self.state.history.conversation_id
-                }, level="warning")
-                # Align conversation IDs
-                state.history.conversation_id = self.state.history.conversation_id
-                
-            # Validate state data structures
-            if not hasattr(state.history, 'conversation_id'):
-                raise StateError("State history missing conversation_id")
-                
-            if not isinstance(state.dream_memory, deque):
-                raise StateError("State dream_memory must be a deque")
-                
-            if not isinstance(state.seen_prompts, deque):
-                raise StateError("State seen_prompts must be a deque")
-                
-            if not isinstance(state.confidence_history, deque):
-                raise StateError("State confidence_history must be a deque")
-                
-            # Validate device consistency
-            if state.device != self.device:
-                raise StateError(f"State device {state.device} mismatches orchestrator device {self.device}")
-                
-            self._log_event("state_validated", {
-                "state_hash": state.state_hash,
-                "conversation_id": state.history.conversation_id,
-                "dream_memory_length": len(state.dream_memory),
-                "seen_prompts_count": len(state.seen_prompts),
-                "confidence_history_length": len(state.confidence_history),
-                "device": str(state.device)
+            context = SystemContext(self.config_manager.config_path, str(self.device))
+            config_handler = ConfigHandler(self.config_manager.config_path, self.logger, context.event_dispatcher)
+            state_tracker = StateTracker(context)
+            error_manager = ErrorManager(context, state_tracker)
+            model_loader = ModelLoader(context)
+            memory_monitor = MemoryMonitor(context)
+            curiosity_engine = CuriosityEngine(
+                config_handler=config_handler,
+                model_loader=model_loader,
+                state_tracker=state_tracker,
+                error_manager=error_manager,
+                logger=self.logger,
+                device=str(self.device)
+            )
+            
+            # Create and register system
+            system = SOVLSystem(
+                context=context,
+                config_handler=config_handler,
+                model_loader=model_loader,
+                curiosity_engine=curiosity_engine,
+                memory_monitor=memory_monitor,
+                state_tracker=state_tracker,
+                error_manager=error_manager
+            )
+            
+            self.mediator.register_system(system)
+            
+            self._log_event("system_initialized", {
+                "device": str(self.device),
+                "conversation_id": self.state.history.conversation_id,
+                "state_hash": self.state.state_hash
             })
             
         except Exception as e:
-            self._log_error("State validation failed", e)
+            self._log_error("System initialization failed", e)
             raise
 
     def run(self) -> None:
         """Run the SOVL system in the appropriate mode."""
         try:
             # Validate state consistency before running
-            if self._system is None:
+            if not self._system:
                 raise RuntimeError("System not initialized")
-                
-            if self.state.state_hash != self._system.state_tracker.state.state_hash:
-                self._log_event("state_mismatch_before_run", {
-                    "orchestrator_hash": self.state.state_hash,
-                    "system_hash": self._system.state_tracker.state.state_hash,
-                    "conversation_id": self.state.history.conversation_id
-                }, level="warning")
-                # Attempt to sync states
-                self._sync_state_to_system()
             
             # Run in CLI mode by default
             run_cli(self.config_manager)
@@ -501,10 +449,9 @@ class SOVLOrchestrator:
     def shutdown(self) -> None:
         """Shutdown the system and save state."""
         try:
-            if self._system is not None:
-                # Save final state
-                self._system.state_tracker.state.save_state()
-                self._log_event("system_shutdown")
+            if hasattr(self, 'mediator'):
+                self.mediator.shutdown()
+            self._log_event("system_shutdown")
         except Exception as e:
             self._log_error("System shutdown failed", e)
             self.error_handler.handle_generic_error(
