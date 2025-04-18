@@ -179,6 +179,9 @@ class ModelManager:
         """Load base and scaffold models along with their tokenizers."""
         with self._memory_lock:
             try:
+                # Clear existing models and memory first
+                self.cleanup()
+                
                 start_time = time.time()
                 self._load_base_model()
                 base_load_time = time.time() - start_time
@@ -214,6 +217,8 @@ class ModelManager:
                     }
                 )
             except Exception as e:
+                # Clean up any partially loaded models
+                self.cleanup()
                 self._log_error(
                     f"Model loading failed: {str(e)}",
                     error_type="model_loading_error",
@@ -438,13 +443,10 @@ class ModelManager:
         """
         with self._memory_lock:
             try:
-                # Clean up existing base model
-                if self.base_model is not None:
-                    del self.base_model
-                    self.base_model = None
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
+                # Validate new model configuration before switching
+                old_model_name = self.base_model_name
+                old_quantization = self.quantization_mode
+                
                 # Update configuration
                 self.base_model_name = self._validate_config_value(
                     "base_model_name",
@@ -460,14 +462,29 @@ class ModelManager:
                         valid_values=["fp16", "int8", "int4"]
                     )
                 
-                # Update config manager
+                # Try to load the new model first
+                try:
+                    self._load_base_model()
+                    self._load_tokenizers()  # Reload tokenizers to match new base model
+                except Exception as e:
+                    # Revert to old configuration if loading fails
+                    self.base_model_name = old_model_name
+                    self.quantization_mode = old_quantization
+                    self._log_error(
+                        f"Failed to load new base model: {str(e)}",
+                        error_type="base_model_switching_error",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={
+                            "model_name": model_name,
+                            "quantization": quantization
+                        }
+                    )
+                    raise
+                
+                # Update config manager only after successful load
                 self._config_manager.set("core_config.base_model_name", self.base_model_name)
                 if quantization:
                     self._config_manager.set("core_config.quantization", self.quantization_mode)
-
-                # Load new base model and tokenizer
-                self._load_base_model()
-                self._load_tokenizers()  # Reload tokenizers to match new base model
 
                 self._log_event(
                     "base_model_switched",
@@ -501,14 +518,11 @@ class ModelManager:
         """
         with self._memory_lock:
             try:
-                # Clean up existing scaffold models
-                if self.scaffold_models:
-                    for model in self.scaffold_models:
-                        del model
-                    self.scaffold_models = []
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
+                # Validate new model configuration before switching
+                old_model_name = self.scaffold_model_name
+                old_quantization = self.quantization_mode
+                old_lora_enabled = self.enable_lora
+                
                 # Update configuration
                 self.scaffold_model_name = self._validate_config_value(
                     "scaffold_model_name",
@@ -530,16 +544,34 @@ class ModelManager:
                         apply_lora,
                         bool
                     )
-                    self._config_manager.set("lora_config.enable_lora_adapters", self.enable_lora)
                 
-                # Update config manager
+                # Try to load the new model first
+                try:
+                    self._load_scaffold_model()
+                    self._load_tokenizers()  # Reload tokenizers to match new scaffold model
+                except Exception as e:
+                    # Revert to old configuration if loading fails
+                    self.scaffold_model_name = old_model_name
+                    self.quantization_mode = old_quantization
+                    self.enable_lora = old_lora_enabled
+                    self._log_error(
+                        f"Failed to load new scaffold model: {str(e)}",
+                        error_type="scaffold_model_switching_error",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={
+                            "model_name": model_name,
+                            "quantization": quantization,
+                            "lora_enabled": apply_lora
+                        }
+                    )
+                    raise
+                
+                # Update config manager only after successful load
                 self._config_manager.set("core_config.scaffold_model_name", self.scaffold_model_name)
                 if quantization:
                     self._config_manager.set("core_config.quantization", self.quantization_mode)
-
-                # Load new scaffold model's tokenizer
-                self._load_scaffold_model()
-                self._load_tokenizers()  # Reload tokenizers to match new scaffold model
+                if apply_lora is not None:
+                    self._config_manager.set("lora_config.enable_lora_adapters", self.enable_lora)
 
                 self._log_event(
                     "scaffold_model_switched",
@@ -689,23 +721,42 @@ class ModelManager:
         """Clean up models and free memory."""
         with self._memory_lock:
             try:
-                if self.base_model:
+                # Clear base model
+                if self.base_model is not None:
                     del self.base_model
                     self.base_model = None
-                for model in self.scaffold_models:
-                    del model
-                self.scaffold_models = []
+                
+                # Clear scaffold models
+                if self.scaffold_models:
+                    for model in self.scaffold_models:
+                        del model
+                    self.scaffold_models = []
+                
+                # Clear tokenizers
+                self.base_tokenizer = None
+                self.scaffold_tokenizer = None
+                
+                # Clear configurations
+                self.base_config = None
+                self.scaffold_config = None
+                
+                # Clear GPU memory
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                
                 self._log_event(
                     "model_manager_cleanup",
-                    "ModelManager cleanup completed"
+                    "ModelManager cleanup completed",
+                    level="info",
+                    additional_info={
+                        "memory_cleared": True,
+                        "gpu_available": torch.cuda.is_available()
+                    }
                 )
-                print("ModelManager cleanup completed.")
             except Exception as e:
                 self._log_error(
                     f"ModelManager cleanup failed: {str(e)}",
                     error_type="model_manager_cleanup_error",
                     stack_trace=traceback.format_exc()
                 )
-                print(f"ModelManager cleanup failed: {e}")
+                raise
