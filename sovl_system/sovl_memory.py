@@ -10,7 +10,7 @@ from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import memory_usage, safe_divide
 from sovl_config import ConfigManager
-from sovl_hardware import HardwareManager  # New import
+from sovl_hardware import HardwareManager
 import gc
 
 """

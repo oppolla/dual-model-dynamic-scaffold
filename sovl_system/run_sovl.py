@@ -258,7 +258,7 @@ class SOVLRunner:
             raise
 
     def _initialize_components(self, context: SystemContext) -> Tuple:
-        """Initialize core SOVL components with progress tracking."""
+        """Initialize core SOVL components with proper dependency handling."""
         components = []
         component_classes = [
             (ModelLoader, "model loader"),
@@ -277,65 +277,124 @@ class SOVLRunner:
             device=context.device
         )
         
+        # Initialize components in stages to handle dependencies
+        stage1_components = []  # Basic components without dependencies
+        stage2_components = []  # Components with basic dependencies
+        stage3_components = []  # Components with complex dependencies
+        
         for component_class, name in component_classes:
-            if component_class is None:  # Handle model loading
-                self.logger.log_event(
-                    event_type="component_initialization",
-                    message="Loading model...",
-                    level="info"
-                )
-                # Use ModelManager to load models
-                self.model_manager.load_models()
-                self.model = self.model_manager.get_base_model()
-                self.tokenizer = self.model_manager.get_tokenizer()  # Set tokenizer
-                components.append(self.model)
+            try:
+                if component_class is None:  # Handle model loading
+                    self.logger.log_event(
+                        event_type="component_initialization",
+                        message="Loading model...",
+                        level="info"
+                    )
+                    # Use ModelManager to load models
+                    self.model_manager.load_models()
+                    self.model = self.model_manager.get_base_model()
+                    self.tokenizer = self.model_manager.get_tokenizer()
+                    components.append(self.model)
+                    
+                    # Initialize optimizer and scheduler
+                    self._initialize_optimizer(self.model)
+                    continue
                 
-                # Initialize optimizer and scheduler
-                self._initialize_optimizer(self.model)
+                # Stage 1: Basic components
+                if name in ["model loader", "state tracker", "memory monitor"]:
+                    component = component_class(context)
+                    stage1_components.append(component)
+                    components.append(component)
+                    self.logger.log_event(
+                        event_type="component_initialization",
+                        message=f"Initialized {name}",
+                        level="info"
+                    )
                 
-            else:
-                self.logger.log_event(
-                    event_type="component_initialization",
-                    message=f"Initializing {name}...",
-                    level="info"
-                )
-                if name == "error manager":
+                # Stage 2: Components with basic dependencies
+                elif name == "error manager":
+                    if not any(isinstance(c, StateTracker) for c in components):
+                        raise RuntimeError("StateTracker must be initialized before ErrorManager")
                     component = ErrorManager(
                         context=context,
-                        state_tracker=components[2],
+                        state_tracker=next(c for c in components if isinstance(c, StateTracker)),
                         config_manager=context.config_manager,
                         error_cooldown=context.config_manager.get("error_config.error_cooldown", 1.0),
                         max_recent_errors=context.config_manager.get("error_config.max_recent_errors", 100)
                     )
                     self.error_manager = component
+                    stage2_components.append(component)
+                    components.append(component)
+                    self.logger.log_event(
+                        event_type="component_initialization",
+                        message=f"Initialized {name}",
+                        level="info"
+                    )
+                
+                # Stage 3: Components with complex dependencies
                 elif name == "curiosity engine":
+                    if not self.error_manager:
+                        raise RuntimeError("ErrorManager must be initialized before CuriosityEngine")
+                    if not any(isinstance(c, StateTracker) for c in components):
+                        raise RuntimeError("StateTracker must be initialized before CuriosityEngine")
+                    if not any(isinstance(c, ModelLoader) for c in components):
+                        raise RuntimeError("ModelLoader must be initialized before CuriosityEngine")
+                    
                     component = component_class(
                         config_handler=context.config_manager,
-                        model_loader=components[0],
-                        state_tracker=components[2],
+                        model_loader=next(c for c in components if isinstance(c, ModelLoader)),
+                        state_tracker=next(c for c in components if isinstance(c, StateTracker)),
                         error_manager=self.error_manager,
                         logger=context.logger,
                         device=context.device
                     )
+                    stage3_components.append(component)
+                    components.append(component)
+                    self.logger.log_event(
+                        event_type="component_initialization",
+                        message=f"Initialized {name}",
+                        level="info"
+                    )
+                
                 elif name == "memory manager":
                     component = component_class(
                         context.config_manager,
                         context.device,
                         context.logger
                     )
-                else:
-                    component = component_class(context)
-                components.append(component)
+                    stage3_components.append(component)
+                    components.append(component)
+                    self.logger.log_event(
+                        event_type="component_initialization",
+                        message=f"Initialized {name}",
+                        level="info"
+                    )
+                
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"Failed to initialize {name}: {str(e)}",
+                    error_type="component_initialization_error"
+                )
+                raise
         
-        validate_components(*components)
-        initialize_component_state(components[2], components)
-        
-        self.logger.log_event(
-            event_type="component_initialization",
-            message="All components initialized successfully",
-            level="info"
-        )
-        return tuple(components)
+        # Validate all components
+        try:
+            validate_components(*components)
+            initialize_component_state(components[2], components)
+            
+            self.logger.log_event(
+                event_type="component_initialization",
+                message="All components initialized successfully",
+                level="info"
+            )
+            return tuple(components)
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Component validation failed: {str(e)}",
+                error_type="component_validation_error"
+            )
+            raise
     
     def _initialize_optimizer(self, model: torch.nn.Module) -> None:
         """Initialize optimizer and learning rate scheduler."""
