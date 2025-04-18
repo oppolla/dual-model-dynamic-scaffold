@@ -11,6 +11,7 @@ from sovl_config import ConfigManager, ConfigHandler
 from sovl_state import SOVLState
 from sovl_logger import Logger, LoggerConfig
 from sovl_events import EventDispatcher
+from sovl_trainer import LifecycleManager
 import math
 
 @dataclass
@@ -119,29 +120,43 @@ class TemperamentConfig:
 class TemperamentSystem:
     """Manages the temperament state and updates."""
     
-    def __init__(self, state: SOVLState, config_manager: ConfigManager):
+    def __init__(self, state: SOVLState, config_manager: ConfigManager, lifecycle_manager: Optional[LifecycleManager] = None):
         """
         Initialize temperament system.
         
         Args:
             state: SOVL state instance
             config_manager: Configuration manager instance
+            lifecycle_manager: Optional LifecycleManager instance for lifecycle-based adjustments
         """
         self.state = state
         self.config_manager = config_manager
         self.temperament_config = TemperamentConfig(config_manager)
         self.logger = config_manager.logger
+        self.lifecycle_manager = lifecycle_manager
         self._lifecycle_stage = "initialization"
         self._last_lifecycle_update = time.time()
         
-    def update(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
+        # Initialize lifecycle integration if available
+        if self.lifecycle_manager:
+            self.logger.record_event(
+                event_type="temperament_lifecycle_integration_initialized",
+                message="Temperament system initialized with lifecycle manager",
+                level="info",
+                additional_info={
+                    "lifecycle_stage": self._lifecycle_stage,
+                    "lifecycle_manager": str(self.lifecycle_manager)
+                }
+            )
+        
+    def update(self, new_score: float, confidence: float, lifecycle_stage: Optional[str] = None) -> None:
         """
         Update the temperament system with new values.
         
         Args:
             new_score: New temperament score (0.0 to 1.0)
             confidence: Confidence level in the update (0.0 to 1.0)
-            lifecycle_stage: Current lifecycle stage
+            lifecycle_stage: Optional current lifecycle stage. If None, will use lifecycle_manager if available.
         """
         try:
             # Validate inputs
@@ -173,6 +188,10 @@ class TemperamentSystem:
             smoothing_factor = self.temperament_config.get("controls_config.temp_smoothing_factor")
             feedback_strength = self.temperament_config.get("controls_config.conf_feedback_strength")
             
+            # Get lifecycle stage from manager if not provided
+            if lifecycle_stage is None and self.lifecycle_manager:
+                lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage()
+            
             # Apply lifecycle-based adjustments
             lifecycle_params = self.temperament_config.get("controls_config.lifecycle_params", {})
             if lifecycle_stage in lifecycle_params:
@@ -187,6 +206,20 @@ class TemperamentSystem:
                 
                 # Ensure score remains in valid range
                 new_score = max(0.0, min(1.0, new_score))
+                
+                # Log lifecycle adjustments
+                self.logger.record_event(
+                    event_type="temperament_lifecycle_adjustment",
+                    message="Applied lifecycle-based temperament adjustments",
+                    level="info",
+                    additional_info={
+                        "lifecycle_stage": lifecycle_stage,
+                        "bias": bias,
+                        "decay": decay,
+                        "decay_factor": decay_factor,
+                        "adjusted_score": new_score
+                    }
+                )
             
             # Update state with new score
             self.state.update_temperament(new_score)

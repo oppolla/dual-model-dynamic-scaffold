@@ -16,6 +16,8 @@ from sovl_scaffold import ScaffoldProvider
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_io import ConfigurationError
+from sovl_confidence import ConfidenceCalculator
+from sovl_temperament import TemperamentSystem
 
 @dataclass
 class TrainingConfig:
@@ -532,20 +534,52 @@ class DreamManager:
 
 class TrainingManager:
     """Manages core training operations."""
-    def __init__(self, config: TrainingConfig, model: torch.nn.Module, device: torch.device, loss_fn: Callable, tokenizer: Any):
+    def __init__(
+        self, 
+        config: TrainingConfig, 
+        model: torch.nn.Module, 
+        device: torch.device, 
+        loss_fn: Callable, 
+        tokenizer: Any, 
+        curiosity_manager: Optional[CuriosityManager] = None,
+        confidence_calculator: Optional[ConfidenceCalculator] = None,
+        temperament_system: Optional[TemperamentSystem] = None
+    ):
         self.config = config
         self.model = model.to(device)
         self.device = device
         self.loss_fn = loss_fn
         self.tokenizer = tokenizer
+        self.curiosity_manager = curiosity_manager
+        self.confidence_calculator = confidence_calculator
+        self.temperament_system = temperament_system
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
         self.scheduler = self._init_scheduler()
         self.global_step = 0
         self.scaler = torch.cuda.amp.GradScaler() if config.use_amp and device.type == "cuda" else None
 
     def _init_scheduler(self) -> Optional[Any]:
-        """Initialize learning rate scheduler."""
+        """Initialize learning rate scheduler with confidence and temperament awareness."""
         warmup_steps = self.config.warmup_steps or int(self.config.warmup_ratio * self.config.total_steps)
+        
+        # Adjust warmup steps based on confidence and temperament if available
+        if self.confidence_calculator and self.temperament_system:
+            try:
+                confidence = self.confidence_calculator.get_current_confidence()
+                mood = self.temperament_system.mood_label
+                
+                # Adjust warmup based on confidence and mood
+                confidence_factor = 1.0 + (1.0 - confidence) * 0.2
+                mood_factor = 1.0
+                if mood == "Cautious":
+                    mood_factor = 1.2  # Longer warmup for cautious mood
+                elif mood == "Curious":
+                    mood_factor = 0.8  # Shorter warmup for curious mood
+                
+                warmup_steps = int(warmup_steps * confidence_factor * mood_factor)
+            except Exception as e:
+                self.logger.warning(f"Failed to adjust warmup steps based on confidence and temperament: {str(e)}")
+        
         if self.config.scheduler_type == "linear":
             return get_linear_schedule_with_warmup(self.optimizer, warmup_steps, self.config.total_steps)
         elif self.config.scheduler_type == "cosine":
@@ -563,7 +597,7 @@ class TrainingManager:
         dry_run: bool = False,
         dry_run_params: Optional[Dict[str, Any]] = None
     ) -> Tuple[float, Dict[str, Any]]:
-        """Execute a single training step with scaffold support."""
+        """Execute a single training step with scaffold support and temperament awareness."""
         try:
             start_time = time.time()
             
@@ -579,6 +613,25 @@ class TrainingManager:
                 scaffold_start_time = time.time()
                 scaffold_context = scaffold_provider(batch)
                 scaffold_time = time.time() - scaffold_start_time
+            
+            # Adjust learning rate based on confidence and temperament if available
+            if self.confidence_calculator and self.temperament_system and not dry_run:
+                try:
+                    confidence = self.confidence_calculator.get_current_confidence()
+                    mood = self.temperament_system.mood_label
+                    
+                    # Adjust learning rate based on confidence and mood
+                    confidence_factor = 1.0 + confidence * 0.1
+                    mood_factor = 1.0
+                    if mood == "Cautious":
+                        mood_factor = 0.8  # Reduce learning rate for cautious mood
+                    elif mood == "Curious":
+                        mood_factor = 1.2  # Increase learning rate for curious mood
+                    
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = param_group['lr'] * confidence_factor * mood_factor
+                except Exception as e:
+                    self.logger.warning(f"Failed to adjust learning rate based on confidence and temperament: {str(e)}")
             
             # Forward pass
             forward_start_time = time.time()
@@ -625,6 +678,28 @@ class TrainingManager:
                     "reserved": torch.cuda.memory_reserved() if torch.cuda.is_available() else None
                 }
             }
+            
+            # Update confidence and temperament metrics if available
+            if self.confidence_calculator and self.temperament_system and not dry_run:
+                try:
+                    # Generate embeddings for confidence calculation
+                    with torch.no_grad():
+                        embeddings = self.model.get_input_embeddings()(input_ids)
+                        mean_embeddings = embeddings.mean(dim=1)
+                    
+                    # Update confidence with batch information
+                    self.confidence_calculator.update_metrics(
+                        metric_name="training_batch",
+                        value=loss.item(),
+                        embeddings=mean_embeddings
+                    )
+                    
+                    # Add confidence and temperament metrics to training metrics
+                    metrics["confidence_score"] = self.confidence_calculator.get_current_confidence()
+                    metrics["temperament_mood"] = self.temperament_system.mood_label
+                    metrics["temperament_score"] = self.temperament_system.current_score
+                except Exception as e:
+                    self.logger.warning(f"Failed to update confidence and temperament metrics: {str(e)}")
             
             # Log metrics
             self.logger.record({
@@ -691,7 +766,7 @@ class TrainingManager:
             raise
 
     def validate(self, data: Union[List[dict], Any], scaffold_provider: Optional[Callable] = None) -> Tuple[float, Dict[str, float]]:
-        """Validate model performance."""
+        """Validate model performance with curiosity awareness."""
         self.model.eval()
         total_loss, total_correct, total_tokens, batches = 0.0, 0, 0, 0
         metrics = {metric: 0.0 for metric in self.config.metrics_to_track}
@@ -723,6 +798,22 @@ class TrainingManager:
                     metrics["accuracy"] = total_correct / total_tokens if total_tokens else 0.0
                 if "perplexity" in metrics:
                     metrics["perplexity"] = torch.exp(loss).item()
+                
+                # Update curiosity metrics if available
+                if self.curiosity_manager:
+                    try:
+                        # Generate embeddings for curiosity calculation
+                        embeddings = self.model.get_input_embeddings()(batch["input_ids"])
+                        mean_embeddings = embeddings.mean(dim=1)
+                        
+                        # Update curiosity with validation batch information
+                        self.curiosity_manager.update_metrics(
+                            metric_name="validation_batch",
+                            value=loss.item(),
+                            embeddings=mean_embeddings
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to update curiosity metrics during validation: {str(e)}")
 
         avg_loss = total_loss / batches if batches else 0.0
         metrics["loss"] = avg_loss

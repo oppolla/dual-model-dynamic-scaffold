@@ -1,5 +1,6 @@
 from typing import Optional, Deque, Dict, Set, Tuple, DefaultDict, Any, List
 from collections import deque, defaultdict
+from dataclasses import dataclass, field
 import torch
 import uuid
 from threading import Lock
