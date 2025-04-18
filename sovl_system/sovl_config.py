@@ -378,6 +378,29 @@ class ConfigManager:
         ConfigSchema("logging_config.compress_old", bool, False),
         ConfigSchema("logging_config.max_in_memory_logs", int, 1000, range=(100, 10000)),
         ConfigSchema("logging_config.schema_version", str, "1.1"),
+        # Dynamic Weighting
+        ConfigSchema("dynamic_weighting.min_weight", float, 0.0, range=(0.0, 1.0)),
+        ConfigSchema("dynamic_weighting.max_weight", float, 1.0, range=(0.0, 1.0)),
+        ConfigSchema("dynamic_weighting.weight_decay", float, 0.01, range=(0.0, 1.0)),
+        ConfigSchema("dynamic_weighting.momentum", float, 0.9, range=(0.0, 1.0)),
+        ConfigSchema("dynamic_weighting.history_size", int, 10, range=(1, 100)),
+        ConfigSchema("dynamic_weighting.enable_dynamic_scaling", bool, True),
+
+        # Preprocessing
+        ConfigSchema("preprocessing.remove_special_chars", bool, True),
+        ConfigSchema("preprocessing.lowercase", bool, True),
+        ConfigSchema("preprocessing.remove_extra_spaces", bool, True),
+        ConfigSchema("preprocessing.max_length", int, 512, range=(1, 2048)),
+
+        # Augmentation
+        ConfigSchema("augmentation.synonym_replacement_prob", float, 0.3, range=(0.0, 1.0)),
+        ConfigSchema("augmentation.word_dropout_prob", float, 0.1, range=(0.0, 1.0)),
+        ConfigSchema("augmentation.max_augmentations", int, 3, range=(1, 10)),
+
+        # Hardware
+        ConfigSchema("hardware.enable_cuda", bool, True),
+        ConfigSchema("hardware.memory_query_interval", float, 0.1, range=(0.0, 10.0)),
+        ConfigSchema("hardware.mock_memory_total_mb", float, 8192.0, range=(0.0, 16384.0)),
     ]
 
     def __init__(self, config_file: str, logger: Logger):
