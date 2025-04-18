@@ -1,12 +1,14 @@
 import asyncio
 import re
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, Union, cast
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
+from sovl_state import StateManager, SOVLState
+from sovl_memory import MemoryManager
 import traceback
 
 # Type alias for callbacks - clearer name
@@ -14,6 +16,436 @@ EventHandler = Callable[..., Any]
 
 # Event type validation regex (alphanumeric, underscores, hyphens, dots)
 EVENT_TYPE_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+
+# State-related event types
+class StateEventTypes:
+    STATE_UPDATED = "state_updated"
+    STATE_VALIDATED = "state_validated"
+    STATE_RESET = "state_reset"
+    STATE_SAVED = "state_saved"
+    STATE_LOADED = "state_loaded"
+    STATE_ERROR = "state_error"
+    STATE_CACHE_UPDATED = "state_cache_updated"
+    STATE_CACHE_CLEARED = "state_cache_cleared"
+    STATE_MEMORY_UPDATED = "state_memory_updated"
+    STATE_CONFIDENCE_UPDATED = "state_confidence_updated"
+
+# Memory-related event types
+class MemoryEventTypes:
+    MEMORY_INITIALIZED = "memory_initialized"
+    MEMORY_CONFIG_UPDATED = "memory_config_updated"
+    MEMORY_THRESHOLD_REACHED = "memory_threshold_reached"
+    MEMORY_CLEANUP_STARTED = "memory_cleanup_started"
+    MEMORY_CLEANUP_COMPLETED = "memory_cleanup_completed"
+    MEMORY_HEALTH_CHECK = "memory_health_check"
+    MEMORY_STATS_UPDATED = "memory_stats_updated"
+    TOKEN_MAP_UPDATED = "token_map_updated"
+    DREAM_MEMORY_APPENDED = "dream_memory_appended"
+    DREAM_MEMORY_PRUNED = "dream_memory_pruned"
+    SCAFFOLD_CONTEXT_UPDATED = "scaffold_context_updated"
+    CONVERSATION_STARTED = "conversation_started"
+    MEMORY_ERROR = "memory_error"
+
+class StateEventDispatcher(EventDispatcher):
+    """
+    Extends EventDispatcher to handle state-related events and state management integration.
+    """
+    
+    def __init__(self, config_manager: ConfigManager, state_manager: StateManager, logger: Optional[Logger] = None):
+        """
+        Initialize the StateEventDispatcher.
+
+        Args:
+            config_manager: ConfigManager instance for configuration handling
+            state_manager: StateManager instance for state management
+            logger: Optional Logger instance. If None, creates a new Logger instance.
+        """
+        super().__init__(config_manager, logger)
+        self.state_manager = state_manager
+        self._state_change_history = deque(maxlen=100)
+        self._state_cache = {}
+        self._state_cache_lock = Lock()
+        
+        # Register state event handlers
+        self._register_state_handlers()
+        
+    def _register_state_handlers(self) -> None:
+        """Register default handlers for state events."""
+        self.subscribe(StateEventTypes.STATE_UPDATED, self._handle_state_update, priority=10)
+        self.subscribe(StateEventTypes.STATE_ERROR, self._handle_state_error, priority=10)
+        self.subscribe(StateEventTypes.STATE_CACHE_UPDATED, self._handle_cache_update, priority=5)
+        self.subscribe(StateEventTypes.STATE_CACHE_CLEARED, self._handle_cache_clear, priority=5)
+        
+    async def _handle_state_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle state update events."""
+        try:
+            state = event_data.get('state')
+            if not isinstance(state, SOVLState):
+                raise ValueError("Invalid state object in event data")
+                
+            # Record state change
+            self._state_change_history.append({
+                'timestamp': time.time(),
+                'event_type': StateEventTypes.STATE_UPDATED,
+                'state_hash': state.state_hash(),
+                'changes': event_data.get('changes', {})
+            })
+            
+            # Update state through state manager
+            self.state_manager.update_state(state)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle state update: {str(e)}"),
+                "state_update",
+                traceback.format_exc()
+            )
+            
+    async def _handle_state_error(self, event_data: Dict[str, Any]) -> None:
+        """Handle state error events."""
+        error_msg = event_data.get('error_msg', 'Unknown state error')
+        error_type = event_data.get('error_type', 'state_error')
+        self._log_error(
+            Exception(error_msg),
+            error_type,
+            event_data.get('stack_trace')
+        )
+        
+    async def _handle_cache_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle state cache update events."""
+        with self._state_cache_lock:
+            key = event_data.get('key')
+            value = event_data.get('value')
+            if key is not None:
+                self._state_cache[key] = value
+                
+    async def _handle_cache_clear(self, event_data: Dict[str, Any]) -> None:
+        """Handle state cache clear events."""
+        with self._state_cache_lock:
+            self._state_cache.clear()
+            
+    def get_state_change_history(self) -> List[Dict[str, Any]]:
+        """Get recent state change history."""
+        return list(self._state_change_history)
+        
+    async def validate_state_consistency(self) -> bool:
+        """Validate that event history matches current state."""
+        current_state = self.state_manager.get_state()
+        last_change = self._state_change_history[-1] if self._state_change_history else None
+        
+        return (last_change and 
+                last_change['state_hash'] == current_state.state_hash())
+                
+    async def dispatch_state_event(self, event_type: str, state_change: Dict[str, Any]) -> None:
+        """
+        Dispatch events related to state changes.
+        
+        Args:
+            event_type: Type of state event
+            state_change: Dictionary containing state change information
+        """
+        try:
+            # Validate event type
+            if not hasattr(StateEventTypes, event_type.upper()):
+                raise ValueError(f"Invalid state event type: {event_type}")
+                
+            # Create event data
+            event_data = {
+                'type': event_type,
+                'timestamp': time.time(),
+                'state': self.state_manager.get_state(),
+                'changes': state_change
+            }
+            
+            # Dispatch event
+            await self.async_notify(event_type, event_data)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to dispatch state event: {str(e)}"),
+                "state_event_dispatch",
+                traceback.format_exc()
+            )
+
+class MemoryEventDispatcher(EventDispatcher):
+    """
+    Extends EventDispatcher to handle memory-related events and memory management integration.
+    """
+    
+    def __init__(self, config_manager: ConfigManager, memory_manager: MemoryManager, logger: Optional[Logger] = None):
+        """
+        Initialize the MemoryEventDispatcher.
+
+        Args:
+            config_manager: ConfigManager instance for configuration handling
+            memory_manager: MemoryManager instance for memory management
+            logger: Optional Logger instance. If None, creates a new Logger instance.
+        """
+        super().__init__(config_manager, logger)
+        self.memory_manager = memory_manager
+        self._memory_events_history = deque(maxlen=100)
+        self._memory_stats_cache = {}
+        self._memory_stats_lock = Lock()
+        
+        # Register memory event handlers
+        self._register_memory_handlers()
+        
+    def _register_memory_handlers(self) -> None:
+        """Register default handlers for memory events."""
+        self.subscribe(MemoryEventTypes.MEMORY_INITIALIZED, self._handle_memory_initialized, priority=10)
+        self.subscribe(MemoryEventTypes.MEMORY_CONFIG_UPDATED, self._handle_config_update, priority=10)
+        self.subscribe(MemoryEventTypes.MEMORY_THRESHOLD_REACHED, self._handle_threshold_reached, priority=20)
+        self.subscribe(MemoryEventTypes.MEMORY_ERROR, self._handle_memory_error, priority=30)
+        self.subscribe(MemoryEventTypes.DREAM_MEMORY_APPENDED, self._handle_dream_memory_append, priority=15)
+        self.subscribe(MemoryEventTypes.DREAM_MEMORY_PRUNED, self._handle_dream_memory_prune, priority=15)
+        self.subscribe(MemoryEventTypes.TOKEN_MAP_UPDATED, self._handle_token_map_update, priority=15)
+        self.subscribe(MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED, self._handle_scaffold_context_update, priority=15)
+        
+    async def _handle_memory_initialized(self, event_data: Dict[str, Any]) -> None:
+        """Handle memory initialization events."""
+        try:
+            # Record initialization event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.MEMORY_INITIALIZED,
+                'config': event_data.get('config', {})
+            })
+            
+            # Log successful initialization
+            self._logger.record_event(
+                event_type="memory_initialized",
+                message="Memory system initialized successfully",
+                level="info",
+                config=event_data.get('config', {})
+            )
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle memory initialization: {str(e)}"),
+                "memory_initialization",
+                traceback.format_exc()
+            )
+            
+    async def _handle_config_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle memory configuration update events."""
+        try:
+            config_changes = event_data.get('changes', {})
+            if not config_changes:
+                raise ValueError("No configuration changes provided")
+                
+            # Record config update
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.MEMORY_CONFIG_UPDATED,
+                'changes': config_changes
+            })
+            
+            # Update memory manager configuration
+            self.memory_manager.tune_memory_config(**config_changes)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle memory config update: {str(e)}"),
+                "memory_config_update",
+                traceback.format_exc()
+            )
+            
+    async def _handle_threshold_reached(self, event_data: Dict[str, Any]) -> None:
+        """Handle memory threshold reached events."""
+        try:
+            threshold = event_data.get('threshold')
+            current_usage = event_data.get('current_usage')
+            
+            # Record threshold event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
+                'threshold': threshold,
+                'current_usage': current_usage
+            })
+            
+            # Trigger cleanup if needed
+            if self.memory_manager.check_memory_health(threshold):
+                await self.async_notify(
+                    MemoryEventTypes.MEMORY_CLEANUP_STARTED,
+                    {'threshold': threshold, 'current_usage': current_usage}
+                )
+                
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle memory threshold: {str(e)}"),
+                "memory_threshold",
+                traceback.format_exc()
+            )
+            
+    async def _handle_memory_error(self, event_data: Dict[str, Any]) -> None:
+        """Handle memory error events."""
+        error_msg = event_data.get('error_msg', 'Unknown memory error')
+        error_type = event_data.get('error_type', 'memory_error')
+        self._log_error(
+            Exception(error_msg),
+            error_type,
+            event_data.get('stack_trace')
+        )
+        
+    async def _handle_dream_memory_append(self, event_data: Dict[str, Any]) -> None:
+        """Handle dream memory append events."""
+        try:
+            tensor = event_data.get('tensor')
+            weight = event_data.get('weight', 1.0)
+            metadata = event_data.get('metadata', {})
+            
+            if tensor is None:
+                raise ValueError("No tensor provided for dream memory append")
+                
+            # Record append event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.DREAM_MEMORY_APPENDED,
+                'weight': weight,
+                'metadata': metadata
+            })
+            
+            # Append to dream memory
+            self.memory_manager.append_dream_memory(tensor, weight, metadata)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle dream memory append: {str(e)}"),
+                "dream_memory_append",
+                traceback.format_exc()
+            )
+            
+    async def _handle_dream_memory_prune(self, event_data: Dict[str, Any]) -> None:
+        """Handle dream memory prune events."""
+        try:
+            # Record prune event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.DREAM_MEMORY_PRUNED
+            })
+            
+            # Prune dream memory
+            self.memory_manager.prune_dream_memory()
+            
+            # Notify completion
+            await self.async_notify(
+                MemoryEventTypes.MEMORY_CLEANUP_COMPLETED,
+                {'operation': 'dream_memory_prune'}
+            )
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle dream memory prune: {str(e)}"),
+                "dream_memory_prune",
+                traceback.format_exc()
+            )
+            
+    async def _handle_token_map_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle token map update events."""
+        try:
+            prompt = event_data.get('prompt')
+            confidence = event_data.get('confidence')
+            tokenizer = event_data.get('tokenizer')
+            
+            if not all([prompt, confidence, tokenizer]):
+                raise ValueError("Missing required parameters for token map update")
+                
+            # Record update event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.TOKEN_MAP_UPDATED,
+                'prompt_length': len(prompt),
+                'confidence': confidence
+            })
+            
+            # Update token map
+            self.memory_manager.update_token_map_memory(prompt, confidence, tokenizer)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle token map update: {str(e)}"),
+                "token_map_update",
+                traceback.format_exc()
+            )
+            
+    async def _handle_scaffold_context_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle scaffold context update events."""
+        try:
+            scaffold_hidden_states = event_data.get('scaffold_hidden_states')
+            
+            if scaffold_hidden_states is None:
+                raise ValueError("No scaffold hidden states provided")
+                
+            # Record update event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED,
+                'tensor_shape': scaffold_hidden_states.shape
+            })
+            
+            # Update scaffold context
+            self.memory_manager.set_scaffold_context(scaffold_hidden_states)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to handle scaffold context update: {str(e)}"),
+                "scaffold_context_update",
+                traceback.format_exc()
+            )
+            
+    def get_memory_events_history(self) -> List[Dict[str, Any]]:
+        """Get recent memory events history."""
+        return list(self._memory_events_history)
+        
+    async def update_memory_stats(self) -> None:
+        """Update and broadcast memory statistics."""
+        try:
+            with self._memory_stats_lock:
+                stats = self.memory_manager.get_memory_stats()
+                if stats:
+                    self._memory_stats_cache = stats
+                    await self.async_notify(
+                        MemoryEventTypes.MEMORY_STATS_UPDATED,
+                        {'stats': stats}
+                    )
+                    
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to update memory stats: {str(e)}"),
+                "memory_stats_update",
+                traceback.format_exc()
+            )
+            
+    async def dispatch_memory_event(self, event_type: str, event_data: Dict[str, Any]) -> None:
+        """
+        Dispatch events related to memory operations.
+        
+        Args:
+            event_type: Type of memory event
+            event_data: Dictionary containing event information
+        """
+        try:
+            # Validate event type
+            if not hasattr(MemoryEventTypes, event_type.upper()):
+                raise ValueError(f"Invalid memory event type: {event_type}")
+                
+            # Create event data
+            event_data = {
+                'type': event_type,
+                'timestamp': time.time(),
+                **event_data
+            }
+            
+            # Dispatch event
+            await self.async_notify(event_type, event_data)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to dispatch memory event: {str(e)}"),
+                "memory_event_dispatch",
+                traceback.format_exc()
+            )
 
 class EventDispatcher:
     """
