@@ -8,10 +8,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_processor import LogitsProcessor
-from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
+from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size, memory_usage
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_curiosity import CuriosityManager
+from sovl_trainer import LifecycleManager, TrainingConfig
+import math
+import threading
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
@@ -28,7 +31,6 @@ class GenerationManager:
         error_manager: ErrorManager,
         cross_attention_injector: Any,
         scaffold_manager: Any,
-        temperament: Any,
         device: torch.device,
         curiosity_manager: Any = None,
     ):
@@ -44,12 +46,18 @@ class GenerationManager:
         self.error_manager = error_manager
         self.cross_attention_injector = cross_attention_injector
         self.scaffold_manager = scaffold_manager
-        self.temperament = temperament
         self.curiosity_manager = curiosity_manager
         self.device = device
+        self.lock = threading.Lock()  # Add lock for synchronization
 
+        # Initialize temperament system
+        self._initialize_temperament_system()
+        
         # Initialize configuration
         self._initialize_config()
+        
+        # Initialize lifecycle manager
+        self._initialize_lifecycle_manager()
         
         # Log initialization with config values
         self._log_initialization()
@@ -62,6 +70,7 @@ class GenerationManager:
         # Generation settings
         self.max_retries = self._get_config_value("controls_config.max_generation_retries", 3)
         self.memory_threshold = self._get_config_value("controls_config.memory_threshold", 0.85)
+        self.base_batch_size = self._get_config_value("controls_config.base_batch_size", 1)
         self.generation_callbacks: Dict[str, List[Callable]] = {
             "pre_generate": [],
             "post_generate": []
@@ -69,6 +78,223 @@ class GenerationManager:
 
         # Validate and initialize curiosity state
         self._validate_curiosity_state()
+
+    def _initialize_temperament_system(self) -> None:
+        """Initialize the temperament system with validated parameters."""
+        try:
+            # Get and validate parameters
+            params = self._get_validated_temperament_parameters()
+            
+            # Initialize temperament state
+            if not hasattr(self.state, 'temperament_score'):
+                self.state.temperament_score = 0.5
+            if not hasattr(self.state, 'temperament_history'):
+                self.state.temperament_history = deque(maxlen=self._get_config_value("controls_config.temperament_history_maxlen", 10))
+            
+            # Log initialization
+            self.logger.record_event(
+                event_type="temperament_system_initialized",
+                message="Temperament system initialized with validated parameters",
+                level="info",
+                additional_info=params
+            )
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to initialize temperament system: {str(e)}",
+                error_type="temperament_system_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+
+    def _get_validated_temperament_parameters(self) -> Dict[str, Any]:
+        """Get and validate temperament parameters."""
+        # Define safe parameter ranges
+        safe_ranges = {
+            "temp_smoothing_factor": (0.1, 1.0),
+            "temp_eager_threshold": (0.5, 0.9),
+            "temp_sluggish_threshold": (0.1, 0.5),
+            "temp_mood_influence": (0.1, 0.9),
+            "temp_curiosity_boost": (0.1, 0.5),
+            "temp_restless_drop": (0.1, 0.5),
+            "temp_melancholy_noise": (0.0, 0.2),
+            "conf_feedback_strength": (0.1, 0.9),
+            "temperament_decay_rate": (0.1, 0.9)
+        }
+        
+        # Get and validate parameters
+        params = {}
+        for key, (min_val, max_val) in safe_ranges.items():
+            value = self._config_manager.get(f"controls_config.{key}", (min_val + max_val) / 2)
+            if not (min_val <= value <= max_val):
+                self.logger.record_event(
+                    event_type="temperament_parameter_warning",
+                    message=f"Parameter {key} out of safe range, clamping to bounds",
+                    level="warning",
+                    additional_info={
+                        "parameter": key,
+                        "value": value,
+                        "min": min_val,
+                        "max": max_val
+                    }
+                )
+                value = max(min_val, min(value, max_val))
+            params[key] = value
+            
+        return params
+
+    def update_temperament(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
+        """
+        Update the temperament system with new values.
+        
+        Args:
+            new_score: New temperament score (0.0 to 1.0)
+            confidence: Confidence level in the update (0.0 to 1.0)
+            lifecycle_stage: Current lifecycle stage
+        """
+        try:
+            # Validate inputs
+            if not isinstance(new_score, (int, float)) or not 0.0 <= new_score <= 1.0:
+                self.logger.record_event(
+                    event_type="temperament_update_invalid_score",
+                    message=f"Invalid temperament score: {new_score}. Ignoring update.",
+                    level="warning",
+                    additional_info={
+                        "lifecycle_stage": lifecycle_stage,
+                        "current_score": self.state.temperament_score
+                    }
+                )
+                return
+
+            if not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
+                self.logger.record_event(
+                    event_type="temperament_update_invalid_confidence",
+                    message=f"Invalid confidence: {confidence}. Ignoring update.",
+                    level="warning",
+                    additional_info={
+                        "lifecycle_stage": lifecycle_stage,
+                        "current_score": self.state.temperament_score
+                    }
+                )
+                return
+                
+            # Get configuration values
+            smoothing_factor = self._get_config_value("controls_config.temp_smoothing_factor", 0.5)
+            feedback_strength = self._get_config_value("controls_config.conf_feedback_strength", 0.5)
+            
+            # Update state with new score
+            self.state.temperament_score = new_score
+            self.state.temperament_history.append(new_score)
+            
+            # Log the update
+            self.logger.record_event(
+                event_type="temperament_updated",
+                message="Temperament system updated",
+                level="info",
+                additional_info={
+                    "new_score": new_score,
+                    "confidence": confidence,
+                    "lifecycle_stage": lifecycle_stage,
+                    "current_score": self.state.temperament_score,
+                    "conversation_id": self.state.history.conversation_id,
+                    "state_hash": self.state.state_hash,
+                    "smoothing_factor": smoothing_factor,
+                    "feedback_strength": feedback_strength
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="temperament_update_error",
+                message=f"Failed to update temperament: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "stack_trace": traceback.format_exc(),
+                    "lifecycle_stage": lifecycle_stage,
+                    "current_score": self.state.temperament_score
+                }
+            )
+            raise
+
+    @property
+    def current_temperament_score(self) -> float:
+        """Get the current temperament score."""
+        return self.state.temperament_score
+        
+    @property
+    def mood_label(self) -> str:
+        """Get a human-readable mood label based on the current score."""
+        score = self.current_temperament_score
+        if score < 0.3:
+            return "Cautious"
+        elif score < 0.7:
+            return "Balanced"
+        else:
+            return "Curious"
+
+    def adjust_parameter(
+        self,
+        base_value: float,
+        parameter_type: str,
+        curiosity_pressure: Optional[float] = None
+    ) -> float:
+        """Adjust a parameter based on current temperament and curiosity pressure."""
+        try:
+            # Validate inputs
+            if not 0.0 <= base_value <= 1.0:
+                raise ValueError(f"Base value must be between 0.0 and 1.0, got {base_value}")
+            if curiosity_pressure is not None and not 0.0 <= curiosity_pressure <= 1.0:
+                raise ValueError(f"Curiosity pressure must be between 0.0 and 1.0, got {curiosity_pressure}")
+            
+            # Get current temperament score
+            current_score = self.current_temperament_score
+            
+            # Calculate adjustment based on parameter type
+            if parameter_type == "temperature":
+                # Base adjustment from temperament
+                adjustment = (current_score - 0.5) * 0.3  # Scale to ±0.15
+                
+                # Add curiosity influence if available
+                if curiosity_pressure is not None:
+                    adjustment += curiosity_pressure * 0.2  # Scale to +0.2
+                
+                # Apply adjustment with bounds
+                adjusted_value = base_value + adjustment
+                adjusted_value = max(0.1, min(1.0, adjusted_value))
+                
+                # Log the adjustment
+                self.logger.record_event(
+                    event_type="parameter_adjusted",
+                    message="Parameter adjusted",
+                    level="info",
+                    additional_info={
+                        "parameter_type": parameter_type,
+                        "base_value": base_value,
+                        "adjusted_value": adjusted_value,
+                        "temperament_score": current_score,
+                        "curiosity_pressure": curiosity_pressure,
+                        "adjustment": adjustment
+                    }
+                )
+                
+                return adjusted_value
+                
+            else:
+                raise ValueError(f"Unsupported parameter type: {parameter_type}")
+                
+        except Exception as e:
+            self.logger.record_event(
+                event_type="parameter_adjustment_error",
+                message=f"Failed to adjust parameter: {str(e)}",
+                level="error",
+                additional_info={
+                    "parameter_type": parameter_type,
+                    "base_value": base_value,
+                    "curiosity_pressure": curiosity_pressure
+                }
+            )
+            return base_value  # Return base value on error
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
@@ -603,8 +829,25 @@ class GenerationManager:
     def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: List[int]) -> float:
         """Calculate confidence score for generated output."""
         try:
-            processor = LogitsProcessor(logits)
-            return processor.calculate_confidence(generated_ids)
+            if not self.curiosity_manager:
+                return 0.5
+                
+            # Get base and scaffold confidences
+            base_conf = self.curiosity_manager.compute_curiosity(
+                base_conf=0.5,  # Default base confidence
+                scaf_conf=0.5,  # Default scaffold confidence
+                state=self.state,
+                query_embedding=self.curiosity_manager._generate_query_embedding(
+                    self.state,
+                    self.base_tokenizer,
+                    self.base_model,
+                    self.base_tokenizer.decode(generated_ids)
+                ),
+                device=self.device
+            )
+            
+            return base_conf
+            
         except Exception as e:
             self._log_error(
                 Exception(f"Confidence score calculation failed: {str(e)}"),
@@ -612,6 +855,38 @@ class GenerationManager:
                 traceback.format_exc()
             )
             return 0.5
+
+    def _initialize_lifecycle_manager(self) -> None:
+        """Initialize the lifecycle manager with validated parameters."""
+        try:
+            # Get training config
+            training_config = TrainingConfig(self._config_manager)
+            
+            # Initialize lifecycle manager
+            self.lifecycle_manager = LifecycleManager(
+                config=training_config,
+                model=self.base_model,
+                state=self.state
+            )
+            
+            # Log initialization
+            self.logger.record_event(
+                event_type="lifecycle_manager_initialized",
+                message="Lifecycle manager initialized with validated parameters",
+                level="info",
+                additional_info={
+                    "data_exposure": self.lifecycle_manager.data_exposure,
+                    "lora_capacity": self.lifecycle_manager.lora_capacity
+                }
+            )
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to initialize lifecycle manager: {str(e)}",
+                error_type="lifecycle_manager_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
 
     @torch.no_grad()
     def generate(
@@ -621,160 +896,183 @@ class GenerationManager:
         temperature: float = 0.7,
         top_p: float = 0.9,
         num_return_sequences: int = 1,
-        conversation_id: Optional[str] = None,
-        state_hash: Optional[str] = None,
+        do_sample: bool = True,
+        lifecycle_stage: str = "active",
         **kwargs
     ) -> List[str]:
-        """Generate text using the base model and scaffolds with proper device handling."""
+        """Generate text using the base model with scaffold integration."""
         try:
+            # Check memory health before generation
+            self._manage_memory()
+            
             # Validate device state
-            self._validate_device_state()
-            
-            # Store state metadata for logging
-            self._store_state_metadata(conversation_id, state_hash)
-            
-            # Update temperament before generation
-            if hasattr(self, 'temperament_adjuster'):
-                self.temperament_adjuster.update_temperament(self.curiosity_manager)
-            
-            # Sync temperament score with state
-            if hasattr(self.state, 'temperament_score'):
-                self.temperament.score = self.state.temperament_score
-            
-            # Get curiosity pressure for temperature adjustment
-            curiosity_pressure = None
+            if not self._validate_device_state():
+                raise RuntimeError("Device state validation failed")
+
+            # Log state metadata
+            self._log_state_metadata()
+
+            # Update temperament based on curiosity manager if available
             if self.curiosity_manager:
-                curiosity_pressure = self.curiosity_manager.get_pressure()
-            
-            # Get query embedding for curiosity computation
+                curiosity_score = self.curiosity_manager.get_curiosity_score()
+                confidence = self.curiosity_manager.get_confidence()
+                self.update_temperament(curiosity_score, confidence, lifecycle_stage)
+
+            # Calculate curiosity pressure and query embedding
+            curiosity_pressure = None
             query_embedding = None
             if self.curiosity_manager:
-                inputs = self.base_tokenizer(prompt, return_tensors="pt")
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    outputs = self.base_model(**inputs, output_hidden_states=True)
-                    query_embedding = outputs.hidden_states[-1].mean(dim=1)
-            
+                curiosity_pressure = self.curiosity_manager.calculate_curiosity_pressure(prompt)
+                query_embedding = self.curiosity_manager.get_query_embedding(prompt)
+
             # Compute curiosity score
-            base_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
-            scaf_conf = self.state.scaffold_confidence_history[-1] if self.state.scaffold_confidence_history else 0.5
-            curiosity_score = self.compute_curiosity(base_conf, scaf_conf, query_embedding)
-            
-            # Adjust temperature based on current temperament, curiosity pressure, and curiosity score
-            adjusted_temperature = self.temperament.adjust_parameter(
-                base_value=temperature,
-                parameter_type="temperature",
-                curiosity_pressure=curiosity_pressure
+            curiosity_score = self.curiosity_manager.compute_curiosity_score(
+                self.state.base_confidence_history,
+                self.state.scaffold_confidence_history
+            ) if self.curiosity_manager else 0.5
+
+            # Update data exposure through lifecycle manager
+            self.lifecycle_manager.update_exposure([prompt], self.current_temperament_score)
+
+            # Get lifecycle weight
+            lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
+
+            # Adjust temperature using the utility function
+            adjusted_temperature = adjust_temperature(
+                base_temp=temperature,
+                temperament_score=self.current_temperament_score,
+                config_manager=self._config_manager,
+                logger=self.logger
             )
-            
-            # Further adjust temperature based on curiosity score
-            if curiosity_score > 0.7:  # High curiosity
-                adjusted_temperature = min(1.5, adjusted_temperature * 1.2)
-            elif curiosity_score < 0.3:  # Low curiosity
-                adjusted_temperature = max(0.5, adjusted_temperature * 0.8)
-            
-            # Log generation start with temperament and curiosity info
-            self._log_event(
-                "generation_start",
-                {
+            adjusted_temperature *= lifecycle_weight
+
+            # Adjust max_length based on state
+            adjusted_max_length = self._adjust_max_length(
+                max_length,
+                self.state.temperament_score,
+                curiosity_pressure
+            )
+
+            # Log generation start with state-driven parameters
+            self.logger.record_event(
+                event_type="generation_started",
+                message="Starting text generation with state-driven parameters",
+                level="info",
+                additional_info={
                     "prompt": prompt,
                     "max_length": max_length,
-                    "base_temperature": temperature,
+                    "adjusted_max_length": adjusted_max_length,
+                    "temperature": temperature,
                     "adjusted_temperature": adjusted_temperature,
                     "top_p": top_p,
                     "num_return_sequences": num_return_sequences,
-                    "device": str(self.device),
-                    "temperament_score": self.temperament.score,
-                    "curiosity_pressure": curiosity_pressure,
+                    "do_sample": do_sample,
+                    "lifecycle_stage": lifecycle_stage,
                     "curiosity_score": curiosity_score,
-                    "mood_label": self.temperament.mood_label
+                    "mood_label": self.mood_label,
+                    "temperament_score": self.current_temperament_score,
+                    "lifecycle_weight": lifecycle_weight,
+                    "data_exposure": self.lifecycle_manager.data_exposure,
+                    "memory_usage": memory_usage(self.device, self._config_manager)
                 }
             )
-            
-            # Check memory health before generation
-            if not self.check_memory_health():
-                self._log_warning("Memory health check failed before generation")
-                return self.error_manager.handle_generation_error(
-                    Exception("Memory health check failed"),
-                    prompt
-                )
 
-            # Tokenize input
-            inputs = self.base_tokenizer(prompt, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            
-            # Generate with base model using adjusted temperature
-            with torch.no_grad():
-                outputs = self.base_model.generate(
-                    **inputs,
-                    max_length=max_length,
-                    temperature=adjusted_temperature,
-                    top_p=top_p,
-                    num_return_sequences=num_return_sequences,
-                    pad_token_id=self.base_tokenizer.pad_token_id,
-                    **kwargs
-                )
-            
-            # Decode and return generated sequences
-            generated_sequences = self.base_tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            
-            # Update curiosity state with generated text
-            if self.curiosity_manager:
-                for sequence in generated_sequences:
-                    self._update_curiosity(sequence, base_conf)
-            
-            # Log successful generation with final parameters
-            self._log_event(
-                "generation_complete",
-                {
-                    "generated_sequences": generated_sequences,
-                    "device": str(self.device),
-                    "final_temperature": adjusted_temperature,
-                    "final_temperament_score": self.temperament.score,
-                    "final_curiosity_pressure": curiosity_pressure,
-                    "final_curiosity_score": curiosity_score
-                }
+            # Generate text with adjusted parameters
+            generated_texts = self._generate_text(
+                prompt=prompt,
+                max_length=adjusted_max_length,
+                temperature=adjusted_temperature,
+                top_p=top_p,
+                num_return_sequences=num_return_sequences,
+                do_sample=do_sample,
+                **kwargs
             )
-            
-            return generated_sequences
-            
-        except torch.cuda.OutOfMemoryError as oom:
-            self.error_manager.context.logger.log_error(
-                error_msg="CUDA out of memory",
-                error_type="generation_oom",
-                stack_trace=traceback.format_exc(),
+
+            # Check for repetitions in generated text
+            if generated_texts:
+                special_ids = {
+                    self.base_tokenizer.pad_token_id,
+                    self.base_tokenizer.eos_token_id,
+                    self.base_tokenizer.bos_token_id,
+                    self.base_tokenizer.unk_token_id
+                }
+                
+                for i, text in enumerate(generated_texts):
+                    token_ids = self.base_tokenizer.encode(text)
+                    repetition = detect_repetitions(
+                        token_ids=token_ids,
+                        special_ids=special_ids,
+                        config_manager=self._config_manager,
+                        logger=self.logger
+                    )
+                    
+                    if repetition:
+                        self._log_event(
+                            "repetition_detected",
+                            f"Repetition detected in generated text {i}",
+                            level="warning",
+                            additional_info={
+                                "text": text,
+                                "repetition_indices": repetition
+                            }
+                        )
+                        # Truncate text at repetition point
+                        generated_texts[i] = self.base_tokenizer.decode(token_ids[:repetition[0]])
+
+            # Update state with generation results
+            if generated_texts:
+                # Update conversation history
+                self.state.history.add_message("assistant", generated_texts[0])
+                
+                # Update confidence history
+                confidence = self.calculate_confidence_score(
+                    self._get_last_logits(),
+                    self.base_tokenizer.encode(generated_texts[0])
+                )
+                self.state.add_confidence(confidence)
+                
+                # Update curiosity state
+                if self.curiosity_manager:
+                    self.curiosity_manager.update_curiosity_state(
+                        prompt=prompt,
+                        response=generated_texts[0],
+                        query_embedding=query_embedding
+                    )
+
+            # Log generation completion with state updates
+            self.logger.record_event(
+                event_type="generation_completed",
+                message="Text generation completed with state updates",
+                level="info",
                 additional_info={
-                    "prompt": prompt[:200],
-                    "memory_stats": {
-                        "allocated": torch.cuda.memory_allocated(),
-                        "reserved": torch.cuda.memory_reserved(),
-                        "max_allocated": torch.cuda.max_memory_allocated(),
-                    } if torch.cuda.is_available() else None,
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash
-                }
-            )
-            return self.error_manager.handle_generation_error(oom, prompt)
-            
-        except Exception as e:
-            self._log_error(
-                Exception(f"generation_error: {str(e)}"),
-                "generation_error",
-                {
                     "prompt": prompt,
-                    "max_length": max_length,
+                    "generated_texts": generated_texts,
                     "temperature": temperature,
-                    "adjusted_temperature": adjusted_temperature if 'adjusted_temperature' in locals() else None,
-                    "top_p": top_p,
-                    "device": str(self.device),
-                    "temperament_score": self.temperament.score if hasattr(self, 'temperament') else None,
-                    "curiosity_pressure": curiosity_pressure if 'curiosity_pressure' in locals() else None,
-                    "curiosity_score": curiosity_score if 'curiosity_score' in locals() else None
+                    "adjusted_temperature": adjusted_temperature,
+                    "curiosity_score": curiosity_score,
+                    "mood_label": self.mood_label,
+                    "temperament_score": self.current_temperament_score,
+                    "lifecycle_weight": lifecycle_weight,
+                    "data_exposure": self.lifecycle_manager.data_exposure,
+                    "memory_usage": memory_usage(self.device, self._config_manager),
+                    "conversation_length": len(self.state.history.messages)
                 }
             )
-            return self.error_manager.handle_generation_error(e, prompt)
 
-    def _validate_device_state(self) -> None:
+            return generated_texts
+
+        except torch.cuda.OutOfMemoryError:
+            self._handle_state_driven_error(
+                Exception("CUDA out of memory during generation"),
+                "generation_oom"
+            )
+            raise
+
+        except Exception as e:
+            self._handle_state_driven_error(e, "generation_error")
+            raise
+
+    def _validate_device_state(self) -> bool:
         """Validate that all models are on the correct device."""
         try:
             # Check base model
@@ -788,18 +1086,30 @@ class GenerationManager:
                     self._log_warning(f"Scaffold {i} device mismatch: {scaffold.device} != {self.device}")
                     self.scaffolds[i] = scaffold.to(self.device)
                     
+            return True
         except Exception as e:
             self._log_error(
                 Exception(f"device_validation_error: {str(e)}"),
                 "device_validation",
                 traceback.format_exc()
             )
-            raise
+            return False
 
-    def _store_state_metadata(self, conversation_id: Optional[str], state_hash: Optional[str]) -> None:
-        """Store state metadata for logging."""
-        self.conversation_id = conversation_id
-        self.state_hash = state_hash
+    def _log_state_metadata(self) -> None:
+        """Log state metadata for debugging."""
+        self.logger.record_event(
+            event_type="state_metadata",
+            message="Logging state metadata",
+            level="info",
+            additional_info={
+                "conversation_id": self.state.history.conversation_id,
+                "state_hash": self.state.state_hash,
+                "temperament_score": self.current_temperament_score,
+                "mood_label": self.mood_label,
+                "curiosity_score": self.curiosity_manager.get_curiosity_score() if self.curiosity_manager else None,
+                "confidence": self.curiosity_manager.get_confidence() if self.curiosity_manager else None
+            }
+        )
 
     def _validate_curiosity_state(self) -> None:
         """Validate and initialize curiosity state if needed."""
@@ -929,6 +1239,186 @@ class GenerationManager:
                 traceback.format_exc()
             )
             return []
+
+    @synchronized()
+    def _manage_memory(self) -> None:
+        """Manage memory usage and integrate with state system."""
+        try:
+            # Get current memory stats using the utility function
+            memory_stats = memory_usage(self.device, self._config_manager)
+            
+            # Log memory usage
+            self._log_memory_health(
+                memory_ratio=memory_stats.get("allocated", 0.0) / memory_stats.get("reserved", 1.0),
+                current_memory=memory_stats.get("allocated", 0),
+                total_memory=memory_stats.get("reserved", 1)
+            )
+            
+            # Check if memory usage exceeds threshold
+            if memory_stats.get("allocated", 0.0) / memory_stats.get("reserved", 1.0) > self.memory_threshold:
+                # Clear scaffold cache
+                self._clear_scaffold_cache()
+                
+                # Prune dream memory if available
+                if hasattr(self.state, 'dream_memory'):
+                    self.state._prune_dream_memory()
+                
+                # Clear CUDA cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Log memory cleanup
+                self._log_event(
+                    "memory_cleanup",
+                    "Memory cleanup performed",
+                    level="info",
+                    additional_info={
+                        "memory_stats": memory_stats,
+                        "threshold": self.memory_threshold
+                    }
+                )
+            
+            # Update state with current memory stats
+            self.state._update_memory_usage()
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Memory management failed: {str(e)}"),
+                "memory_management",
+                traceback.format_exc()
+            )
+
+    def _get_dynamic_batch_size(self, prompts: List[str]) -> int:
+        """Get dynamic batch size based on available memory."""
+        try:
+            return dynamic_batch_size(
+                base_size=self.base_batch_size,
+                config_manager=self._config_manager,
+                logger=self.logger
+            )
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to get dynamic batch size: {str(e)}"),
+                "dynamic_batch_size",
+                traceback.format_exc()
+            )
+            return self.base_batch_size
+
+    def _adjust_max_length(
+        self,
+        base_length: int,
+        temperament_score: float,
+        curiosity_pressure: Optional[float] = None
+    ) -> int:
+        """Adjust max length based on state parameters."""
+        try:
+            # Base adjustment from temperament
+            adjustment = (temperament_score - 0.5) * 0.2  # Scale to ±0.1
+            
+            # Add curiosity influence if available
+            if curiosity_pressure is not None:
+                adjustment += curiosity_pressure * 0.15  # Scale to +0.15
+            
+            # Apply adjustment with bounds
+            adjusted_length = int(base_length * (1 + adjustment))
+            adjusted_length = max(50, min(200, adjusted_length))
+            
+            return adjusted_length
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to adjust max length: {str(e)}"),
+                "adjust_max_length",
+                traceback.format_exc()
+            )
+            return base_length
+
+    @synchronized()
+    def _handle_state_driven_error(self, error: Exception, context: str) -> None:
+        """Handle errors with state-driven recovery strategies."""
+        try:
+            # Log the error with state context
+            self._log_error(error, context)
+            
+            # Get current state metrics
+            memory_stats = memory_usage(self.device, self._config_manager)
+            temperament_score = self.current_temperament_score
+            confidence_history = self.state.get_confidence_history()
+            
+            # Determine recovery strategy based on state
+            if memory_stats.get("allocated", 0.0) / memory_stats.get("reserved", 1.0) > 0.9:
+                # Memory-related error
+                self._manage_memory()
+                self._log_event(
+                    "error_recovery_memory",
+                    "Performing memory cleanup as error recovery",
+                    level="info",
+                    additional_info={
+                        "memory_usage": memory_stats,
+                        "error_context": context
+                    }
+                )
+                
+            elif len(confidence_history) > 0 and confidence_history[-1] < 0.3:
+                # Low confidence error
+                self._log_event(
+                    "error_recovery_confidence",
+                    "Adjusting generation parameters due to low confidence",
+                    level="info",
+                    additional_info={
+                        "last_confidence": confidence_history[-1],
+                        "error_context": context
+                    }
+                )
+                # Reset confidence history
+                self.state.clear_confidence_history()
+                
+            elif temperament_score < 0.3:
+                # Low temperament error
+                self._log_event(
+                    "error_recovery_temperament",
+                    "Adjusting temperament due to error",
+                    level="info",
+                    additional_info={
+                        "temperament_score": temperament_score,
+                        "error_context": context
+                    }
+                )
+                # Reset temperament to neutral
+                self.update_temperament(0.5, 0.5, "error_recovery")
+                
+            else:
+                # General error recovery
+                self._log_event(
+                    "error_recovery_general",
+                    "Performing general error recovery",
+                    level="info",
+                    additional_info={
+                        "error_context": context,
+                        "state_hash": self.state.state_hash,
+                        "memory_usage": memory_stats
+                    }
+                )
+                
+            # Update state with error information
+            self.state.set_cached(
+                f"last_error_{context}",
+                {
+                    "timestamp": time.time(),
+                    "error_type": type(error).__name__,
+                    "error_message": str(error),
+                    "memory_stats": memory_stats,
+                    "temperament_score": temperament_score,
+                    "confidence_history_length": len(confidence_history)
+                }
+            )
+            
+        except Exception as recovery_error:
+            self._log_error(
+                Exception(f"Error recovery failed: {str(recovery_error)}"),
+                "error_recovery",
+                traceback.format_exc()
+            )
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for generated tokens."""

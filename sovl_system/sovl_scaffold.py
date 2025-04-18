@@ -14,6 +14,7 @@ from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
 from sovl_error import ErrorHandler
 from sovl_confidence import ConfidenceCalculator
 from sovl_io import ConfigurationError
+from sovl_curiosity import CuriosityManager
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
@@ -1003,15 +1004,27 @@ class CrossAttentionInjector:
 def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for scaffold generation."""
     try:
-        confidence_calculator = ConfidenceCalculator.get_instance()
-        return confidence_calculator.calculate_confidence_score(
-            logits=logits,
-            generated_ids=generated_ids,
-            state=None,
-            error_manager=None,
-            context=None,
-            curiosity_manager=None
+        # Get the curiosity manager from the global state
+        sovl = SOVLSystem()
+        
+        if not sovl.curiosity:
+            return 0.5
+            
+        # Generate query embedding from the logits
+        with torch.no_grad():
+            query_embedding = logits.mean(dim=1)  # Simple mean pooling of logits
+            
+        # Use curiosity manager for confidence calculation
+        confidence = sovl.curiosity.compute_curiosity(
+            base_conf=0.5,  # Default base confidence
+            scaf_conf=0.5,  # Default scaffold confidence
+            state=sovl.state,
+            query_embedding=query_embedding,
+            device=logits.device
         )
+        
+        return confidence
+        
     except Exception as e:
         raise RuntimeError(f"Failed to calculate confidence score: {str(e)}")
 
