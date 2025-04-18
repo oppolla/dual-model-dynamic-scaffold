@@ -557,54 +557,45 @@ class GenerationManager:
             )
         return seq_ids
 
-    def _update_curiosity(self, generated_text: str, confidence: float) -> None:
-        """Update curiosity state based on generation results."""
+    def _update_curiosity(self, text: str, confidence: float) -> None:
+        """Update curiosity state with generated text and confidence."""
         try:
-            if self.curiosity_manager is None:
+            if not self.curiosity_manager:
                 return
-
-            # Store state metadata for logging
-            self._store_state_metadata()
-
-            # Update curiosity pressure
-            self.curiosity_manager.update_pressure(
-                generated_text=generated_text,
-                confidence=confidence
+                
+            # Tokenize and get embeddings for the generated text
+            inputs = self.base_tokenizer(text, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = self.base_model(**inputs, output_hidden_states=True)
+                text_embedding = outputs.hidden_states[-1].mean(dim=1)
+            
+            # Update curiosity with the new text and confidence
+            self.curiosity_manager.update_curiosity(
+                text=text,
+                confidence=confidence,
+                embedding=text_embedding
             )
-
+            
             # Log curiosity update
             self._log_event(
                 "curiosity_update",
                 {
-                    "pressure": self.state.curiosity.pressure,
+                    "text": text[:200],  # Log first 200 chars
                     "confidence": confidence,
-                    "unanswered_questions": len(self.state.curiosity.unanswered_questions),
-                    "novelty_scores": len(self.state.curiosity.novelty_scores)
+                    "embedding_shape": text_embedding.shape,
+                    "curiosity_pressure": self.curiosity_manager.get_pressure()
                 }
             )
-
-            # Check for significant pressure changes
-            if len(self.state.curiosity.pressure_history) > 1:
-                last_pressure = self.state.curiosity.pressure_history[-2]
-                pressure_change = abs(self.state.curiosity.pressure - last_pressure)
-                if pressure_change > 0.2:  # Significant change threshold
-                    self._log_warning(
-                        "curiosity_pressure_change",
-                        f"Significant curiosity pressure change detected: {pressure_change:.2f}"
-                    )
-
+            
         except Exception as e:
             self._log_error(
-                Exception(f"Failed to update curiosity: {str(e)}"),
-                "curiosity_update",
-                traceback.format_exc()
-            )
-            # Don't raise the exception to prevent generation failure
-            # but ensure the error is logged and handled
-            self.error_manager.handle_curiosity_error(
-                error=str(e),
-                context="generation_curiosity_update",
-                stack_trace=traceback.format_exc()
+                Exception(f"curiosity_update_error: {str(e)}"),
+                "curiosity_update_error",
+                {
+                    "text": text[:200],
+                    "confidence": confidence
+                }
             )
 
     @synchronized()
@@ -654,14 +645,34 @@ class GenerationManager:
             if self.curiosity_manager:
                 curiosity_pressure = self.curiosity_manager.get_pressure()
             
-            # Adjust temperature based on current temperament and curiosity
+            # Get query embedding for curiosity computation
+            query_embedding = None
+            if self.curiosity_manager:
+                inputs = self.base_tokenizer(prompt, return_tensors="pt")
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = self.base_model(**inputs, output_hidden_states=True)
+                    query_embedding = outputs.hidden_states[-1].mean(dim=1)
+            
+            # Compute curiosity score
+            base_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
+            scaf_conf = self.state.scaffold_confidence_history[-1] if self.state.scaffold_confidence_history else 0.5
+            curiosity_score = self.compute_curiosity(base_conf, scaf_conf, query_embedding)
+            
+            # Adjust temperature based on current temperament, curiosity pressure, and curiosity score
             adjusted_temperature = self.temperament.adjust_parameter(
                 base_value=temperature,
                 parameter_type="temperature",
                 curiosity_pressure=curiosity_pressure
             )
             
-            # Log generation start with temperament info
+            # Further adjust temperature based on curiosity score
+            if curiosity_score > 0.7:  # High curiosity
+                adjusted_temperature = min(1.5, adjusted_temperature * 1.2)
+            elif curiosity_score < 0.3:  # Low curiosity
+                adjusted_temperature = max(0.5, adjusted_temperature * 0.8)
+            
+            # Log generation start with temperament and curiosity info
             self._log_event(
                 "generation_start",
                 {
@@ -674,6 +685,7 @@ class GenerationManager:
                     "device": str(self.device),
                     "temperament_score": self.temperament.score,
                     "curiosity_pressure": curiosity_pressure,
+                    "curiosity_score": curiosity_score,
                     "mood_label": self.temperament.mood_label
                 }
             )
@@ -705,6 +717,11 @@ class GenerationManager:
             # Decode and return generated sequences
             generated_sequences = self.base_tokenizer.batch_decode(outputs, skip_special_tokens=True)
             
+            # Update curiosity state with generated text
+            if self.curiosity_manager:
+                for sequence in generated_sequences:
+                    self._update_curiosity(sequence, base_conf)
+            
             # Log successful generation with final parameters
             self._log_event(
                 "generation_complete",
@@ -713,7 +730,8 @@ class GenerationManager:
                     "device": str(self.device),
                     "final_temperature": adjusted_temperature,
                     "final_temperament_score": self.temperament.score,
-                    "final_curiosity_pressure": curiosity_pressure
+                    "final_curiosity_pressure": curiosity_pressure,
+                    "final_curiosity_score": curiosity_score
                 }
             )
             
@@ -749,7 +767,8 @@ class GenerationManager:
                     "top_p": top_p,
                     "device": str(self.device),
                     "temperament_score": self.temperament.score if hasattr(self, 'temperament') else None,
-                    "curiosity_pressure": curiosity_pressure if 'curiosity_pressure' in locals() else None
+                    "curiosity_pressure": curiosity_pressure if 'curiosity_pressure' in locals() else None,
+                    "curiosity_score": curiosity_score if 'curiosity_score' in locals() else None
                 }
             )
             return self.error_manager.handle_generation_error(e, prompt)
@@ -823,6 +842,92 @@ class GenerationManager:
                 traceback.format_exc()
             )
             raise
+
+    def compute_curiosity(
+        self,
+        base_conf: float,
+        scaf_conf: float,
+        query_embedding: torch.Tensor,
+    ) -> float:
+        """Compute curiosity score based on confidence and embeddings."""
+        try:
+            if not self.curiosity_manager:
+                return 0.5
+
+            # Get memory embeddings with memory limits
+            memory_embeddings = self._get_valid_memory_embeddings(self.state)
+            
+            # Compute curiosity score
+            score = self.curiosity_manager.compute_curiosity(
+                base_conf=base_conf,
+                scaf_conf=scaf_conf,
+                state=self.state,
+                query_embedding=query_embedding,
+                device=self.device
+            )
+            
+            return score
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to compute curiosity: {str(e)}"),
+                "compute_curiosity",
+                traceback.format_exc()
+            )
+            return 0.5
+
+    def _get_valid_memory_embeddings(self, state: SOVLState) -> List[torch.Tensor]:
+        """Get valid memory embeddings while respecting memory limits."""
+        try:
+            memory_embeddings = []
+            hidden_size = self._config_manager.get("hidden_size")
+            total_size = 0.0
+            
+            if not hasattr(state, 'dream_memory') or not state.dream_memory:
+                return memory_embeddings
+                
+            for entry in state.dream_memory:
+                tensor = entry["tensor"]
+                # Calculate memory size in MB
+                memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)
+                
+                # Check memory limit
+                if total_size + memory_size > self._config_manager.get("max_memory_mb", 512.0):
+                    self._log_event("memory_limit_reached", {
+                        "total_size_mb": total_size,
+                        "skipped_size_mb": memory_size,
+                        "max_memory_mb": self._config_manager.get("max_memory_mb", 512.0)
+                    })
+                    break
+                    
+                # Validate tensor shape
+                if tensor.shape[-1] == hidden_size:
+                    try:
+                        # Validate and move tensor to correct device
+                        tensor = self._validate_device(tensor, f"dream_memory_tensor_{len(memory_embeddings)}")
+                        memory_embeddings.append(tensor)
+                        total_size += memory_size
+                    except Exception as e:
+                        self._log_warning("tensor_validation_failed", {
+                            "error": str(e),
+                            "tensor_shape": list(tensor.shape)
+                        })
+                        continue
+                else:
+                    self._log_warning("invalid_tensor_shape", {
+                        "expected_size": hidden_size,
+                        "actual_size": tensor.shape[-1]
+                    })
+                    
+            return memory_embeddings
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to get valid memory embeddings: {str(e)}"),
+                "get_valid_memory_embeddings",
+                traceback.format_exc()
+            )
+            return []
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for generated tokens."""
