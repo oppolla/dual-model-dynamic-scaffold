@@ -1,8 +1,8 @@
 {
   "core_config": {
-    "base_model_name": "gpt2",
+    "base_model_name": "SmolLM2-360M",
     "base_model_path": null,
-    "scaffold_model_name": "gpt2",
+    "scaffold_model_name": "SmolLM2-135M",
     "scaffold_model_path": null,
     "cross_attn_layers": [],
     "use_dynamic_layers": false,
