@@ -1,0 +1,147 @@
+@startuml SOVL System Architecture
+
+' Core System Components
+package "Core System" {
+    class SOVLSystem {
+        +SystemContext context
+        +ConfigHandler config_handler
+        +ModelLoader model_loader
+        +CuriosityEngine curiosity_engine
+        +MemoryMonitor memory_monitor
+        +StateTracker state_tracker
+        +ErrorManager error_manager
+        +get_state(): Dict[str, Any]
+        +update_state(state_dict: Dict[str, Any]): None
+        +shutdown(): None
+        +get_memory_stats(): Dict[str, Any]
+        +get_recent_errors(): List[Dict[str, Any]]
+        +get_component_status(): Dict[str, bool]
+        +get_system_state(): Dict[str, Any]
+        +set_debug_mode(enabled: bool): None
+        +get_execution_trace(): List[Dict[str, Any]]
+    }
+
+    class SystemContext {
+        +config_path: str
+        +device: str
+        +logger: Logger
+        +event_dispatcher: EventDispatcher
+        +config_handler: ConfigHandler
+        +_on_config_change(): None
+    }
+
+    class SOVLOrchestrator {
+        +config_manager: ConfigManager
+        +state_manager: StateManager
+        +error_handler: ErrorHandler
+        +plugin_manager: PluginManager
+        +_initialize_config(): None
+        +_validate_config_values(): None
+        +_on_config_change(): None
+        +_create_config_manager(config_path: str): ConfigManager
+    }
+}
+
+' Interfaces
+package "Interfaces" {
+    interface SystemInterface {
+        +get_state(): Dict[str, Any]
+        +update_state(state_dict: Dict[str, Any]): None
+        +shutdown(): None
+    }
+
+    interface OrchestratorInterface {
+        +set_system(system: SystemInterface): None
+        +sync_state(): None
+    }
+
+    class SystemMediator {
+        +config_manager: ConfigManager
+        +logger: LoggingManager
+        +device: torch.device
+        +state_manager: StateManager
+        +error_handler: ErrorHandler
+        +register_system(system: SystemInterface): None
+        +register_orchestrator(orchestrator: OrchestratorInterface): None
+        +sync_state(): None
+        +shutdown(): None
+    }
+}
+
+' State Management
+package "State Management" {
+    class StateTracker {
+        +state: Optional[Dict[str, Any]]
+        +state_history: deque
+        +state_changes: deque
+        +get_state(): Dict[str, Any]
+        +get_state_history(limit: int): List[Dict[str, Any]]
+        +get_state_changes(limit: int): List[Dict[str, Any]]
+        +get_state_stats(): Dict[str, Any]
+        +update_state(key: str, value: Any): None
+        +clear_history(): None
+        +get_debug_info(): Dict[str, Any]
+    }
+
+    class StateManager {
+        +config_manager: ConfigManager
+        +logger: LoggingManager
+        +device: torch.device
+        +load_state(): SOVLState
+        +save_state(state: SOVLState): None
+    }
+}
+
+' Error Handling
+package "Error Handling" {
+    class ErrorManager {
+        +error_history: deque
+        +error_counts: Dict[str, int]
+        +get_recent_errors(): List[Dict[str, Any]]
+        +get_error_stats(): Dict[str, Any]
+        +get_last_error(): Optional[Dict[str, Any]]
+        +handle_training_error(error: Exception, batch_size: int): None
+        +handle_curiosity_error(error: Exception, pressure: float): None
+        +handle_memory_error(error: Exception, memory_usage: float): None
+        +handle_generation_error(error: Exception, temperature: float): None
+        +handle_data_error(error: Exception, context: Dict[str, Any], conversation_id: str): None
+    }
+
+    class ErrorHandler {
+        +logger: LoggingManager
+        +handle_generic_error(error: Exception, context: str, fallback_action: Callable): None
+    }
+}
+
+' Logging
+package "Logging" {
+    class Logger {
+        +_log_queue: deque
+        +_error_queue: deque
+        +_lock: Lock
+        +log_event(event_type: str, message: str, level: str, additional_info: Optional[Dict]): None
+        +log_error(error_msg: str, error_type: str, stack_trace: Optional[str], additional_info: Optional[Dict]): None
+        +get_recent_events(limit: int): List[Dict[str, Any]]
+        +get_recent_errors(limit: int): List[Dict[str, Any]]
+        +get_debug_stats(): Dict[str, Any]
+        +clear_queues(): None
+    }
+}
+
+' Relationships
+SOVLSystem ..|> SystemInterface
+SOVLOrchestrator ..|> OrchestratorInterface
+SOVLSystem --> SystemContext
+SOVLSystem --> StateTracker
+SOVLSystem --> ErrorManager
+SOVLSystem --> MemoryMonitor
+SOVLOrchestrator --> StateManager
+SOVLOrchestrator --> ErrorHandler
+SOVLOrchestrator --> PluginManager
+SystemMediator --> SystemInterface
+SystemMediator --> OrchestratorInterface
+StateTracker --> Logger
+ErrorManager --> Logger
+ErrorHandler --> Logger
+
+@enduml
