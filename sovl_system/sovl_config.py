@@ -246,8 +246,8 @@ class ConfigManager:
 
     DEFAULT_SCHEMA = [
         # core_config
-        ConfigSchema("core_config.base_model_name", str, "gpt2", required=True),
-        ConfigSchema("core_config.scaffold_model_name", str, "gpt2", required=True),
+        ConfigSchema("core_config.base_model_name", str, "SmolLM2-360M", required=True),
+        ConfigSchema("core_config.scaffold_model_name", str, "SmolLM2-135M", required=True),
         ConfigSchema("core_config.cross_attn_layers", list, [5, 7], lambda x: all(isinstance(i, int) for i in x)),
         ConfigSchema("core_config.use_dynamic_layers", bool, False),
         ConfigSchema("core_config.layer_selection_mode", str, "balanced", lambda x: x in ["balanced", "random", "fixed"]),
