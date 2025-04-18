@@ -37,80 +37,180 @@ class TrainingConfig:
             # Get training section from config
             training_config = self.config_manager.get_section("training")
             
-            # Load required parameters with validation
+            # Load required parameters with immediate validation
             self.learning_rate = self.config_manager.get("training.learning_rate", 2e-5)
+            assert self.learning_rate > 0, "Learning rate must be positive"
+            
             self.grad_accum_steps = self.config_manager.get("training.grad_accum_steps", 4)
+            assert self.grad_accum_steps >= 1, "Gradient accumulation steps must be at least 1"
+            
             self.weight_decay = self.config_manager.get("training.weight_decay", 0.01)
+            assert self.weight_decay >= 0, "Weight decay must be non-negative"
+            
             self.warmup_steps = self.config_manager.get("training.warmup_steps", 0)
+            assert self.warmup_steps >= 0, "Warmup steps must be non-negative"
+            
             self.total_steps = self.config_manager.get("training.total_steps", 100000)
+            assert self.total_steps > 0, "Total steps must be positive"
+            
             self.max_grad_norm = self.config_manager.get("training.max_grad_norm", 1.0)
+            assert self.max_grad_norm > 0, "Max gradient norm must be positive"
+            
             self.use_amp = self.config_manager.get("training.use_amp", True)
+            assert isinstance(self.use_amp, bool), "use_amp must be a boolean"
+            
             self.max_patience = self.config_manager.get("training.max_patience", 2)
+            assert self.max_patience >= 0, "Max patience must be non-negative"
+            
             self.batch_size = self.config_manager.get("training.batch_size", 2)
+            assert self.batch_size > 0, "Batch size must be positive"
+            
             self.max_epochs = self.config_manager.get("training.max_epochs", 3)
+            assert self.max_epochs > 0, "Max epochs must be positive"
+            
             self.validate_every_n_steps = self.config_manager.get("training.validate_every_n_steps", 100)
+            assert self.validate_every_n_steps > 0, "Validate every n steps must be positive"
+            
             self.checkpoint_interval = self.config_manager.get("training.checkpoint_interval", 1000)
+            assert self.checkpoint_interval > 0, "Checkpoint interval must be positive"
+            
             self.checkpoint_path = self.config_manager.get("training.checkpoint_path", "checkpoints/sovl_trainer")
+            assert isinstance(self.checkpoint_path, str), "Checkpoint path must be a string"
+            
             self.scheduler_type = self.config_manager.get("training.scheduler_type", "linear")
+            assert self.scheduler_type in ["linear", "cosine", "constant"], "Invalid scheduler type"
+            
             self.cosine_min_lr = self.config_manager.get("training.cosine_min_lr", 1e-6)
+            assert self.cosine_min_lr > 0, "Cosine min learning rate must be positive"
+            
             self.warmup_ratio = self.config_manager.get("training.warmup_ratio", 0.1)
+            assert 0 <= self.warmup_ratio <= 1, "Warmup ratio must be between 0 and 1"
+            
             self.dropout_rate = self.config_manager.get("training.dropout_rate", 0.1)
+            assert 0 <= self.dropout_rate <= 1, "Dropout rate must be between 0 and 1"
+            
             self.max_seq_length = self.config_manager.get("training.max_seq_length", 512)
+            assert self.max_seq_length > 0, "Max sequence length must be positive"
             
             # Load metrics configuration
             self.metrics_to_track = self.config_manager.get(
                 "training.metrics_to_track",
                 ["loss", "accuracy", "confidence"]
             )
+            assert isinstance(self.metrics_to_track, list), "Metrics to track must be a list"
             
             # Load lifecycle configuration
             self.enable_gestation = self.config_manager.get("training.enable_gestation", True)
+            assert isinstance(self.enable_gestation, bool), "enable_gestation must be a boolean"
+            
             self.enable_sleep_training = self.config_manager.get("training.enable_sleep_training", True)
+            assert isinstance(self.enable_sleep_training, bool), "enable_sleep_training must be a boolean"
+            
             self.enable_lifecycle_weighting = self.config_manager.get("training.enable_lifecycle_weighting", True)
+            assert isinstance(self.enable_lifecycle_weighting, bool), "enable_lifecycle_weighting must be a boolean"
+            
             self.lifecycle_capacity_factor = self.config_manager.get("training.lifecycle_capacity_factor", 0.01)
+            assert self.lifecycle_capacity_factor > 0, "Lifecycle capacity factor must be positive"
+            
             self.lifecycle_curve = self.config_manager.get("training.lifecycle_curve", "sigmoid_linear")
+            assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "Invalid lifecycle curve"
             
             # Load sleep configuration
             self.sleep_conf_threshold = self.config_manager.get("training.sleep_conf_threshold", 0.7)
+            assert 0 <= self.sleep_conf_threshold <= 1, "Sleep confidence threshold must be between 0 and 1"
+            
             self.sleep_log_min = self.config_manager.get("training.sleep_log_min", 10)
+            assert self.sleep_log_min > 0, "Sleep log minimum must be positive"
+            
             self.exposure_gain_eager = self.config_manager.get("training.exposure_gain_eager", 3)
+            assert self.exposure_gain_eager > 0, "Exposure gain eager must be positive"
+            
             self.exposure_gain_default = self.config_manager.get("training.exposure_gain_default", 2)
+            assert self.exposure_gain_default > 0, "Exposure gain default must be positive"
             
             # Load dream configuration
             self.dream_memory_weight = self.config_manager.get("training.dream_memory_weight", 0.1)
+            assert 0 <= self.dream_memory_weight <= 1, "Dream memory weight must be between 0 and 1"
+            
             self.enable_dreaming = self.config_manager.get("training.enable_dreaming", True)
+            assert isinstance(self.enable_dreaming, bool), "enable_dreaming must be a boolean"
+            
             self.repetition_n = self.config_manager.get("training.repetition_n", 3)
+            assert self.repetition_n >= 2, "Repetition check length must be at least 2"
+            
             self.sigmoid_scale = self.config_manager.get("training.sigmoid_scale", 0.5)
+            assert self.sigmoid_scale > 0, "Sigmoid scale must be positive"
+            
             self.sigmoid_shift = self.config_manager.get("training.sigmoid_shift", 5.0)
+            assert self.sigmoid_shift >= 0, "Sigmoid shift must be non-negative"
+            
             self.dream_noise_scale = self.config_manager.get("training.dream_noise_scale", 0.05)
+            assert self.dream_noise_scale >= 0, "Dream noise scale must be non-negative"
+            
             self.dream_prompt_weight = self.config_manager.get("training.dream_prompt_weight", 0.5)
+            assert 0 <= self.dream_prompt_weight <= 1, "Dream prompt weight must be between 0 and 1"
+            
             self.dream_novelty_boost = self.config_manager.get("training.dream_novelty_boost", 0.03)
+            assert self.dream_novelty_boost >= 0, "Dream novelty boost must be non-negative"
+            
             self.dream_memory_decay = self.config_manager.get("training.dream_memory_decay", 0.95)
+            assert 0 <= self.dream_memory_decay <= 1, "Dream memory decay must be between 0 and 1"
+            
             self.dream_prune_threshold = self.config_manager.get("training.dream_prune_threshold", 0.1)
+            assert 0 <= self.dream_prune_threshold <= 1, "Dream prune threshold must be between 0 and 1"
+            
             self.temp_melancholy_noise = self.config_manager.get("training.temp_melancholy_noise", 0.02)
+            assert self.temp_melancholy_noise >= 0, "Temperament melancholy noise must be non-negative"
+            
             self.enable_prompt_driven_dreams = self.config_manager.get("training.enable_prompt_driven_dreams", True)
+            assert isinstance(self.enable_prompt_driven_dreams, bool), "enable_prompt_driven_dreams must be a boolean"
+            
             self.dream_swing_var = self.config_manager.get("training.dream_swing_var", 0.1)
+            assert self.dream_swing_var >= 0, "Dream swing variance must be non-negative"
+            
             self.dream_lifecycle_delta = self.config_manager.get("training.dream_lifecycle_delta", 0.1)
+            assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
+            
             self.dream_temperament_on = self.config_manager.get("training.dream_temperament_on", True)
+            assert isinstance(self.dream_temperament_on, bool), "dream_temperament_on must be a boolean"
             
             # Load history configuration
             self.confidence_history_maxlen = self.config_manager.get("training.confidence_history_maxlen", 5)
+            assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
+            
             self.temperament_history_maxlen = self.config_manager.get("training.temperament_history_maxlen", 5)
+            assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
             
             # Load dry run configuration
             self.dry_run = self.config_manager.get("training.dry_run", False)
+            assert isinstance(self.dry_run, bool), "dry_run must be a boolean"
+            
             self.dry_run_params = self.config_manager.get("training.dry_run_params", None)
             
             # Load memory configuration
             self.memory_threshold = self.config_manager.get("training.memory_threshold", 0.85)
-            self.memory_decay_rate = self.config_manager.get("training.memory_decay_rate", 0.95)
-            self.use_scaffold_memory = self.config_manager.get("training.use_scaffold_memory", True)
-            self.use_token_map_memory = self.config_manager.get("training.use_token_map_memory", True)
-            self.scaffold_weight = self.config_manager.get("training.scaffold_weight", 1.0)
+            assert 0 <= self.memory_threshold <= 1, "Memory threshold must be between 0 and 1"
             
-            # Validate configuration
+            self.memory_decay_rate = self.config_manager.get("training.memory_decay_rate", 0.95)
+            assert 0 <= self.memory_decay_rate <= 1, "Memory decay rate must be between 0 and 1"
+            
+            self.use_scaffold_memory = self.config_manager.get("training.use_scaffold_memory", True)
+            assert isinstance(self.use_scaffold_memory, bool), "use_scaffold_memory must be a boolean"
+            
+            self.use_token_map_memory = self.config_manager.get("training.use_token_map_memory", True)
+            assert isinstance(self.use_token_map_memory, bool), "use_token_map_memory must be a boolean"
+            
+            self.scaffold_weight = self.config_manager.get("training.scaffold_weight", 1.0)
+            assert self.scaffold_weight > 0, "Scaffold weight must be positive"
+            
+            # Final validation
             self._validate()
             
+        except AssertionError as e:
+            raise ConfigurationError(
+                f"Invalid training configuration: {str(e)}",
+                traceback.format_exc()
+            )
         except Exception as e:
             raise ConfigurationError(
                 f"Failed to load training configuration: {str(e)}",
@@ -120,28 +220,28 @@ class TrainingConfig:
     def _validate(self) -> None:
         """Validate configuration parameters."""
         try:
-            # Validate numeric parameters
-            assert self.learning_rate > 0, "Learning rate must be positive"
-            assert self.grad_accum_steps >= 1, "Gradient accumulation steps must be at least 1"
-            assert self.max_grad_norm > 0, "Max gradient norm must be positive"
-            assert self.scheduler_type in ["linear", "cosine", "constant"], "Invalid scheduler type"
-            assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "Invalid lifecycle curve"
-            assert self.repetition_n >= 2, "Repetition check length must be at least 2"
-            assert self.sigmoid_scale > 0, "Sigmoid scale must be positive"
-            assert self.sigmoid_shift >= 0, "Sigmoid shift must be non-negative"
-            assert self.dream_noise_scale >= 0, "Dream noise scale must be non-negative"
-            assert 0 <= self.dream_prompt_weight <= 1, "Dream prompt weight must be in [0, 1]"
-            assert self.dream_novelty_boost >= 0, "Dream novelty boost must be non-negative"
-            assert 0 <= self.dream_memory_decay <= 1, "Dream memory decay must be in [0, 1]"
-            assert 0 <= self.dream_prune_threshold <= 1, "Dream prune threshold must be in [0, 1]"
-            assert self.dream_swing_var >= 0, "Dream swing variance must be non-negative"
-            assert self.dream_lifecycle_delta >= 0, "Dream lifecycle delta must be non-negative"
-            assert self.confidence_history_maxlen > 0, "Confidence history maxlen must be positive"
-            assert self.temperament_history_maxlen > 0, "Temperament history maxlen must be positive"
+            # Validate relationships between parameters
+            assert self.warmup_steps <= self.total_steps, "Warmup steps must be less than or equal to total steps"
+            assert self.validate_every_n_steps <= self.total_steps, "Validate every n steps must be less than or equal to total steps"
+            assert self.checkpoint_interval <= self.total_steps, "Checkpoint interval must be less than or equal to total steps"
+            assert self.batch_size * self.grad_accum_steps > 0, "Effective batch size must be positive"
+            
+            # Validate memory configuration
+            if self.use_scaffold_memory and self.use_token_map_memory:
+                assert self.memory_threshold > 0.5, "Memory threshold should be higher when using both memory types"
+            
+            # Validate dream configuration
+            if self.enable_dreaming:
+                assert self.dream_memory_weight > 0, "Dream memory weight must be positive when dreaming is enabled"
+                assert self.dream_memory_decay > 0, "Dream memory decay must be positive when dreaming is enabled"
+            
+            # Validate lifecycle configuration
+            if self.enable_lifecycle_weighting:
+                assert self.lifecycle_capacity_factor > 0, "Lifecycle capacity factor must be positive when lifecycle weighting is enabled"
             
         except AssertionError as e:
             raise ConfigurationError(
-                f"Invalid training configuration: {str(e)}",
+                f"Invalid training configuration relationships: {str(e)}",
                 traceback.format_exc()
             )
             
