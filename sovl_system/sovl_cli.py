@@ -2,7 +2,6 @@ import time
 import torch
 import traceback
 from typing import List, Dict, Tuple, Optional, Callable
-from datetime import datetime
 from sovl_main import SOVLSystem
 from sovl_config import ConfigManager
 from sovl_utils import safe_compare
