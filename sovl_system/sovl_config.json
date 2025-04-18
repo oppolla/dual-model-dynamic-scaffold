@@ -117,3 +117,10 @@
     "max_augmentations": 3
   }
 }
+{
+  "hardware": {
+    "enable_cuda": true,
+    "memory_query_interval": 0.1,
+    "mock_memory_total_mb": 8192.0
+  }
+}
