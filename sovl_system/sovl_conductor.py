@@ -5,8 +5,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import random
-import json
 import os
 from threading import Lock
 from sovl_config import ConfigManager

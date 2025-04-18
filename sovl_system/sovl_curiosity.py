@@ -2,7 +2,6 @@ import time
 from typing import Any, Dict, List, Optional, Deque, Tuple
 from collections import deque, defaultdict
 import traceback
-import json
 import threading
 import math
 import torch

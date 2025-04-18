@@ -3,15 +3,12 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 import traceback
-
-# Assuming these imports remain valid as they are external dependencies
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_utils import NumericalGuard
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import SOVLTrainer
 from sovl_scaffold import CrossAttentionInjector
-from sovl_tuner import ValidationSchema
 from sovl_error import ErrorManager, ConfigurationError
 
 @dataclass

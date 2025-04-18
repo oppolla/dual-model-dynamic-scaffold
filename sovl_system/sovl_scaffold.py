@@ -9,7 +9,7 @@ from threading import Lock
 import contextlib
 import math
 from sovl_logger import Logger
-from sovl_config import ConfigManager, ConfigSchema, _SchemaValidator
+from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
 from sovl_error import ErrorHandler
 from sovl_confidence import ConfidenceCalculator

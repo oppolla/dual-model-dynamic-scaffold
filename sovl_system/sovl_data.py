@@ -5,7 +5,7 @@ import time
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_error import ErrorHandler
-from sovl_io import load_training_data, InsufficientDataError
+from sovl_io import InsufficientDataError
 import traceback
 import os
 import json

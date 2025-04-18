@@ -10,7 +10,6 @@ from sovl_state import SOVLState, ConversationHistory
 from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
 from sovl_error import ErrorManager
-from sovl_main import confidence_calculator
 from sovl_config import ConfigManager
 
 class GenerationManager:
