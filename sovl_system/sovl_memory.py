@@ -590,6 +590,19 @@ class MemoryManager:
                 # Ensure tensor is on correct device
                 tensor = tensor.to(self._device)
                 
+                # Check if we need to prune the dream memory
+                if len(self._dream_memory) >= self.dream_memory_maxlen:
+                    # Remove the oldest entry with the lowest weight
+                    min_weight_entry = min(self._dream_memory, key=lambda x: x["weight"])
+                    self._dream_memory.remove(min_weight_entry)
+                    self._log_event(
+                        "dream_memory_pruned",
+                        "Oldest entry removed from dream memory due to size limit",
+                        level="info",
+                        removed_weight=min_weight_entry["weight"],
+                        current_size=len(self._dream_memory)
+                    )
+                
                 entry = {
                     "tensor": tensor,
                     "weight": min(max(weight, 0.0), 1.0),
@@ -600,7 +613,7 @@ class MemoryManager:
                 
                 self._log_event(
                     "dream_memory_appended",
-                    message="Tensor appended to dream memory",
+                    "Tensor appended to dream memory",
                     level="info",
                     tensor_shape=list(tensor.shape),
                     weight=weight,
