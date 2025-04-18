@@ -7,6 +7,7 @@ from sovl_curiosity import CuriosityManager
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_events import MemoryEventDispatcher, MemoryEventTypes
+from sovl_state import SOVLState, StateManager
 import time
 import traceback
 
@@ -21,6 +22,7 @@ class SystemMonitor:
         config_manager: ConfigManager,
         logger: Logger,
         memory_dispatcher: MemoryEventDispatcher,
+        state_manager: StateManager,
         update_interval: float = None
     ):
         """
@@ -33,6 +35,7 @@ class SystemMonitor:
             config_manager: Config manager for fetching configuration values.
             logger: Logger instance for logging events.
             memory_dispatcher: MemoryEventDispatcher instance for memory event handling.
+            state_manager: StateManager instance for state-related metrics.
             update_interval: Time interval (in seconds) between metric updates.
         """
         self.memory_manager = memory_manager
@@ -41,15 +44,19 @@ class SystemMonitor:
         self.config_manager = config_manager
         self.logger = logger
         self.memory_dispatcher = memory_dispatcher
+        self.state_manager = state_manager
         self.update_interval = update_interval or self.config_manager.get("monitor.update_interval", 1.0)
         self._stop_event = Event()
         self._monitor_thread = None
         self._lock = Lock()
         self._metrics_history = deque(maxlen=100)
         self._memory_events_history = deque(maxlen=100)
+        self._state_events_history = deque(maxlen=100)
         
         # Register memory event handlers
         self._register_memory_event_handlers()
+        # Register state event handlers
+        self._register_state_event_handlers()
 
     def _register_memory_event_handlers(self) -> None:
         """Register handlers for memory-related events."""
@@ -59,6 +66,12 @@ class SystemMonitor:
         self.memory_dispatcher.subscribe(MemoryEventTypes.MEMORY_CLEANUP_STARTED, self._handle_memory_cleanup)
         self.memory_dispatcher.subscribe(MemoryEventTypes.MEMORY_STATS_UPDATED, self._handle_memory_stats_update)
         self.memory_dispatcher.subscribe(MemoryEventTypes.MEMORY_ERROR, self._handle_memory_error)
+
+    def _register_state_event_handlers(self) -> None:
+        """Register handlers for state-related events."""
+        self.state_manager.get_state().add_state_change_callback(self._handle_state_change)
+        self.state_manager.get_state().add_confidence_callback(self._handle_confidence_change)
+        self.state_manager.get_state().add_memory_usage_callback(self._handle_memory_usage_change)
 
     async def _handle_memory_initialized(self, event_data: Dict[str, Any]) -> None:
         """Handle memory initialization events."""
@@ -163,6 +176,51 @@ class SystemMonitor:
         with self._lock:
             return list(self._memory_events_history)
 
+    async def _handle_state_change(self, event_data: Dict[str, Any]) -> None:
+        """Handle state change events."""
+        with self._lock:
+            self._state_events_history.append({
+                'timestamp': time.time(),
+                'event_type': 'state_change',
+                'changes': event_data.get('changes', {})
+            })
+        self.logger.record_event(
+            event_type="state_change",
+            message="System state changed",
+            level="info",
+            changes=event_data.get('changes', {})
+        )
+
+    async def _handle_confidence_change(self, event_data: Dict[str, Any]) -> None:
+        """Handle confidence change events."""
+        with self._lock:
+            self._state_events_history.append({
+                'timestamp': time.time(),
+                'event_type': 'confidence_change',
+                'confidence': event_data.get('confidence', 0.0)
+            })
+        self.logger.record_event(
+            event_type="confidence_change",
+            message="Confidence level changed",
+            level="info",
+            confidence=event_data.get('confidence', 0.0)
+        )
+
+    async def _handle_memory_usage_change(self, event_data: Dict[str, Any]) -> None:
+        """Handle memory usage change events."""
+        with self._lock:
+            self._state_events_history.append({
+                'timestamp': time.time(),
+                'event_type': 'memory_usage_change',
+                'usage': event_data.get('usage', 0.0)
+            })
+        self.logger.record_event(
+            event_type="memory_usage_change",
+            message="Memory usage changed",
+            level="info",
+            usage=event_data.get('usage', 0.0)
+        )
+
     def start_monitoring(self) -> None:
         """Start the real-time monitoring thread."""
         if self._monitor_thread and self._monitor_thread.is_alive():
@@ -218,19 +276,24 @@ class SystemMonitor:
 
     def _collect_metrics(self) -> Dict[str, Any]:
         """Collect system metrics from all components."""
-        # Get enabled metrics first
-        enabled_metrics = self.config_manager.get("monitor.enabled_metrics", ["memory", "training", "curiosity"])
-        
-        # Collect metrics without holding the lock
-        metrics = {}
-        if "memory" in enabled_metrics:
-            metrics["memory"] = self.memory_manager.get_memory_stats()
-        if "training" in enabled_metrics:
-            metrics["training"] = self.training_manager.get_training_progress()
-        if "curiosity" in enabled_metrics:
-            metrics["curiosity"] = self.curiosity_manager.get_curiosity_scores()
-        
+        metrics = {
+            'memory': self.memory_manager.get_memory_stats(),
+            'training': self.training_manager.get_training_progress(),
+            'curiosity': self.curiosity_manager.get_curiosity_scores(),
+            'state': self._collect_state_metrics()
+        }
         return metrics
+
+    def _collect_state_metrics(self) -> Dict[str, Any]:
+        """Collect state-related metrics."""
+        state = self.state_manager.get_state()
+        return {
+            'confidence_history': list(state.get_confidence_history()),
+            'memory_usage': state._calculate_memory_usage(),
+            'state_hash': state.state_hash(),
+            'cache_size': len(state._cache),
+            'dream_memory_size': len(state._dream_memory)
+        }
 
     def get_metrics_history(self) -> List[Dict[str, Any]]:
         """Get a copy of the metrics history in a thread-safe way."""
@@ -239,17 +302,45 @@ class SystemMonitor:
 
     def _display_metrics(self, metrics: Dict[str, Any]) -> None:
         """Display collected metrics in a user-friendly format."""
-        print("\n--- System Metrics ---")
-        if "memory" in metrics:
-            print(f"Memory Usage: {metrics['memory']['allocated_mb']:.2f} MB / {metrics['memory']['total_memory_mb']:.2f} MB")
-            # Display recent memory events
-            recent_events = self.get_memory_events_history()[-5:]  # Show last 5 events
-            if recent_events:
-                print("\nRecent Memory Events:")
-                for event in recent_events:
-                    print(f"- {event['event_type']} at {time.strftime('%H:%M:%S', time.localtime(event['timestamp']))}")
-        if "training" in metrics:
-            print(f"Training Progress: {metrics['training']['progress']:.2f}%")
-        if "curiosity" in metrics:
-            print(f"Curiosity Score: {metrics['curiosity']['score']:.2f}")
-        print("----------------------")
+        print("\n=== System Metrics ===")
+        
+        # Display memory metrics
+        print("\nMemory Metrics:")
+        memory_stats = metrics['memory']
+        print(f"  Allocated: {memory_stats['allocated_mb']:.2f} MB")
+        print(f"  Reserved: {memory_stats['reserved_mb']:.2f} MB")
+        print(f"  Cache: {memory_stats['cache_mb']:.2f} MB")
+        
+        # Display training metrics
+        print("\nTraining Metrics:")
+        training_progress = metrics['training']
+        print(f"  Progress: {training_progress['progress']:.2f}%")
+        print(f"  Current Loss: {training_progress['current_loss']:.4f}")
+        
+        # Display curiosity metrics
+        print("\nCuriosity Metrics:")
+        curiosity_scores = metrics['curiosity']
+        print(f"  Score: {curiosity_scores['score']:.2f}")
+        print(f"  Pressure: {curiosity_scores['pressure']:.2f}")
+        
+        # Display state metrics
+        print("\nState Metrics:")
+        state_metrics = metrics['state']
+        print(f"  Memory Usage: {state_metrics['memory_usage']:.2f}%")
+        print(f"  Cache Size: {state_metrics['cache_size']}")
+        print(f"  Dream Memory Size: {state_metrics['dream_memory_size']}")
+        print(f"  State Hash: {state_metrics['state_hash'][:8]}...")
+        
+        # Display recent state events
+        print("\nRecent State Events:")
+        with self._lock:
+            recent_events = list(self._state_events_history)[-5:]  # Show last 5 events
+        for event in recent_events:
+            print(f"  [{time.strftime('%H:%M:%S', time.localtime(event['timestamp']))}] {event['event_type']}")
+        
+        print("\n=====================")
+
+    def get_state_events_history(self) -> List[Dict[str, Any]]:
+        """Get a copy of the state events history in a thread-safe way."""
+        with self._lock:
+            return list(self._state_events_history)
