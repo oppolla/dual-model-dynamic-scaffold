@@ -12,6 +12,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_trainer import LifecycleManager
 from sovl_temperament import TemperamentSystem
+from sovl_confidence import ConfidenceCalculator
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -250,7 +251,8 @@ class CuriosityManager:
         device: torch.device,
         state_manager=None,
         lifecycle_manager=None,
-        temperament_system=None  # Add temperament system
+        temperament_system=None,
+        confidence_calculator=None  # Add confidence calculator
     ):
         """Initialize the CuriosityManager with configuration and dependencies.
         
@@ -262,6 +264,7 @@ class CuriosityManager:
             state_manager: Optional state manager instance
             lifecycle_manager: Optional lifecycle manager instance
             temperament_system: Optional temperament system instance
+            confidence_calculator: Optional confidence calculator instance
         """
         if not config_manager:
             raise ValueError("config_manager cannot be None")
@@ -277,7 +280,8 @@ class CuriosityManager:
         self.error_manager = error_manager
         self.state_manager = state_manager
         self.lifecycle_manager = lifecycle_manager
-        self.temperament_system = temperament_system  # Store temperament system
+        self.temperament_system = temperament_system
+        self.confidence_calculator = confidence_calculator  # Store confidence calculator
         self.device = device
         self.metrics = defaultdict(list)
         self._initialized = False
@@ -1015,15 +1019,8 @@ class CuriosityManager:
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
-        """Compute curiosity score based on confidence and embeddings with temperament awareness."""
+        """Compute curiosity score based on confidence and embeddings with confidence awareness."""
         try:
-            # Get lifecycle stage and parameters if available
-            lifecycle_stage = "unknown"
-            lifecycle_weight = 1.0
-            if self.lifecycle_manager:
-                lifecycle_stage = self.lifecycle_manager._lifecycle_stage
-                lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
-            
             # Get memory embeddings with memory limits
             memory_embeddings = self._get_valid_memory_embeddings(state)
             
@@ -1035,46 +1032,61 @@ class CuriosityManager:
                 else 0.0
             )
             
-            # Apply lifecycle-based adjustments
-            base_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
+            # Apply lifecycle stage adjustments if available
+            lifecycle_stage = "unknown"
+            lifecycle_weight = 1.0
+            if self.lifecycle_manager:
+                lifecycle_stage = self.lifecycle_manager._lifecycle_stage
+                lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
             
-            # Apply temperament-based adjustments if available
-            if self.temperament_system:
-                current_score = self.temperament_system.current_score
-                mood_label = self.temperament_system.mood_label
-                
-                # Adjust score based on temperament
-                if mood_label == "Cautious":
-                    base_score *= 0.8  # Reduce curiosity in cautious mood
-                elif mood_label == "Curious":
-                    base_score *= 1.2  # Increase curiosity in curious mood
-                
-                # Apply temperament-based pressure adjustment
-                pressure_adjustment = self.temperament_system.adjust_parameter(
-                    base_value=base_score,
-                    parameter_type="temperature",
-                    curiosity_pressure=self.pressure
+            # Apply confidence-based adjustments if available
+            confidence_weight = 1.0
+            if self.confidence_calculator:
+                # Get current confidence level
+                current_confidence = self.confidence_calculator.calculate_confidence_score(
+                    logits=torch.tensor([]),  # Placeholder, actual logits not needed here
+                    generated_ids=torch.tensor([]),  # Placeholder
+                    state=state,
+                    error_manager=self.error_manager,
+                    context=SystemContext(),  # Placeholder
+                    curiosity_manager=self
                 )
-                base_score = pressure_adjustment
+                
+                # Adjust curiosity based on confidence
+                # Higher confidence leads to more exploration
+                confidence_weight = 1.0 + (current_confidence - 0.5) * 0.5
+                
+                # Log confidence-based adjustment
+                self._log_event(
+                    "confidence_adjustment_applied",
+                    message="Applied confidence-based curiosity adjustment",
+                    level="info",
+                    additional_info={
+                        "current_confidence": current_confidence,
+                        "confidence_weight": confidence_weight,
+                        "base_ignorance": ignorance,
+                        "base_novelty": novelty
+                    }
+                )
             
-            # Apply lifecycle weight
-            final_score = base_score * lifecycle_weight
+            # Calculate final score with all adjustments
+            base_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
+            final_score = base_score * confidence_weight * lifecycle_weight
             
-            # Log the computation with temperament context
+            # Log the complete computation
             self._log_event(
                 "curiosity_computed",
-                message="Curiosity score computed with temperament context",
+                message="Curiosity score computed with confidence integration",
                 level="info",
                 additional_info={
                     "base_score": base_score,
                     "final_score": final_score,
                     "lifecycle_stage": lifecycle_stage,
                     "lifecycle_weight": lifecycle_weight,
+                    "confidence_weight": confidence_weight,
                     "ignorance": ignorance,
                     "novelty": novelty,
-                    "memory_embeddings_count": len(memory_embeddings),
-                    "temperament_score": getattr(self.temperament_system, "current_score", None),
-                    "mood_label": getattr(self.temperament_system, "mood_label", None)
+                    "memory_embeddings_count": len(memory_embeddings)
                 }
             )
             
@@ -1085,7 +1097,7 @@ class CuriosityManager:
             return 0.5
 
     def get_pressure(self) -> float:
-        """Get current pressure with validation, decay, and temperament awareness."""
+        """Get current pressure with validation, decay, and confidence awareness."""
         try:
             with self.lock:
                 # Get lifecycle stage if available
@@ -1098,15 +1110,19 @@ class CuriosityManager:
                 if time_delta > 0:
                     decay_rate = self._pressure_decay_rate
                     
-                    # Adjust decay rate based on temperament if available
-                    if self.temperament_system:
-                        mood_label = self.temperament_system.mood_label
-                        if mood_label == "Restless":
-                            decay_rate *= 0.8  # Faster decay in restless mood
-                        elif mood_label == "Balanced":
-                            decay_rate *= 1.0  # Normal decay
-                        elif mood_label == "Cautious":
-                            decay_rate *= 1.2  # Slower decay in cautious mood
+                    # Adjust decay rate based on confidence if available
+                    if self.confidence_calculator:
+                        current_confidence = self.confidence_calculator.calculate_confidence_score(
+                            logits=torch.tensor([]),  # Placeholder
+                            generated_ids=torch.tensor([]),  # Placeholder
+                            state=self.state,
+                            error_manager=self.error_manager,
+                            context=SystemContext(),  # Placeholder
+                            curiosity_manager=self
+                        )
+                        
+                        # Higher confidence leads to faster pressure decay
+                        decay_rate *= (1.0 + (current_confidence - 0.5) * 0.5)
                     
                     self.pressure *= (decay_rate ** time_delta)
                     self.last_update = time.time()
@@ -1114,25 +1130,24 @@ class CuriosityManager:
                 # Ensure pressure stays within bounds
                 self.pressure = max(self._min_pressure, min(self._max_pressure, self.pressure))
                 
-                # Record pressure in history with temperament context
+                # Record pressure in history with confidence context
                 self._pressure_history.append((
                     time.time(),
                     self.pressure,
                     lifecycle_stage,
-                    getattr(self.temperament_system, "mood_label", None)
+                    getattr(self.confidence_calculator, "current_confidence", None)
                 ))
                 
-                # Log pressure update with temperament context
+                # Log pressure update with confidence context
                 self._log_event(
                     "pressure_updated",
-                    message="Pressure updated with temperament context",
+                    message="Pressure updated with confidence context",
                     level="info",
                     additional_info={
                         "current_pressure": self.pressure,
                         "lifecycle_stage": lifecycle_stage,
                         "time_delta": time_delta,
-                        "temperament_score": getattr(self.temperament_system, "current_score", None),
-                        "mood_label": getattr(self.temperament_system, "mood_label", None)
+                        "confidence": getattr(self.confidence_calculator, "current_confidence", None)
                     }
                 )
                 
