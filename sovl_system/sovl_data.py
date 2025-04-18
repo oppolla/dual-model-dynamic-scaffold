@@ -9,7 +9,6 @@ from sovl_io import load_training_data, InsufficientDataError
 import traceback
 import os
 import json
-import gzip
 from collections import defaultdict
 from sovl_memory import MemoryMonitor
 
