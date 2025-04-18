@@ -13,8 +13,34 @@ from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import LifecycleManager, TrainingConfig
+from sovl_temperament import TemperamentManager
+from sovl_confidence import ConfidenceManager
 import math
 import threading
+
+# Add confidence-related constants at the top of the file
+DEFAULT_CONFIDENCE = 0.5
+MIN_CONFIDENCE = 0.0
+MAX_CONFIDENCE = 1.0
+MIN_HISTORY_LENGTH = 3
+CURIOSITY_PRESSURE_FACTOR = 0.1
+DEFAULT_TEMPERAMENT_INFLUENCE = 0.3
+DEFAULT_LIFECYCLE_INFLUENCE = 0.2
+
+# Temperament-based confidence adjustments
+TEMPERAMENT_MOOD_MULTIPLIERS = {
+    "Cautious": 0.8,  # Reduce confidence in cautious mood
+    "Balanced": 1.0,  # No adjustment in balanced mood
+    "Curious": 1.2    # Increase confidence in curious mood
+}
+
+# Lifecycle stage adjustments
+LIFECYCLE_STAGE_MULTIPLIERS = {
+    "initialization": 0.9,    # More conservative during initialization
+    "exploration": 1.1,       # More confident during exploration
+    "consolidation": 1.0,     # Normal confidence during consolidation
+    "refinement": 0.95        # Slightly more conservative during refinement
+}
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
@@ -925,67 +951,53 @@ class GenerationManager:
                 curiosity_pressure = self.curiosity_manager.calculate_curiosity_pressure(prompt)
                 query_embedding = self.curiosity_manager.get_query_embedding(prompt)
 
-            # Compute curiosity score
-            curiosity_score = self.curiosity_manager.compute_curiosity_score(
-                self.state.base_confidence_history,
-                self.state.scaffold_confidence_history
-            ) if self.curiosity_manager else 0.5
+            # Compute base confidence
+            base_confidence = self.calculate_confidence_score(
+                self._get_last_logits(),
+                self.base_tokenizer.encode(prompt)
+            ) if hasattr(self, '_get_last_logits') else DEFAULT_CONFIDENCE
 
-            # Update data exposure through lifecycle manager
-            self.lifecycle_manager.update_exposure([prompt], self.current_temperament_score)
+            # Apply confidence adjustments
+            adjusted_confidence = self._apply_confidence_adjustments(base_confidence)
 
-            # Get lifecycle weight
-            lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
+            # Prepare base generation parameters
+            base_params = {
+                "max_length": max_length,
+                "temperature": temperature,
+                "top_p": top_p,
+                "num_return_sequences": num_return_sequences,
+                "do_sample": do_sample,
+                **kwargs
+            }
 
-            # Adjust temperature using the utility function
-            adjusted_temperature = adjust_temperature(
-                base_temp=temperature,
-                temperament_score=self.current_temperament_score,
-                config_manager=self._config_manager,
-                logger=self.logger
-            )
-            adjusted_temperature *= lifecycle_weight
+            # Adjust generation parameters based on confidence
+            adjusted_params = self._adjust_generation_parameters(adjusted_confidence, base_params)
 
-            # Adjust max_length based on state
-            adjusted_max_length = self._adjust_max_length(
-                max_length,
-                self.state.temperament_score,
-                curiosity_pressure
-            )
+            # Enhance prompt with mood context
+            mood_context = self._get_mood_context_prompt()
+            enhanced_prompt = f"{mood_context}\n{prompt}"
 
-            # Log generation start with state-driven parameters
+            # Log generation start with confidence-driven parameters
             self.logger.record_event(
                 event_type="generation_started",
-                message="Starting text generation with state-driven parameters",
+                message="Starting text generation with confidence-driven parameters",
                 level="info",
                 additional_info={
                     "prompt": prompt,
-                    "max_length": max_length,
-                    "adjusted_max_length": adjusted_max_length,
-                    "temperature": temperature,
-                    "adjusted_temperature": adjusted_temperature,
-                    "top_p": top_p,
-                    "num_return_sequences": num_return_sequences,
-                    "do_sample": do_sample,
-                    "lifecycle_stage": lifecycle_stage,
-                    "curiosity_score": curiosity_score,
+                    "enhanced_prompt": enhanced_prompt,
+                    "base_confidence": base_confidence,
+                    "adjusted_confidence": adjusted_confidence,
+                    "original_params": base_params,
+                    "adjusted_params": adjusted_params,
                     "mood_label": self.mood_label,
-                    "temperament_score": self.current_temperament_score,
-                    "lifecycle_weight": lifecycle_weight,
-                    "data_exposure": self.lifecycle_manager.data_exposure,
-                    "memory_usage": memory_usage(self.device, self._config_manager)
+                    "lifecycle_stage": lifecycle_stage
                 }
             )
 
             # Generate text with adjusted parameters
             generated_texts = self._generate_text(
-                prompt=prompt,
-                max_length=adjusted_max_length,
-                temperature=adjusted_temperature,
-                top_p=top_p,
-                num_return_sequences=num_return_sequences,
-                do_sample=do_sample,
-                **kwargs
+                prompt=enhanced_prompt,
+                **adjusted_params
             )
 
             # Check for repetitions in generated text
@@ -1025,11 +1037,7 @@ class GenerationManager:
                 self.state.history.add_message("assistant", generated_texts[0])
                 
                 # Update confidence history
-                confidence = self.calculate_confidence_score(
-                    self._get_last_logits(),
-                    self.base_tokenizer.encode(generated_texts[0])
-                )
-                self.state.add_confidence(confidence)
+                self.state.add_confidence(adjusted_confidence)
                 
                 # Update curiosity state
                 if self.curiosity_manager:
@@ -1039,22 +1047,18 @@ class GenerationManager:
                         query_embedding=query_embedding
                     )
 
-            # Log generation completion with state updates
+            # Log generation completion with confidence updates
             self.logger.record_event(
                 event_type="generation_completed",
-                message="Text generation completed with state updates",
+                message="Text generation completed with confidence updates",
                 level="info",
                 additional_info={
                     "prompt": prompt,
                     "generated_texts": generated_texts,
-                    "temperature": temperature,
-                    "adjusted_temperature": adjusted_temperature,
-                    "curiosity_score": curiosity_score,
+                    "base_confidence": base_confidence,
+                    "adjusted_confidence": adjusted_confidence,
                     "mood_label": self.mood_label,
-                    "temperament_score": self.current_temperament_score,
-                    "lifecycle_weight": lifecycle_weight,
-                    "data_exposure": self.lifecycle_manager.data_exposure,
-                    "memory_usage": memory_usage(self.device, self._config_manager),
+                    "lifecycle_stage": lifecycle_stage,
                     "conversation_length": len(self.state.history.messages)
                 }
             )
@@ -1419,6 +1423,101 @@ class GenerationManager:
                 "error_recovery",
                 traceback.format_exc()
             )
+
+    def _get_mood_context_prompt(self) -> str:
+        """Get a mood-based context prompt based on current temperament."""
+        mood = self.mood_label
+        if mood == "Cautious":
+            return "Please provide a careful and well-considered response, focusing on accuracy and reliability."
+        elif mood == "Curious":
+            return "Please provide an exploratory and creative response, considering novel perspectives."
+        else:  # Balanced
+            return "Please provide a balanced response, considering both reliability and creativity."
+
+    def _apply_confidence_adjustments(self, base_confidence: float) -> float:
+        """Apply confidence adjustments based on temperament and lifecycle."""
+        try:
+            # Get current mood and lifecycle stage
+            mood_label = self.mood_label
+            lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage() if self.lifecycle_manager else "active"
+            
+            # Apply mood-based multiplier
+            mood_multiplier = TEMPERAMENT_MOOD_MULTIPLIERS.get(mood_label, 1.0)
+            
+            # Apply lifecycle stage multiplier
+            lifecycle_multiplier = LIFECYCLE_STAGE_MULTIPLIERS.get(lifecycle_stage, 1.0)
+            
+            # Calculate adjusted confidence
+            adjusted_confidence = base_confidence * mood_multiplier * lifecycle_multiplier
+            
+            # Log the adjustments
+            self.logger.record_event(
+                event_type="confidence_adjustment_applied",
+                message="Applied confidence adjustments",
+                level="info",
+                additional_info={
+                    "base_confidence": base_confidence,
+                    "adjusted_confidence": adjusted_confidence,
+                    "mood_label": mood_label,
+                    "lifecycle_stage": lifecycle_stage,
+                    "mood_multiplier": mood_multiplier,
+                    "lifecycle_multiplier": lifecycle_multiplier
+                }
+            )
+            
+            return adjusted_confidence
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="confidence_adjustment_failed",
+                message=f"Failed to apply confidence adjustments: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            return base_confidence
+
+    def _adjust_generation_parameters(self, confidence: float, base_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Adjust generation parameters based on confidence score."""
+        try:
+            adjusted_params = base_params.copy()
+            
+            # Adjust temperature based on confidence
+            confidence_factor = 1.0 + (confidence - 0.5) * 0.4  # Scale to ±0.2
+            adjusted_params["temperature"] = max(0.1, min(2.0, 
+                base_params.get("temperature", 0.7) * confidence_factor))
+            
+            # Adjust max_length based on confidence
+            length_factor = 1.0 + (confidence - 0.5) * 0.2  # Scale to ±0.1
+            adjusted_params["max_length"] = int(max(50, min(200,
+                base_params.get("max_length", 100) * length_factor)))
+            
+            # Adjust top_p based on confidence
+            top_p_factor = 1.0 - (confidence - 0.5) * 0.2  # Scale to ±0.1
+            adjusted_params["top_p"] = max(0.1, min(1.0,
+                base_params.get("top_p", 0.9) * top_p_factor))
+            
+            # Log parameter adjustments
+            self.logger.record_event(
+                event_type="generation_parameters_adjusted",
+                message="Adjusted generation parameters based on confidence",
+                level="info",
+                additional_info={
+                    "confidence": confidence,
+                    "original_params": base_params,
+                    "adjusted_params": adjusted_params
+                }
+            )
+            
+            return adjusted_params
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="parameter_adjustment_failed",
+                message=f"Failed to adjust generation parameters: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            )
+            return base_params
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for generated tokens."""
