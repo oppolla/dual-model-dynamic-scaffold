@@ -17,7 +17,6 @@ import gc
 Manages memory-related operations, using HardwareManager for hardware access.
 """
 
-
 class MemoryManager:
     """
     Manages memory for the SOVL system, handling token maps, dream memory,
