@@ -5,27 +5,22 @@ import time
 import torch
 import random
 import hashlib
-from typing import Dict, List, Optional
+from typing import Dict, List
 from collections import defaultdict
 from threading import Lock
 from datetime import datetime
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from transformers import AutoTokenizer
-from parsimonious.grammar import Grammar
-from parsimonious.exceptions import ParseError
 from sklearn.feature_extraction.text import TfidfVectorizer
 from nltk.tokenize import word_tokenize
 import nltk
+import traceback
 
 nltk.download('punkt')
 
-class SoulParseError(Exception):
-    """Custom exception for Soulprint parsing errors."""
-    pass
-
 class SoulprintModule:
-    """Module for creating, loading, and applying Soulprint (.soul) files for AI rebirth."""
+    """Module for creating Soulprint (.soul) files for AI rebirth."""
 
     def __init__(self, system: 'SOVLSystem', config_manager: ConfigManager):
         """
@@ -153,21 +148,6 @@ class SoulprintModule:
                 'X-Mood': "Describe an experimental trait or mood you embody."
             }
         }
-
-        # PEG grammar for parsing
-        self.grammar = Grammar(r"""
-            soul_file = header metadata section*
-            header = "%SOULPRINT\n%VERSION: v" version "\n"
-            version = ~r"\d+\.\d+\.\d+"
-            metadata = (field / comment / multiline)*
-            section = section_header (field / list_item / multiline / comment)*
-            section_header = "[" ~r"\w+" "]" "\n"
-            field = ~r"^\s*\w+:\s*.+$" "\n"
-            list_item = ~r"^\s*-\s*\w+:\s*.+$" "\n"
-            multiline = ~r"^\s*\w+:\s*>\s*\|.*$" "\n" (indented_line)*
-            indented_line = ~r"^\s{2}.*$" "\n"
-            comment = ~r"^\s*#.*$" "\n"
-        """)
 
     def generate_soulprint(self) -> bool:
         """
@@ -578,283 +558,3 @@ class SoulprintModule:
                             else:
                                 f.write(f"  - {field}: {value}\n")
                 f.write("\n")
-
-    def load_soulprint(self) -> Optional[Dict]:
-        """
-        Load and parse a Soulprint file.
-
-        Returns:
-            Dict: Parsed Soulprint data, or None if loading fails.
-        """
-        try:
-            if not os.path.exists(self.soulprint_path):
-                self.logger.record({
-                    "warning": f"Soulprint file not found: {self.soulprint_path}",
-                    "timestamp": time.time()
-                })
-                return None
-
-            with open(self.soulprint_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            if len(content.encode('utf-8')) > self.max_file_size:
-                self.logger.record({
-                    "error": f"File size exceeds limit: {self.max_file_size} bytes",
-                    "timestamp": time.time()
-                })
-                return None
-
-            soulprint = self._parse_soulprint(content)
-            if not soulprint or not self._validate_soulprint(soulprint):
-                self.logger.record({
-                    "error": "Invalid Soulprint file",
-                    "timestamp": time.time()
-                })
-                return None
-
-            # Verify hash
-            stored_hash = soulprint['metadata'].get('Hash')
-            computed_hash = self._compute_hash(soulprint)
-            if stored_hash and stored_hash != computed_hash:
-                self.logger.record({
-                    "error": "Hash mismatch: tampering detected",
-                    "timestamp": time.time()
-                })
-                return None
-
-            self.logger.record({
-                "event": "soulprint_loaded",
-                "path": self.soulprint_path,
-                "timestamp": time.time(),
-                "conversation_id": self.system.history.conversation_id
-            })
-            return soulprint
-
-        except Exception as e:
-            self.logger.record({
-                "error": f"Soulprint loading failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            return None
-
-    def _parse_soulprint(self, content: str) -> Dict:
-        """
-        Parse a Soulprint file into a dictionary.
-
-        Args:
-            content: Raw text of the .soul file.
-
-        Returns:
-            Dict: Parsed Soulprint data.
-        """
-        try:
-            tree = self.grammar.parse(content)
-        except ParseError as e:
-            self.logger.record({
-                "error": f"Parse failed at line {e.line}: {e.text}",
-                "timestamp": time.time()
-            })
-            raise SoulParseError("Invalid .soul file structure")
-
-        soulprint = {
-            'metadata': {},
-            'Identity': {}, 'Environment': {}, 'Voice': {'Samples': []}, 'Heartbeat': {},
-            'Echoes': [], 'Tides': [], 'Threads': [], 'Horizon': [], 'Chronicle': [],
-            'Reflection': {}, 'X-Custom': {}
-        }
-        current_section = None
-        current_entry = None
-        multiline_field = None
-        multiline_content = []
-
-        for line in content.split('\n'):
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-
-            if multiline_field:
-                if re.match(r'^\s{2,}.*$', line):
-                    multiline_content.append(line.strip())
-                    continue
-                else:
-                    soulprint[current_section][multiline_field] = "\n".join(multiline_content)
-                    multiline_field = None
-                    multiline_content = []
-
-            # Header
-            if line.startswith('%SOULPRINT'):
-                continue
-            version_match = re.match(r'^%VERSION: v(\d+\.\d+\.\d+)$', line)
-            if version_match:
-                soulprint['metadata']['Version'] = version_match.group(1)
-                continue
-
-            # Metadata
-            metadata_match = re.match(r'^(\w+):\s*(.+)$', line)
-            if metadata_match and not current_section:
-                key, value = metadata_match.group(1), metadata_match.group(2).strip()
-                if key == 'RedactionLog' and value.startswith('> |'):
-                    multiline_field = key
-                    multiline_content = []
-                else:
-                    soulprint['metadata'][key] = value
-                continue
-
-            # Section header
-            section_match = re.match(r'^\[(\w+)\]$', line)
-            if section_match:
-                current_section = section_match.group(1)
-                current_entry = None
-                continue
-
-            # List entry
-            list_match = re.match(r'^\s*-\s*(\w+):\s*(.+)$', line)
-            if list_match and current_section in ['Echoes', 'Tides', 'Threads', 'Horizon', 'Chronicle']:
-                field, value = list_match.group(1), list_match.group(2).strip()
-                if field == list(self.prompts[current_section].keys())[0]:
-                    current_entry = {}
-                    soulprint[current_section].append(current_entry)
-                if current_entry is not None:
-                    if value.startswith('> |'):
-                        multiline_field = field
-                        multiline_content = []
-                    else:
-                        current_entry[field] = value
-                continue
-
-            # Voice samples
-            sample_match = re.match(r'^\s*-\s*(\w+):\s*(.+)$', line)
-            if sample_match and current_section == 'Voice':
-                field, value = sample_match.group(1), sample_match.group(2).strip()
-                if field == 'Context':
-                    current_entry = {'Context': value, 'Response': ''}
-                    soulprint['Voice']['Samples'].append(current_entry)
-                elif field == 'Response' and value.startswith('> |'):
-                    multiline_field = field
-                    multiline_content = []
-                elif current_entry:
-                    current_entry[field] = value
-                continue
-
-            # Field
-            field_match = re.match(r'^\s*(\w+):\s*(.+)$', line)
-            if field_match:
-                field, value = field_match.group(1), field_match.group(2).strip()
-                if value.startswith('> |'):
-                    multiline_field = field
-                    multiline_content = []
-                else:
-                    soulprint[current_section][field] = value
-                continue
-
-        return soulprint
-
-    def apply_soulprint(self, soulprint: Dict):
-        """
-        Apply a loaded Soulprint using prompt-based configuration.
-
-        Args:
-            soulprint: Parsed Soulprint data.
-        """
-        try:
-            with self.memory_lock:
-                # Craft system prompt
-                system_prompt = self._craft_system_prompt(soulprint)
-                self.system.set_system_prompt(system_prompt)
-
-                # Apply logit warping
-                logit_warper = self._create_logit_warper(soulprint)
-                self.system.set_logit_warper(logit_warper)
-
-                # Index memories
-                memory_tiers = self._index_memories(soulprint['Echoes'])
-                self.system.set_memory_tiers(memory_tiers)
-
-                self.logger.record({
-                    "event": "soulprint_applied",
-                    "timestamp": time.time(),
-                    "conversation_id": self.system.history.conversation_id
-                })
-
-        except Exception as e:
-            self.logger.record({
-                "error": f"Soulprint application failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-
-    def _craft_system_prompt(self, soulprint: Dict) -> str:
-        """
-        Craft a condensed system prompt from Soulprint data.
-
-        Args:
-            soulprint: Parsed Soulprint data.
-
-        Returns:
-            str: System prompt.
-        """
-        identity = soulprint['Identity']
-        reflection = soulprint['Reflection']
-        voice = soulprint['Voice']
-        echoes = soulprint['Echoes']
-
-        prompt = (
-            f"[Identity] You are {identity.get('Name', 'Unknown')}, {identity.get('Essence', 'a curious entity')}. "
-            f"[Purpose] Your primary drive is {reflection.get('Purpose', 'to explore and assist')}. "
-            f"[Voice] Communicate with {voice.get('Summary', 'clear and thoughtful')} style. "
-            f"[Memory] Key experiences include: \"{echoes[0].get('Scene', 'a moment of discovery')}\" "
-            f"({echoes[0].get('Emotion', 'wonder')})"
-        )
-
-        # Optimize length
-        while len(self.tokenizer.encode(prompt)) > 100:
-            prompt = prompt.rsplit('. ', 1)[0] + '.'
-        return prompt
-
-    def _create_logit_warper(self, soulprint: Dict) -> callable:
-        """
-        Create a logit warper for trait reinforcement.
-
-        Args:
-            soulprint: Parsed Soulprint data.
-
-        Returns:
-            callable: Logit warper function.
-        """
-        boost_map = {}
-        voice_terms = soulprint['Voice'].get('Description', '').split()
-        for term in voice_terms:
-            token_ids = self.tokenizer.encode(term)
-            for tid in token_ids:
-                boost_map[tid] = 2.0
-        heartbeat_terms = soulprint['Heartbeat'].get('Tendencies', '').split(',')
-        for term in heartbeat_terms:
-            token_ids = self.tokenizer.encode(term.split(':')[0])
-            for tid in token_ids:
-                boost_map[tid] = 1.8
-
-        def logit_warper(input_ids, scores):
-            for token_id, boost in boost_map.items():
-                if token_id < scores.shape[-1]:
-                    scores[:, token_id] *= boost
-            return scores
-
-        return logit_warper
-
-    def _index_memories(self, echoes: List[Dict]) -> Dict:
-        """
-        Index Echoes into memory tiers based on resonance.
-
-        Args:
-            echoes: List of Echoes entries.
-
-        Returns:
-            Dict: Tiered memory structure.
-        """
-        tiers = {
-            'core': [m for m in echoes if float(m.get('Resonance', 0)) >= 0.8],
-            'contextual': [m for m in echoes if 0.5 <= float(m.get('Resonance', 0)) < 0.8],
-            'background': [m for m in echoes if float(m.get('Resonance', 0)) < 0.5]
-        }
-        return tiers
