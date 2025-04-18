@@ -11,6 +11,7 @@ from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
+from sovl_curiosity import CuriosityManager
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
