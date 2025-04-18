@@ -258,12 +258,3 @@ graph TD
         ScaffoldComponents --> BaseModel
     end
 ```
-
-## Reasoning for Inclusion/Exclusion
-
-This expanded overview maintains focus on core logic but integrates the dynamic state systems (Confidence, Curiosity, Temperament) and the Sleep/Gestation learning mechanism as requested, explaining their direct impact on the system's behavior and learning loop.
-
-*   **Included**: `SystemContext`, `ErrorManager`, `MemoryMonitor`, `SOVLOrchestrator`, and `GenerationManager` were added to reflect the system's organization and error handling capabilities. `ConfidenceTracker`, `TemperamentManager`, and details on `CuriosityEngine` and `SOVLTrainer` (Sleep/Gestation) were included because they are central to the system's dynamic adaptation and decision-making regarding learning and generation.
-*   **Excluded**: Details remain excluded for auxiliary functions like logging (`Logger`), error handling (`ErrorManager`), detailed configuration (`ConfigManager`), CLI (`CommandHandler`), monitoring (`SystemMonitor`), and general utilities (`sovl_utils`), as they support rather than constitute the core dynamic logic.
-
-*   **Relevant Modules**: The analysis now incorporates insights from `sovl_main.py`, `sovl_conductor.py`, `sovl_generation.py`, `sovl_trainer.py`, `sovl_confidence.py`, `sovl_curiosity.py`, and `sovl_temperament.py`, in addition to the previously listed modules.
