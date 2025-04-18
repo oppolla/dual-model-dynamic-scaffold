@@ -4,7 +4,9 @@
 
 The Self-Organizing Virtual Lifeform (SOVL) system is an autonomous, curiosity-driven AI framework that integrates multiple language models with dynamic state tracking. At its core, SOVL uses interconnected systems—including confidence metrics, curiosity impulses, and temperament modulation—to guide its exploration, learning, and knowledge consolidation. A key feature is its sleep/gestation cycle, where the system pauses active exploration to focus on internal processing, memory consolidation, and adaptive retraining, mirroring biological learning patterns.
 
-During these sleep/gestation phases, SOVL optimizes its neural architecture, strengthens important memory associations, and recalibrates its parameters based on accumulated experiences. This cyclical process of active exploration followed by restorative consolidation enables more efficient learning and long-term stability. The system's scaffolded model architecture and cross-attention mechanisms further enhance this by providing structured guidance during both active and dormant phases.
+During active phases, the system explores, gathers information, and generates responses using scaffolded model interactions. In sleep/gestation phases, it consolidates memories, optimizes neural architecture, and recalibrates parameters—mirroring the cognitive benefits of biological sleep. This cyclical process, governed by confidence levels, accumulated experience, and temperament, enables stable long-term learning and adaptation.
+
+The architecture orchestrates these behaviors through interconnected systems managing curiosity, confidence, temperament, and memory. Cross-attention mechanisms and scaffolded model interactions provide structured guidance throughout both phases, while a comprehensive CLI allows for human oversight without compromising the system's autonomous operation.
 
 ## System Organization
 
