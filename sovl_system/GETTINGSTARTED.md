@@ -23,27 +23,23 @@ Create a `sovl_config.json` file with the following structure:
 ```json
 {
   "core_config": {
-    "base_model_name": "llama-2-7b",
-    "base_model_path": "/path/to/your/local/model",
-    "quantization": "4bit"
+    "base_model_name": "SmolLM2-360M",
+    "base_model_path": null,
+    "scaffold_model_name": "SmolLM2-135M",
+    "scaffold_model_path": null,
+    "cross_attn_layers": [],
+    "use_dynamic_layers": false,
+    "layer_selection_mode": "balanced",
+    "custom_layers": null,
+    "valid_split_ratio": 0.2,
+    "random_seed": 42,
+    "quantization": "fp16",
+    "hidden_size": 768,
+    "num_heads": 12,
+    "gradient_checkpointing": true,
+    "initializer_range": 0.02,
+    "migration_mode": true
   },
-  "training_config": {
-    "learning_rate": 1e-4,
-    "grad_accum_steps": 4,
-    "max_grad_norm": 1.0,
-    "batch_size": 32,
-    "epochs": 10,
-    "checkpoint_interval": 1
-  },
-  "memory_config": {
-    "memory_threshold": 0.8,
-    "memory_decay_rate": 0.95,
-    "max_memory_mb": 1024
-  },
-  "state_config": {
-    "state_save_interval": 300,
-    "max_backup_files": 5
-  }
 }
 ```
 
@@ -174,13 +170,6 @@ Once the system is running, you can use these commands:
    - Test graceful shutdown
    - Verify error recovery mechanisms
    - Check log rotation and cleanup
-
-## Additional Resources
-
-- System logs in `output` directory
-- Configuration documentation in `docs/`
-- Example configurations in `examples/`
-- CLI command reference in `docs/cli.md`
 
 
 
