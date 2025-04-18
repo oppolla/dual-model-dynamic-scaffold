@@ -119,31 +119,57 @@ class SOVLRunner:
             with open(config_path, 'r') as f:
                 config = json.load(f)
             
-            required_sections = ['model', 'state', 'error_config', 'monitor']
-            for section in required_sections:
+            # Required sections with their mandatory fields
+            required_sections = {
+                'core_config': ['base_model_name', 'base_model_path', 'quantization'],
+                'training_config': ['learning_rate', 'grad_accum_steps', 'max_grad_norm'],
+                'memory_config': ['memory_threshold', 'memory_decay_rate', 'max_memory_mb'],
+                'state_config': ['state_save_interval', 'max_backup_files']
+            }
+            
+            # Validate sections and their fields
+            for section, fields in required_sections.items():
                 if section not in config:
                     logger.log_error(
                         error_msg=f"Missing required configuration section: {section}",
                         error_type="config_validation_error"
                     )
                     return False
-                    
-            if 'model_path' not in config['model']:
-                logger.log_error(
-                    error_msg="Missing required model configuration: model_path",
-                    error_type="config_validation_error"
-                )
-                return False
                 
-            monitor_config = config.get('monitor', {})
-            if not isinstance(monitor_config.get('update_interval', 1.0), (int, float)):
+                for field in fields:
+                    if field not in config[section]:
+                        logger.log_error(
+                            error_msg=f"Missing required field '{field}' in section '{section}'",
+                            error_type="config_validation_error"
+                        )
+                        return False
+            
+            # Validate specific value ranges
+            try:
+                # Training config validation
+                lr = float(config['training_config']['learning_rate'])
+                if lr <= 0:
+                    raise ValueError("learning_rate must be positive")
+                
+                # Memory config validation
+                mem_threshold = float(config['memory_config']['memory_threshold'])
+                if not 0 <= mem_threshold <= 1:
+                    raise ValueError("memory_threshold must be between 0 and 1")
+                
+                # State config validation
+                save_interval = int(config['state_config']['state_save_interval'])
+                if not 60 <= save_interval <= 3600:
+                    raise ValueError("state_save_interval must be between 60 and 3600 seconds")
+                
+            except (ValueError, TypeError) as e:
                 logger.log_error(
-                    error_msg="Invalid monitor.update_interval in configuration",
+                    error_msg=f"Invalid configuration value: {str(e)}",
                     error_type="config_validation_error"
                 )
                 return False
                 
             return True
+            
         except json.JSONDecodeError as e:
             logger.log_error(
                 error_msg=f"Invalid JSON format in configuration file: {config_path}",
@@ -199,27 +225,38 @@ class SOVLRunner:
     def _initialize_context(self, args: argparse.Namespace) -> SystemContext:
         """Initialize system context with validation and error handling."""
         try:
+            # Validate config file exists and is valid
             if not os.path.exists(args.config):
                 raise FileNotFoundError(f"Configuration file not found: {args.config}")
             
+            if not self._validate_config_file(args.config, self.logger):
+                raise ValueError("Configuration validation failed")
+            
+            # Initialize config manager
             config_manager = ConfigManager(args.config, self.logger)
             config_manager.subscribe(self._on_config_change)
             
-            try:
-                config_manager.validate_or_raise()
-            except ValueError as e:
-                raise ValueError(f"Configuration validation failed: {str(e)}")
+            # Validate device
+            if args.device == "cuda":
+                if not torch.cuda.is_available():
+                    raise RuntimeError("CUDA is not available. Please use --device cpu")
+                # Check GPU memory
+                total_memory = torch.cuda.get_device_properties(0).total_memory
+                required_memory = config_manager.get("memory_config.max_memory_mb", 1024) * 1024 * 1024
+                if required_memory > total_memory:
+                    raise RuntimeError(f"Insufficient GPU memory. Required: {required_memory/1024/1024}MB, Available: {total_memory/1024/1024}MB")
             
-            if args.device == "cuda" and not torch.cuda.is_available():
-                raise RuntimeError("CUDA is not available. Please use --device cpu")
+            # Create output directory
+            output_dir = Path("output")
+            output_dir.mkdir(exist_ok=True)
+            if not os.access(output_dir, os.W_OK):
+                raise PermissionError("No write permission in output directory")
             
             self.logger.log_event(
                 event_type="device_selected",
                 message=f"Using {'CUDA device: ' + torch.cuda.get_device_name(0) if args.device == 'cuda' else 'CPU device'}",
                 level="info"
             )
-            
-            Path("output").mkdir(exist_ok=True)
             
             return SystemContext(
                 config_path=args.config,
@@ -270,115 +307,92 @@ class SOVLRunner:
             (MemoryManager, "memory manager")
         ]
         
-        # Initialize ModelManager first
-        self.model_manager = ModelManager(
-            config_manager=context.config_manager,
-            logger=self.logger,
-            device=context.device
-        )
-        
-        # Initialize components in stages to handle dependencies
-        stage1_components = []  # Basic components without dependencies
-        stage2_components = []  # Components with basic dependencies
-        stage3_components = []  # Components with complex dependencies
-        
-        for component_class, name in component_classes:
-            try:
-                if component_class is None:  # Handle model loading
-                    self.logger.log_event(
-                        event_type="component_initialization",
-                        message="Loading model...",
-                        level="info"
-                    )
-                    # Use ModelManager to load models
-                    self.model_manager.load_models()
-                    self.model = self.model_manager.get_base_model()
-                    self.tokenizer = self.model_manager.get_tokenizer()
-                    components.append(self.model)
-                    
-                    # Initialize optimizer and scheduler
-                    self._initialize_optimizer(self.model)
-                    continue
-                
-                # Stage 1: Basic components
-                if name in ["model loader", "state tracker", "memory monitor"]:
-                    component = component_class(context)
-                    stage1_components.append(component)
-                    components.append(component)
-                    self.logger.log_event(
-                        event_type="component_initialization",
-                        message=f"Initialized {name}",
-                        level="info"
-                    )
-                
-                # Stage 2: Components with basic dependencies
-                elif name == "error manager":
-                    if not any(isinstance(c, StateTracker) for c in components):
-                        raise RuntimeError("StateTracker must be initialized before ErrorManager")
-                    component = ErrorManager(
-                        context=context,
-                        state_tracker=next(c for c in components if isinstance(c, StateTracker)),
-                        config_manager=context.config_manager,
-                        error_cooldown=context.config_manager.get("error_config.error_cooldown", 1.0),
-                        max_recent_errors=context.config_manager.get("error_config.max_recent_errors", 100)
-                    )
-                    self.error_manager = component
-                    stage2_components.append(component)
-                    components.append(component)
-                    self.logger.log_event(
-                        event_type="component_initialization",
-                        message=f"Initialized {name}",
-                        level="info"
-                    )
-                
-                # Stage 3: Components with complex dependencies
-                elif name == "curiosity engine":
-                    if not self.error_manager:
-                        raise RuntimeError("ErrorManager must be initialized before CuriosityEngine")
-                    if not any(isinstance(c, StateTracker) for c in components):
-                        raise RuntimeError("StateTracker must be initialized before CuriosityEngine")
-                    if not any(isinstance(c, ModelLoader) for c in components):
-                        raise RuntimeError("ModelLoader must be initialized before CuriosityEngine")
-                    
-                    component = component_class(
-                        config_handler=context.config_manager,
-                        model_loader=next(c for c in components if isinstance(c, ModelLoader)),
-                        state_tracker=next(c for c in components if isinstance(c, StateTracker)),
-                        error_manager=self.error_manager,
-                        logger=context.logger,
-                        device=context.device
-                    )
-                    stage3_components.append(component)
-                    components.append(component)
-                    self.logger.log_event(
-                        event_type="component_initialization",
-                        message=f"Initialized {name}",
-                        level="info"
-                    )
-                
-                elif name == "memory manager":
-                    component = component_class(
-                        context.config_manager,
-                        context.device,
-                        context.logger
-                    )
-                    stage3_components.append(component)
-                    components.append(component)
-                    self.logger.log_event(
-                        event_type="component_initialization",
-                        message=f"Initialized {name}",
-                        level="info"
-                    )
-                
-            except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Failed to initialize {name}: {str(e)}",
-                    error_type="component_initialization_error"
-                )
-                raise
-        
-        # Validate all components
         try:
+            # Initialize ModelManager first
+            self.model_manager = ModelManager(
+                config_manager=context.config_manager,
+                logger=self.logger,
+                device=context.device
+            )
+            
+            # Initialize components in stages
+            stage1_components = []  # Basic components without dependencies
+            stage2_components = []  # Components with basic dependencies
+            stage3_components = []  # Components with complex dependencies
+            
+            for component_class, name in component_classes:
+                try:
+                    if component_class is None:  # Handle model loading
+                        self.logger.log_event(
+                            event_type="component_initialization",
+                            message="Loading model...",
+                            level="info"
+                        )
+                        self.model_manager.load_models()
+                        self.model = self.model_manager.get_base_model()
+                        self.tokenizer = self.model_manager.get_tokenizer()
+                        components.append(self.model)
+                        continue
+                    
+                    # Stage 1: Basic components
+                    if name in ["model loader", "state tracker", "memory monitor"]:
+                        component = component_class(context)
+                        stage1_components.append(component)
+                        components.append(component)
+                    
+                    # Stage 2: Components with basic dependencies
+                    elif name == "error manager":
+                        if not any(isinstance(c, StateTracker) for c in components):
+                            raise RuntimeError("StateTracker must be initialized before ErrorManager")
+                        component = ErrorManager(
+                            context=context,
+                            state_tracker=next(c for c in components if isinstance(c, StateTracker)),
+                            config_manager=context.config_manager
+                        )
+                        self.error_manager = component
+                        stage2_components.append(component)
+                        components.append(component)
+                    
+                    # Stage 3: Components with complex dependencies
+                    elif name in ["curiosity engine", "memory manager"]:
+                        if not self.error_manager:
+                            raise RuntimeError("ErrorManager must be initialized before " + name)
+                        if not any(isinstance(c, StateTracker) for c in components):
+                            raise RuntimeError("StateTracker must be initialized before " + name)
+                        
+                        if name == "curiosity engine":
+                            component = CuriosityEngine(
+                                config_handler=context.config_manager,
+                                model_loader=next(c for c in components if isinstance(c, ModelLoader)),
+                                state_tracker=next(c for c in components if isinstance(c, StateTracker)),
+                                error_manager=self.error_manager,
+                                logger=context.logger,
+                                device=context.device
+                            )
+                        else:  # memory manager
+                            component = MemoryManager(
+                                context.config_manager,
+                                context.device,
+                                context.logger
+                            )
+                        
+                        stage3_components.append(component)
+                        components.append(component)
+                    
+                    self.logger.log_event(
+                        event_type="component_initialization",
+                        message=f"Initialized {name}",
+                        level="info"
+                    )
+                    
+                except Exception as e:
+                    self.logger.log_error(
+                        error_msg=f"Failed to initialize {name}: {str(e)}",
+                        error_type="component_initialization_error"
+                    )
+                    raise
+            
+            # Validate all components
             validate_components(*components)
             initialize_component_state(components[2], components)
             
@@ -391,8 +405,8 @@ class SOVLRunner:
             
         except Exception as e:
             self.logger.log_error(
-                error_msg=f"Component validation failed: {str(e)}",
-                error_type="component_validation_error"
+                error_msg=f"Component initialization failed: {str(e)}",
+                error_type="component_initialization_error"
             )
             raise
     
