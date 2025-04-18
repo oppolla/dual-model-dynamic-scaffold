@@ -15,7 +15,6 @@ from sovl_curiosity import CuriosityManager
 from sovl_trainer import LifecycleManager, TrainingConfig
 from sovl_temperament import TemperamentManager
 from sovl_confidence import ConfidenceManager
-import math
 import threading
 
 # Add confidence-related constants at the top of the file
