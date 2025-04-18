@@ -10,7 +10,13 @@ from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import memory_usage, safe_divide
 from sovl_config import ConfigManager
+from sovl_hardware import HardwareManager  # New import
 import gc
+
+"""
+Manages memory-related operations, using HardwareManager for hardware access.
+"""
+
 
 class MemoryManager:
     """
@@ -39,6 +45,7 @@ class MemoryManager:
         self._config_manager = config_manager
         self._device = device
         self._logger = logger
+        self.hardware = HardwareManager(config_manager, logger)  # Initialize HardwareManager
         self._memory_lock = Lock()
         self._last_cleanup_time = 0.0
         self._mem_usage_history = deque(maxlen=self._MEM_USAGE_HISTORY_MAXLEN)
@@ -210,14 +217,8 @@ class MemoryManager:
                 context = {}
             
             # Add memory-specific context
-            if torch.cuda.is_available():
-                memory_stats = torch.cuda.memory_stats()
-                context.update({
-                    "allocated_memory": memory_stats["allocated_bytes.all.current"],
-                    "reserved_memory": memory_stats["reserved_bytes.all.current"],
-                    "active_memory": memory_stats["active_bytes.all.current"],
-                    "inactive_memory": memory_stats["inactive_bytes.all.current"]
-                })
+            memory_stats = self.hardware.get_detailed_memory_stats()
+            context.update(memory_stats)
             
             # Add system state context
             context.update({
@@ -232,15 +233,7 @@ class MemoryManager:
                 error_msg=error_msg,
                 error_type=error_type,
                 stack_trace=stack_trace,
-                context=context
-            )
-            
-            # Also propagate to ErrorManager for centralized error handling
-            self._error_manager.handle_error(
-                error_type=error_type,
-                error_msg=error_msg,
-                stack_trace=stack_trace,
-                context=context
+                additional_info=context
             )
         except Exception as e:
             # If logging fails, at least print the error
@@ -417,20 +410,15 @@ class MemoryManager:
                 }
             )
 
-    def _get_memory_stats(self) -> Optional[Dict[str, float]]:
+    def get_memory_stats(self) -> Optional[Dict[str, float]]:
         """Retrieve GPU memory statistics."""
-        if not torch.cuda.is_available():
-            return None
         try:
-            allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
-            reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # Convert to GB
-            total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # Convert to GB
-            
+            stats = self.hardware.get_memory_stats()
             return {
-                "allocated": allocated,
-                "reserved": reserved,
-                "total": total,
-                "available": total - allocated
+                "allocated": stats["allocated_mb"] / 1024,  # Convert MB to GB
+                "reserved": stats["reserved_mb"] / 1024,   # Convert MB to GB
+                "total": stats["total_memory_mb"] / 1024,  # Convert MB to GB
+                "available": stats["available_mb"] / 1024  # Convert MB to GB
             }
         except Exception as e:
             self._log_event(
@@ -443,94 +431,73 @@ class MemoryManager:
     def check_memory_health(self, model_size: int, trainer: Optional[Any] = None):
         """Autonomically reduce GPU memory usage if approaching capacity."""
         try:
-            if torch.cuda.is_available():
-                # Get memory stats
-                memory_stats = torch.cuda.memory_stats()
-                current_memory = memory_stats["allocated_bytes.all.current"]
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                memory_ratio = current_memory / total_memory
+            stats = self.hardware.get_memory_stats()
+            current_memory = stats["allocated_mb"] * 1024 * 1024  # Convert MB to bytes
+            total_memory = stats["total_memory_mb"] * 1024 * 1024  # Convert MB to bytes
+            memory_ratio = current_memory / total_memory if total_memory > 0 else 0.0
+            
+            # Log memory usage
+            self._log_event(
+                event_type="memory_health_check",
+                message="Memory health check performed",
+                level="info",
+                memory_ratio=memory_ratio,
+                model_size=model_size
+            )
+            
+            # Update memory usage history
+            with self._memory_lock:
+                self._mem_usage_history.append(memory_ratio)
+                if len(self._mem_usage_history) > self.max_history_size:
+                    self._mem_usage_history.pop(0)
                 
-                # Log memory usage
-                self._log_event(
-                    event_type="memory_health_check",
-                    message="Memory health check performed",
-                    level="info",
-                    memory_ratio=memory_ratio,
-                    model_size=model_size
-                )
-                
-                # Update memory usage history
-                with self._memory_lock:
-                    self._mem_usage_history.append(memory_ratio)
-                    if len(self._mem_usage_history) > self.max_history_size:
-                        self._mem_usage_history.pop(0)
-                    
-                    # Calculate dynamic threshold
-                    if len(self._mem_usage_history) > 0:
-                        avg_usage = sum(self._mem_usage_history) / len(self._mem_usage_history)
-                        self.memory_threshold = min(
-                            self.dynamic_threshold_base,
-                            avg_usage * self.memory_decay_rate
-                        )
-                
-                # Check if memory usage exceeds threshold
-                if memory_ratio > self.memory_threshold:
-                    # Reduce batch size if trainer is provided
-                    if trainer is not None:
-                        new_batch_size = max(
-                            self.min_batch_size,
-                            int(self.batch_size * 0.5)
-                        )
-                        if new_batch_size != self.batch_size:
-                            self.batch_size = new_batch_size
-                            trainer.train_batch_size = new_batch_size
-                            self._log_event(
-                                event_type="memory_health_action",
-                                message="Batch size reduced due to high memory usage",
-                                level="warning",
-                                new_batch_size=new_batch_size,
-                                memory_ratio=memory_ratio,
-                                threshold=self.memory_threshold
-                            )
-                    
-                    # Clear CUDA cache if memory usage is very high
-                    if memory_ratio > 0.9:
-                        torch.cuda.empty_cache()
+                # Calculate dynamic threshold
+                if len(self._mem_usage_history) > 0:
+                    avg_usage = sum(self._mem_usage_history) / len(self._mem_usage_history)
+                    self.memory_threshold = min(
+                        self.dynamic_threshold_base,
+                        avg_usage * self.memory_decay_rate
+                    )
+            
+            # Check if memory usage exceeds threshold
+            if memory_ratio > self.memory_threshold:
+                # Reduce batch size if trainer is provided
+                if trainer is not None:
+                    new_batch_size = max(
+                        self.min_batch_size,
+                        int(self.batch_size * 0.5)
+                    )
+                    if new_batch_size != self.batch_size:
+                        self.batch_size = new_batch_size
+                        trainer.train_batch_size = new_batch_size
                         self._log_event(
                             event_type="memory_health_action",
-                            message="CUDA cache cleared due to very high memory usage",
+                            message="Batch size reduced due to high memory usage",
                             level="warning",
-                            memory_ratio=memory_ratio
+                            new_batch_size=new_batch_size,
+                            memory_ratio=memory_ratio,
+                            threshold=self.memory_threshold
                         )
-                    
-                    # Propagate memory warning to ErrorManager
-                    self._error_manager.handle_memory_warning(
-                        current_memory=current_memory,
-                        total_memory=total_memory,
-                        memory_ratio=memory_ratio,
-                        threshold=self.memory_threshold
-                    )
-                    return False
                 
-                return True
-            else:
-                return True
+                # Clear cache if memory usage is very high
+                if memory_ratio > 0.9:
+                    self.hardware.clear_memory_cache()
+                    self._log_event(
+                        event_type="memory_health_action",
+                        message="Memory cache cleared due to very high memory usage",
+                        level="warning",
+                        memory_ratio=memory_ratio
+                    )
+                
+                return False
+            
+            return True
         except Exception as e:
             # Log detailed error information
             self._log_error(
                 error_msg=f"Memory health check failed: {str(e)}",
                 error_type="memory_error",
                 stack_trace=traceback.format_exc(),
-                context={
-                    "model_size": model_size,
-                    "trainer_present": trainer is not None,
-                    "device": str(self._device)
-                }
-            )
-            
-            # Propagate error to ErrorManager
-            self._error_manager.handle_memory_error(
-                error=e,
                 context={
                     "model_size": model_size,
                     "trainer_present": trainer is not None,
@@ -569,8 +536,7 @@ class MemoryManager:
                     )
                     self._state.dream_memory = self._dream_memory
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                self.hardware.clear_memory_cache()
 
                 self._log_event(
                     "scaffold_cache_cleared",
@@ -893,7 +859,7 @@ class MemoryManager:
             "state_hash": self._state.state_hash() if self._state else None
         }
 
-        mem_stats = self._get_memory_stats()
+        mem_stats = self.get_memory_stats()
         if mem_stats:
             try:
                 stats["gpu_allocated"] = mem_stats['allocated']
@@ -917,17 +883,17 @@ class MemoryManager:
 
     def cleanup(self, model_size: float, trainer) -> None:
         """Perform memory cleanup operations to free up GPU memory."""
-        mem_stats = self._get_memory_stats()
+        mem_stats = self.get_memory_stats()
         if not mem_stats:
             return
 
         with self._memory_lock:
-            current_mem = mem_stats['allocated'] * (1024 ** 3)
-            total_mem = torch.cuda.get_device_properties(0).total_memory
-            mem_ratio = current_mem / total_mem
+            current_mem = mem_stats['allocated'] * (1024 ** 3)  # Convert GB to bytes
+            total_mem = mem_stats['total'] * (1024 ** 3)        # Convert GB to bytes
+            mem_ratio = current_mem / total_mem if total_mem > 0 else 0.0
 
             if mem_ratio > self.memory_threshold and time.time() - self._last_cleanup_time > self._cleanup_cooldown:
-                torch.cuda.empty_cache()
+                self.hardware.clear_memory_cache()
                 self._last_cleanup_time = time.time()
                 self._log_event(
                     "memory_cleanup",
@@ -987,33 +953,8 @@ class MemoryManager:
                 )
                 raise
 
-    def _validate_config_value(self, key: str, value: Any, valid_range: Tuple[float, float], is_int: bool = False) -> Union[float, int]:
-        """Validate a configuration value against a range."""
-        try:
-            if is_int:
-                if not isinstance(value, int):
-                    raise ValueError(f"Config {key} must be an integer")
-                min_val, max_val = valid_range
-                if not (min_val <= value <= max_val):
-                    raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
-                return value
-            else:
-                if not isinstance(value, (int, float)):
-                    raise ValueError(f"Config {key} must be a number")
-                min_val, max_val = valid_range
-                if not (min_val <= value <= max_val):
-                    raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
-                return float(value)
-        except Exception as e:
-            self._log_error(
-                f"Config validation failed for {key}: {str(e)}",
-                error_type="config_validation_error",
-                context="config_validation"
-            )
-            raise
-
 class MemoryMonitor:
-    """Monitors memory usage using Python's built-in capabilities."""
+    """Monitors memory usage using HardwareManager."""
     
     def __init__(
         self,
@@ -1023,6 +964,7 @@ class MemoryMonitor:
         """Initialize memory monitor with configuration."""
         self.config_manager = config_manager
         self.logger = logger
+        self.hardware = HardwareManager(config_manager, logger)  # Initialize HardwareManager
         self._initialized = False
         
         # Initialize configuration
@@ -1059,24 +1001,19 @@ class MemoryMonitor:
     def get_memory_usage(self) -> Dict[str, Any]:
         """Get current memory usage statistics."""
         try:
-            # Get Python's memory usage
+            # Get memory stats from HardwareManager
             gc.collect()  # Force garbage collection
-            allocated = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
-            reserved = torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
-            
-            # Convert to MB
-            allocated_mb = allocated / (1024 * 1024)
-            reserved_mb = reserved / (1024 * 1024)
+            stats = self.hardware.get_memory_stats()
             
             # Calculate percentage used
-            percentage_used = (allocated_mb / self.max_memory_mb) if self.max_memory_mb > 0 else 0
+            percentage_used = (stats["allocated_mb"] / self.max_memory_mb) if self.max_memory_mb > 0 else 0
             
             return {
-                "allocated_mb": allocated_mb,
-                "reserved_mb": reserved_mb,
+                "allocated_mb": stats["allocated_mb"],
+                "reserved_mb": stats["reserved_mb"],
                 "percentage_used": percentage_used,
                 "max_memory_mb": self.max_memory_mb,
-                "available_mb": max(0, self.max_memory_mb - allocated_mb)
+                "available_mb": stats["available_mb"]
             }
             
         except Exception as e:
