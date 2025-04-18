@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from typing import List, Optional, Tuple, Union, Dict, Any
 from collections import defaultdict
 import time
@@ -9,7 +8,6 @@ import traceback
 from threading import Lock
 import contextlib
 import math
-import threading
 from sovl_logger import Logger
 from sovl_config import ConfigManager, ConfigSchema, _SchemaValidator
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices

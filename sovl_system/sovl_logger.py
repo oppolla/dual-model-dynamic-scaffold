@@ -9,7 +9,6 @@ from threading import Lock, RLock
 from typing import List, Dict, Union, Optional, Callable, Any, Tuple
 from dataclasses import dataclass
 import torch
-from logging.handlers import RotatingFileHandler
 import traceback
 from collections import deque
 

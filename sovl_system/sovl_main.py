@@ -8,19 +8,29 @@ import time
 import random
 import bitsandbytes as bnb
 import json
-import contextlib
 from collections import deque, defaultdict
 import traceback
 import os
 from threading import Lock
 from sovl_curiosity import CuriosityManager, CuriosityState
 from sovl_logger import Logger
-from sovl_io import load_training_data, validate_quantization_mode, InsufficientDataError
+from sovl_io import validate_quantization_mode, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
 from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
 from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
 from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
 from sovl_processor import LogitsProcessor, SOVLProcessor
+from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
+from sovl_memory import MemoryManager
+from sovl_manager import ModelManager
+from sovl_generation import GenerationManager
+from sovl_tuner import SOVLTuner
+from sovl_error import ErrorHandler
+from sovl_state import StateManager
+from sovl_grafter import PluginManager
+from sovl_confidence import calculate_confidence_score
+from sovl_events import EventDispatcher
+from sovl_interfaces import SystemInterface
 from sovl_utils import (
     detect_repetitions,
     safe_compare,
@@ -32,18 +42,7 @@ from sovl_utils import (
     sync_component_states,
     validate_component_states
 )
-from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
-from sovl_memory import MemoryManager
-from sovl_manager import ModelManager
-from sovl_generation import GenerationManager
-from sovl_tuner import SOVLTuner
-from sovl_error import ErrorHandler
-from sovl_state import StateManager
-from sovl_logger import LoggingManager
-from sovl_grafter import PluginManager
-from sovl_confidence import calculate_confidence_score
-from sovl_events import EventDispatcher
-from sovl_interfaces import SystemInterface
+
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
