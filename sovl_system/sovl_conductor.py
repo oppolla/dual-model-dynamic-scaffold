@@ -17,6 +17,7 @@ from sovl_grafter import PluginManager
 from collections import deque
 from sovl_state import StateManager
 from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediator
+import random
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
@@ -414,6 +415,15 @@ class SOVLOrchestrator(OrchestratorInterface):
             )
             
             self.mediator.register_system(system)
+            
+            # Generate a wake-up greeting
+            if hasattr(system, 'generate'):
+                wake_seed = (int(time.time() * 1000) + random.randint(0, 100)) % 10000
+                torch.manual_seed(wake_seed)
+                random.seed(wake_seed)
+                with torch.no_grad():
+                    greeting = system.generate(" ", max_new_tokens=15, temperature=1.7, top_k=30, do_sample=True)
+                print(f"\n{greeting}\n")
             
             self._log_event("system_initialized", {
                 "device": str(self.device),

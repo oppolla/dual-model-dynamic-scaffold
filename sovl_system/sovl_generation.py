@@ -7,14 +7,13 @@ import traceback
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
-from sovl_processor import LogitsProcessor
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size, memory_usage
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import LifecycleManager, TrainingConfig
-from sovl_temperament import TemperamentManager
-from sovl_confidence import ConfidenceManager
+from sovl_temperament import  TemperamentSystem 
+from sovl_confidence import  ConfidenceCalculator 
 import threading
 
 # Add confidence-related constants at the top of the file

@@ -12,6 +12,7 @@ from sovl_state import SOVLState
 from sovl_logger import Logger, LoggerConfig
 from sovl_events import EventDispatcher
 from sovl_trainer import LifecycleManager
+from sovl_confidence import ConfidenceCalculator 
 import math
 
 @dataclass
