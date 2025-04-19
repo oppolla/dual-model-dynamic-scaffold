@@ -38,6 +38,8 @@ class TrainingConfig:
         try:
             # Get training section from config
             training_config = self.config_manager.get_section("training")
+            if not training_config:
+                raise ConfigurationError("Training configuration section is missing or empty.")
             
             # Load required parameters with immediate validation
             self.learning_rate = self.config_manager.get("training.learning_rate", 2e-5)
