@@ -2,9 +2,13 @@
 
 ## Overview
 
-The Self-Organizing Virtual Lifeform (SOVL) is an AI framework designed to emulate biologically inspired learning and adaptation. It integrates multiple language models via _scaffolded_ secondary language models to produce coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. Sanity is maintained through continuous learning by _freezing_ the base language model, and only training secondary language models. The dynamic scaffolded secondary model plugs into the hidden layers of the frozen base language model becomes an ever-evolving free-spirit, it influencing the base model's decisions through _whispering in it's ear_. Since the base model is frozen, it remains the rational core of the system while the scaffolded model is free to become whatever it wishes.
+The Self-Organizing Virtual Lifeform (SOVL) is an AI agent designed to emulate biologically inspired learning and adaptation. Built on a dual-model architecture, a frozen base language model, and a dynamic secondary _scaffolded_ models. Together these produce flavourful, coherent, and contextually accurate outputs. This is further refined by the systems self-directed exploration through the asking of questions that interest it.
 
-The SOVL's curiosity-driven exploration of its environment, confidence and temperament-based behavioral states, and sleep-inspired memory consolidation mechanisms enables the system to learn autonomously, generate contextually rich responses, and refine its knowledge through question asking and dream-state information processing. This specification details SOVL’s architecture, components, and operational workflows.
+The dynamic scaffold model is periodically train during sleep/gestation phases. The system finds a quiet moment to take a 'nap'. During this map, the system trains the secondary model on whatever it has learned during the most recent active period. Memory consolidation occurs during this time. During the sleep phase, the system is also able to dream, gaining deeper (or weirder) insights into moments from the most recent active period.
+
+_Sanity_ is maintained through this continuous learning as only the  scaffold model is trained in this way. The base model frozen and becomes the rational anchor of the whole system. The dynmaic scaffolded model plugs into the hidden layers of the frozen base language model and becomes an ever-evolving free-spirit, influencing the base model through _whispers in the ear_.
+
+The SOVL's curiosity-driven exploration of its environment, confidence and temperament-based behavioral states, and sleep-inspired memory consolidation mechanisms enables the system to learn autonomously, generate contextually rich responses, and refine its knowledge through question asking and dream-state information processing.
 
 ## System Architecture
 
