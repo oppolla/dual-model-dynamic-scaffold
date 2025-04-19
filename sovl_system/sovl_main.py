@@ -1,1416 +1,310 @@
-from typing import Optional, Any, List, Dict, Tuple, Callable
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from peft import LoraConfig, get_peft_model, TaskType
-import time
-import random
-import bitsandbytes as bnb
-import json
-from collections import deque, defaultdict
-import traceback
-import os
-from threading import Lock
-from sovl_curiosity import CuriosityManager, CuriosityState
-from sovl_logger import Logger
-from sovl_io import validate_quantization_mode, InsufficientDataError
-from sovl_state import SOVLState, ConversationHistory
-from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
-from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
-from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
-from sovl_processor import LogitsProcessor, SOVLProcessor
-from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
-from sovl_memory import MemoryManager
-from sovl_manager import ModelManager
-from sovl_generation import GenerationManager
-from sovl_tuner import SOVLTuner
-from sovl_error import ErrorHandler
-from sovl_state import StateManager
-from sovl_grafter import PluginManager
-from sovl_confidence import calculate_confidence_score
-from sovl_events import EventDispatcher
-from sovl_interfaces import SystemInterface
-from sovl_utils import (
-    detect_repetitions,
-    safe_compare,
-    float_gt,
-    synchronized,
-    validate_components,
-    NumericalGuard,
-    initialize_component_state,
-    sync_component_states,
-    validate_component_states
-)
+# SOVL System Architecture Specification
 
+## Overview
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from sovl_conductor import SOVLOrchestrator
+The Self-Organizing Virtual Lifeform (SOVL) is an advanced AI framework designed to emulate biologically inspired learning and adaptation. It integrates multiple language models to produce coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. SOVL’s core capabilities include curiosity-driven exploration, dream-inspired memory consolidation, and scaffold-guided generation, orchestrated through a robust command-line interface (CLI) for precise control.
 
-class SystemContext:
-    """Manages system-wide context and resources."""
-    
-    def __init__(self, config_path: str, device: str = "cuda"):
-        """
-        Initialize system context with shared resources.
-        
-        Args:
-            config_path: Path to configuration file
-            device: Device to use for tensor operations
-        """
-        self.config_path = config_path
-        self.device = device
-        self.logger = Logger()
-        self.event_dispatcher = EventDispatcher(self.logger)
-        
-        # Initialize config manager with event dispatcher
-        self.config_handler = ConfigHandler(config_path, self.logger, self.event_dispatcher)
-        
-        # Validate initial configuration
-        if not self.config_handler.validate():
-            raise SystemInitializationError(
-                "Failed to validate initial configuration",
-                config_path,
-                traceback.format_exc()
-            )
-        
-        # Subscribe to configuration changes
-        self.event_dispatcher.subscribe("config_change", self._on_config_change)
-        
-    def _on_config_change(self) -> None:
-        """Handle configuration changes and propagate them to affected components."""
-        try:
-            # Validate configuration after change
-            if not self.config_handler.validate():
-                self.logger.log_error(
-                    error_msg="Configuration validation failed after change",
-                    error_type="config_validation_error",
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "config_path": self.config_path,
-                        "timestamp": time.time()
-                    }
-                )
-                return
-                
-            self.logger.record_event(
-                event_type="config_change",
-                message="Configuration changed and validated successfully",
-                level="info",
-                additional_info={
-                    "timestamp": time.time(),
-                    "config_path": self.config_path
-                }
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="config_change_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_path": self.config_path,
-                    "timestamp": time.time()
-                }
-            )
+This specification details SOVL’s architecture, covering components, workflows, and configuration options. It is structured to reflect the system’s operational flow: orchestration, model management, state/memory management, behavioral drivers, processing systems, user interaction, and resource optimization. The document is intended for developers, researchers, and architects seeking a comprehensive understanding of SOVL’s design.
 
-class SystemInitializationError(Exception):
-    """Custom exception for system initialization failures."""
-    
-    def __init__(self, message: str, config_path: str, stack_trace: str):
-        self.message = message
-        self.config_path = config_path
-        self.stack_trace = stack_trace
-        super().__init__(f"{message}\nConfig path: {config_path}\nStack trace:\n{stack_trace}")
+## System Architecture
 
-class ModelLoader:
-    """Handles model loading and initialization."""
-    
-    def __init__(self, context: SystemContext):
-        """
-        Initialize model loader with system context.
-        
-        Args:
-            context: System context containing shared resources
-        """
-        self.context = context
-        self.logger = context.logger
-        self.config = context.config_handler.get_section("model")
-        
-        # Validate model configuration
-        if not self._validate_model_config():
-            raise ModelLoadingError(
-                "Invalid model configuration",
-                self.config,
-                traceback.format_exc()
-            )
-            
-    def _validate_model_config(self) -> bool:
-        """Validate model configuration section."""
-        try:
-            required_fields = ["model_path", "model_type", "quantization_mode"]
-            for field in required_fields:
-                if field not in self.config:
-                    self.logger.log_error(
-                        error_msg=f"Missing required model configuration field: {field}",
-                        error_type="config_validation_error",
-                        stack_trace=None,
-                        additional_info={
-                            "missing_field": field,
-                            "config_section": "model"
-                        }
-                    )
-                    return False
-                    
-            # Validate quantization mode
-            if not validate_quantization_mode(self.config["quantization_mode"]):
-                self.logger.log_error(
-                    error_msg=f"Invalid quantization mode: {self.config['quantization_mode']}",
-                    error_type="config_validation_error",
-                    stack_trace=None,
-                    additional_info={
-                        "invalid_value": self.config["quantization_mode"],
-                        "config_section": "model"
-                    }
-                )
-                return False
-                
-            return True
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="config_validation_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_section": "model"
-                }
-            )
-            return False
-            
-    def load_model(self) -> torch.nn.Module:
-        """Load and initialize the model with validated configuration."""
-        try:
-            if not self._validate_model_config():
-                raise ModelLoadingError(
-                    "Cannot load model with invalid configuration",
-                    self.config,
-                    traceback.format_exc()
-                )
-                
-            # Load model with validated configuration
-            model = load_model(
-                self.config["model_path"],
-                self.config["model_type"],
-                self.config["quantization_mode"],
-                self.context.device
-            )
-            
-            self.logger.record_event(
-                event_type="model_loaded",
-                message="Model loaded successfully",
-                level="info",
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"],
-                    "device": self.context.device
-                }
-            )
-            
-            return model
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="model_loading_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"]
-                }
-            )
-            raise
+SOVL’s modular architecture supports a cyclical workflow of initialization, exploration, generation, learning, and consolidation, ensuring scalability and efficiency.
 
-class StateTracker:
-    """Tracks system state and history."""
-    
-    def __init__(self, context: SystemContext):
-        """Initialize state tracker with system context."""
-        self.context = context
-        self.state = None
-        self._state_history = deque(maxlen=100)  # Keep last 100 states
-        self._state_changes = deque(maxlen=50)  # Keep last 50 state changes
-        self._lock = Lock()
-        
-    def _validate_state_config(self) -> bool:
-        """Validate state configuration."""
-        try:
-            config = self.context.config_handler.get_section("state")
-            if not config:
-                self.context.logger.log_error(
-                    error_msg="Missing state configuration section",
-                    error_type="config_validation_error"
-                )
-                return False
-                
-            required_fields = ["max_history", "state_file"]
-            for field in required_fields:
-                if field not in config:
-                    self.context.logger.log_error(
-                        error_msg=f"Missing required state configuration field: {field}",
-                        error_type="config_validation_error",
-                        additional_info={"missing_field": field}
-                    )
-                    return False
-                    
-            return True
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to validate state configuration: {str(e)}",
-                error_type="config_validation_error",
-                stack_trace=traceback.format_exc()
-            )
-            return False
-            
-    def get_state(self) -> Dict[str, Any]:
-        """Get current system state."""
-        with self._lock:
-            if not self.state:
-                return {}
-            return self.state.to_dict()
-            
-    def get_state_history(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get recent state history."""
-        with self._lock:
-            return [state.to_dict() for state in list(self._state_history)[-limit:]]
-            
-    def get_state_changes(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get recent state changes."""
-        with self._lock:
-            return list(self._state_changes)[-limit:]
-            
-    def get_state_stats(self) -> Dict[str, Any]:
-        """Get state tracking statistics."""
-        with self._lock:
-            return {
-                "total_states": len(self._state_history),
-                "total_changes": len(self._state_changes),
-                "current_state_age": time.time() - self.state.timestamp if self.state else None,
-                "last_change_time": self._state_changes[-1]["timestamp"] if self._state_changes else None,
-                "state_types": {
-                    state_type: count
-                    for state_type, count in Counter(
-                        change["type"] for change in self._state_changes
-                    ).items()
-                }
-            }
-            
-    def update_state(self, key: str, value: Any) -> None:
-        """Update state with new value and record the change."""
-        with self._lock:
-            if not self.state:
-                self.state = SOVLState()
-                
-            old_value = getattr(self.state, key, None)
-            setattr(self.state, key, value)
-            
-            # Record state change
-            change = {
-                "type": "state_update",
-                "key": key,
-                "old_value": old_value,
-                "new_value": value,
-                "timestamp": time.time()
-            }
-            self._state_changes.append(change)
-            
-            # Add current state to history
-            self._state_history.append(self.state.copy())
-            
-            # Log state change
-            self.context.logger.record_event(
-                event_type="state_change",
-                message=f"State updated: {key}",
-                level="debug" if self.context.logger.is_debug_enabled() else "info",
-                additional_info={
-                    "key": key,
-                    "old_value": old_value,
-                    "new_value": value,
-                    "state_hash": self.state.state_hash
-                }
-            )
-            
-    def clear_history(self) -> None:
-        """Clear state history and changes."""
-        with self._lock:
-            self._state_history.clear()
-            self._state_changes.clear()
-            
-    def get_debug_info(self) -> Dict[str, Any]:
-        """Get detailed debug information about state tracking."""
-        with self._lock:
-            return {
-                "current_state": self.get_state(),
-                "state_stats": self.get_state_stats(),
-                "recent_changes": self.get_state_changes(5),
-                "recent_history": self.get_state_history(5),
-                "memory_usage": {
-                    "state_history_size": len(self._state_history),
-                    "state_changes_size": len(self._state_changes),
-                    "current_state_size": sys.getsizeof(self.state) if self.state else 0
-                }
-            }
+### 1. System Orchestration (`SOVLOrchestrator`, `SOVLSystem`)
 
-class ErrorManager:
-    """Manages error handling and recovery for the SOVL system."""
-    
-    def __init__(self, context: SystemContext, state_tracker: StateTracker):
-        """Initialize error manager with required dependencies."""
-        self.context = context
-        self.state_tracker = state_tracker
-        self.logger = context.logger
-        self.error_counts = defaultdict(int)
-        self.recent_errors = deque(maxlen=100)
-        self._initialize()
-        
-    def _initialize(self) -> None:
-        """Initialize error handling configuration."""
-        config = self.context.config_handler.config_manager.get_section("error_config", {})
-        self.error_cooldown = config.get("error_cooldown", 1.0)
-        self.severity_thresholds = {
-            "warning": float(config.get("warning_threshold", 3.0)),
-            "error": float(config.get("error_threshold", 5.0)),
-            "critical": float(config.get("critical_threshold", 10.0))
-        }
-        self.recovery_actions = {
-            "training": self._recover_training,
-            "curiosity": self._recover_curiosity,
-            "memory": self._recover_memory,
-            "generation": self._recover_generation,
-            "data": self._recover_data
-        }
-        
-    def _is_duplicate_error(self, error: Exception, error_type: str) -> bool:
-        """Check if this error is a duplicate within the cooldown period."""
-        error_key = f"{error_type}:{type(error).__name__}"
-        current_time = time.time()
-        
-        # Remove old errors from tracking using float_compare
-        while self.recent_errors and float_gt(current_time - self.recent_errors[0]["timestamp"], self.error_cooldown):
-            self.recent_errors.popleft()
-            
-        # Check for duplicates
-        for recent_error in self.recent_errors:
-            if recent_error["key"] == error_key:
-                return True
-                
-        # Add to recent errors
-        self.recent_errors.append({
-            "key": error_key,
-            "timestamp": current_time
-        })
-        
-        return False
-        
-    def handle_training_error(self, error: Exception, batch_size: int) -> None:
-        """Handle training-related errors."""
-        try:
-            error_type = "training_error"
-            self._record_error(error, error_type, {"batch_size": batch_size})
-            
-            # Existing error handling logic
-            if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
-                    error_msg=str(error),
-                    error_type=error_type,
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "batch_size": batch_size,
-                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                    }
-                )
-                
-            self._recover_training(error_type)
-            self._adjust_training_parameters(batch_size)
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Error handler failed: {str(e)}",
-                error_type="error_handler_failure",
-                stack_trace=traceback.format_exc()
-            )
-            
-    def handle_curiosity_error(self, error: Exception, pressure: float) -> None:
-        """Handle curiosity-related errors."""
-        try:
-            error_type = "curiosity_error"
-            self._record_error(error, error_type, {"pressure": pressure})
-            
-            # Existing error handling logic
-            if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
-                    error_msg=str(error),
-                    error_type=error_type,
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "pressure": pressure,
-                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                    }
-                )
-                
-            self._recover_curiosity(error_type)
-            self._adjust_curiosity_parameters(pressure)
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Error handler failed: {str(e)}",
-                error_type="error_handler_failure",
-                stack_trace=traceback.format_exc()
-            )
-            
-    def handle_memory_error(self, error: Exception, memory_usage: float) -> None:
-        """Handle memory-related errors."""
-        try:
-            error_type = "memory_error"
-            self._record_error(error, error_type, {"memory_usage": memory_usage})
-            
-            # Existing error handling logic
-            if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
-                    error_msg=str(error),
-                    error_type=error_type,
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "memory_usage": memory_usage,
-                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                    }
-                )
-                
-            self._recover_memory(error_type)
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Error handler failed: {str(e)}",
-                error_type="error_handler_failure",
-                stack_trace=traceback.format_exc()
-            )
-            
-    def handle_generation_error(self, error: Exception, temperature: float) -> None:
-        """Handle generation-related errors."""
-        try:
-            error_type = "generation_error"
-            self._record_error(error, error_type, {"temperature": temperature})
-            
-            # Existing error handling logic
-            if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
-                    error_msg=str(error),
-                    error_type=error_type,
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "temperature": temperature,
-                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                    }
-                )
-                
-            self._recover_generation(error_type)
-            self._adjust_generation_parameters(temperature)
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Error handler failed: {str(e)}",
-                error_type="error_handler_failure",
-                stack_trace=traceback.format_exc()
-            )
-            
-    def handle_data_error(self, error: Exception, context: Dict[str, Any], conversation_id: str) -> None:
-        """Handle data-related errors with duplicate detection."""
-        try:
-            error_key = f"data:{type(error).__name__}"
-            
-            if self._is_duplicate_error(error, "data"):
-                self._log_event(
-                    event_type="duplicate_data_error",
-                    message=f"Duplicate data error detected: {error_key}",
-                    level="warning",
-                    additional_info={
-                        "error_key": error_key,
-                        "context": context,
-                        "conversation_id": conversation_id
-                    }
-                )
-                return
-                
-            self.error_counts[error_key] += 1
-            
-            self._log_error(
-                error=error,
-                context="data",
-                level="error",
-                additional_info={
-                    "error_key": error_key,
-                    "error_count": self.error_counts[error_key],
-                    "context": context,
-                    "conversation_id": conversation_id
-                }
-            )
-            
-            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
-                self._recover_data(error_key)
-            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
-                self._adjust_data_parameters(context)
-                
-        except Exception as e:
-            self._log_error(
-                error=e,
-                context="error_handling",
-                level="critical",
-                additional_info={
-                    "original_error": str(error),
-                    "context": context,
-                    "conversation_id": conversation_id
-                }
-            )
+- **Function**: Coordinates initialization, execution, and shutdown, integrating components via dependency injection.
+- **Key Features**:
+  - Initializes components (`ConfigManager`, `StateManager`, `PluginManager`) with validated configurations.
+  - Executes CLI workflows, dispatching commands to components.
+  - Manages state persistence (save interval: 300 seconds, max backups: 5) and resource cleanup (e.g., GPU memory).
+  - Provides system-wide methods (`generate_curiosity_question`, `dream`, `shutdown`) for operational control.
+- **Operation**:
+  - Loads configuration sections (`core_config`, `training_config`, etc.), validating completeness.
+  - Synchronizes state via `StateManager`, logging state hashes.
+  - Handles shutdown by saving state, clearing histories, and releasing resources.
+- **Error Handling (`ErrorManager`)**:
+  - Categorizes errors by severity (warning: 3.0, error: 5.0, critical: 10.0) and detects duplicates within a cooldown period (1.0 seconds).
+  - Implements recovery actions, such as reducing batch sizes for training errors or resetting curiosity parameters.
+  - Logs errors with context (e.g., batch size, pressure) for diagnostics.
+- **Technical Details**:
+  - Configurable parameters (log size: 10 MB, save suffix: `_final.json`) via `orchestrator_config`.
+  - Thread-safe with `Lock` for state and resource management.
+  - Integrates with `PluginManager` for extensibility.
 
-    def _recover_training(self, error_key: str) -> None:
-        """Recover from critical training errors."""
-        try:
-            # Reset error count
-            self.error_counts[error_key] = 0
-            
-            # Take recovery actions
-            self.context.config_handler.config_manager.update("training_config.batch_size", 1)
-            self.context.config_handler.config_manager.update("training_config.learning_rate", 1e-5)
-            
-            self._log_event(
-                event_type="training_recovery",
-                message="Recovered from critical training error",
-                level="info",
-                additional_info={"error_key": error_key}
-            )
-            
-        except Exception as e:
-            self._log_error(
-                error=e,
-                context="recovery",
-                level="critical",
-                additional_info={"error_key": error_key}
-            )
-            
-    def _adjust_training_parameters(self, batch_size: int) -> None:
-        """Adjust training parameters for non-critical errors."""
-        try:
-            # Reduce batch size
-            new_batch_size = max(1, batch_size // 2)
-            self.context.config_handler.config_manager.update("training_config.batch_size", new_batch_size)
-            
-            self._log_event(
-                event_type="training_adjustment",
-                message="Adjusted training parameters",
-                level="info",
-                additional_info={
-                    "old_batch_size": batch_size,
-                    "new_batch_size": new_batch_size
-                }
-            )
-            
-        except Exception as e:
-            self._log_error(
-                error=e,
-                context="adjustment",
-                level="error"
-            )
-            
-    def _recover_curiosity(self, error_key: str) -> None:
-        """Recover from critical curiosity errors."""
-        try:
-            self.error_counts[error_key] = 0
-            
-            # Reset curiosity parameters
-            self.context.config_handler.config_manager.update("curiosity_config.pressure_threshold", 0.5)
-            self.context.config_handler.config_manager.update("curiosity_config.decay_rate", 0.9)
-            
-            self.logger.record_event(
-                event_type="curiosity_recovery",
-                message="Recovered from critical curiosity error",
-                level="info",
-                additional_info={"error_key": error_key}
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from curiosity error: {str(e)}",
-                level="critical",
-                additional_info={"error_key": error_key}
-            )
-            
-    def _recover_memory(self, error_key: str) -> bool:
-        """Recover from critical memory errors."""
-        try:
-            self.error_counts[error_key] = 0
-            
-            # Clear memory and reduce usage
-            self.context.config_handler.config_manager.update("memory_config.max_memory_mb", 512)
-            self.context.config_handler.config_manager.update("memory_config.garbage_collection_threshold", 0.7)
-            
-            self.logger.record_event(
-                event_type="memory_recovery",
-                message="Recovered from critical memory error",
-                level="info",
-                additional_info={"error_key": error_key}
-            )
-            
-            return True
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from memory error: {str(e)}",
-                level="critical",
-                additional_info={"error_key": error_key}
-            )
-            return False
-            
-    def _adjust_curiosity_parameters(self, pressure: float) -> None:
-        """Adjust curiosity parameters for non-critical errors."""
-        try:
-            # Adjust curiosity parameters
-            current_pressure = self.context.config_handler.config_manager.get("curiosity_config.pressure_threshold", 0.5)
-            new_pressure = max(0.1, current_pressure - 0.05)
-            self.context.config_handler.config_manager.update("curiosity_config.pressure_threshold", new_pressure)
-            
-            self.logger.record_event(
-                event_type="curiosity_adjustment",
-                message="Adjusted curiosity parameters",
-                level="info",
-                additional_info={
-                    "old_pressure": current_pressure,
-                    "new_pressure": new_pressure,
-                    "pressure": pressure
-                }
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="adjustment_failed",
-                message=f"Failed to adjust curiosity parameters: {str(e)}",
-                level="error"
-            )
-            
-    def _recover_generation(self, error_key: str) -> str:
-        """Recover from critical generation errors."""
-        try:
-            self.error_counts[error_key] = 0
-            
-            # Reset generation parameters
-            self.context.config_handler.config_manager.update("generation_config.temperature", 0.7)
-            self.context.config_handler.config_manager.update("generation_config.top_p", 0.9)
-            
-            self.logger.record_event(
-                event_type="generation_recovery",
-                message="Recovered from critical generation error",
-                level="info",
-                additional_info={"error_key": error_key}
-            )
-            
-            return "System recovered from error. Please try your request again."
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from generation error: {str(e)}",
-                level="critical",
-                additional_info={"error_key": error_key}
-            )
-            return "A critical error occurred. Please try again later."
-            
-    def _adjust_generation_parameters(self, temperature: float) -> str:
-        """Adjust generation parameters for non-critical errors."""
-        try:
-            # Adjust generation parameters
-            current_temp = self.context.config_handler.config_manager.get("generation_config.temperature", 1.0)
-            new_temp = max(0.5, current_temp - 0.05)
-            self.context.config_handler.config_manager.update("generation_config.temperature", new_temp)
-            
-            self.logger.record_event(
-                event_type="generation_adjustment",
-                message="Adjusted generation parameters",
-                level="info",
-                additional_info={
-                    "old_temperature": current_temp,
-                    "new_temperature": new_temp,
-                    "temperature": temperature
-                }
-            )
-            
-            return "System adjusted parameters. Please try your request again."
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="adjustment_failed",
-                message=f"Failed to adjust generation parameters: {str(e)}",
-                level="error"
-            )
-            return "An error occurred. Please try again."
+### 2. Model Management (`ModelManager`, `ModelLoader`)
 
-    def _recover_data(self, error_key: str) -> None:
-        """Recover from critical data errors."""
-        try:
-            self.error_counts[error_key] = 0
-            
-            # Reset data parameters
-            self.context.config_handler.config_manager.update("data_config.batch_size", 1)
-            self.context.config_handler.config_manager.update("data_config.max_retries", 3)
-            
-            self.logger.record_event(
-                event_type="data_recovery",
-                message="Recovered from critical data error",
-                level="info",
-                additional_info={"error_key": error_key}
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from data error: {str(e)}",
-                level="critical",
-                additional_info={"error_key": error_key}
-            )
+- **Function**: Manages loading, configuration, and switching of base and scaffold models.
+- **Key Features**:
+  - Supports dynamic model switching (e.g., GPT-2, BERT) for task-specific performance.
+  - Applies LoRA adapters to scaffold models (rank: 8, alpha: 16, dropout: 0.1) for efficient updates.
+  - Supports quantization modes (fp16, int8, int4) to optimize resources.
+  - Validates model configurations (e.g., model path, type, quantization mode) before loading.
+- **Operation**:
+  - Loads models and tokenizers from local paths or Hugging Face, ensuring configuration validity.
+  - Configures LoRA adapters for scaffold models, targeting attention and projection layers.
+  - Switches models via CLI, clearing memory to prevent conflicts.
+- **Technical Details**:
+  - Configurable parameters via `core_config` and `lora_config`.
+  - Uses `transformers` and `bitsandbytes` for model management and quantization.
+  - Thread-safe with `Lock` for model operations.
 
-    def _adjust_data_parameters(self, context: Dict[str, Any]) -> None:
-        """Adjust data parameters for non-critical errors."""
-        try:
-            # Adjust data parameters
-            current_batch_size = self.context.config_handler.config_manager.get("data_config.batch_size", 32)
-            new_batch_size = max(1, current_batch_size // 2)
-            self.context.config_handler.config_manager.update("data_config.batch_size", new_batch_size)
-            
-            self.logger.record_event(
-                event_type="data_adjustment",
-                message="Adjusted data parameters",
-                level="info",
-                additional_info={
-                    "old_batch_size": current_batch_size,
-                    "new_batch_size": new_batch_size,
-                    "context": context
-                }
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="adjustment_failed",
-                message=f"Failed to adjust data parameters: {str(e)}",
-                level="error"
-            )
+### 3. State and Memory Management
 
-    def _record_error(self, error: Exception, error_type: str, context: Dict[str, Any] = None) -> None:
-        """Record an error in the history."""
-        error_entry = {
-            "type": error_type,
-            "message": str(error),
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc(),
-            "context": context or {}
-        }
-        self.recent_errors.append(error_entry)
-        self.error_counts[f"{error_type}:{type(error).__name__}"] += 1
+#### 3.1 State Management (`StateManager`, `StateTracker`)
 
-class MemoryMonitor:
-    """Monitors system memory health."""
+- **Function**: Tracks and persists system state, including curiosity, confidence, and temperament.
+- **Key Features**:
+  - Maintains state history (max: 100 states) and changes (max: 50) for diagnostics.
+  - Provides debug tools (`get_debug_info`) for state analysis (e.g., memory usage, recent changes).
+  - Supports persistent storage with configurable save intervals and backups (max: 5).
+- **Operation**:
+  - Serializes state to JSON (`_final.json` suffix), validating state hashes.
+  - Updates state with thread-safe operations, logging changes.
+  - Clears history during shutdown to optimize resources.
+- **Technical Details**:
+  - Configurable parameters (save interval, backup limit) via `orchestrator_config`.
+  - Thread-safe with reentrant locking.
 
-    def __init__(self, context: SystemContext):
-        """Initialize the memory monitor with context."""
-        self.context = context
-        self.memory_manager = MemoryManager(context)
+#### 3.2 Memory Management (`MemoryManager`)
 
-    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
-        """Check memory health and handle any errors."""
-        try:
-            is_healthy = self.memory_manager.check_memory_health(model_size, trainer)
-            self.context.logger.log_memory_health(
-                model_size=model_size,
-                trainer=trainer,
-                health_status="healthy" if is_healthy else "unhealthy",
-                device=self.context.device
-            )
-            return is_healthy
-        except Exception as e:
-            # Handle memory errors through ErrorManager
-            self.context.error_manager.handle_memory_error(e, model_size)
-            return False
+- **Function**: Organizes experiences, including dream memories, conversation histories, and scaffold context.
+- **Key Features**:
+  - Stores experiences as tensors with metadata (e.g., timestamps), weighted by confidence.
+  - Manages dream memories (max: 100), conversation histories (max: 50), and token maps.
+  - Applies decay (0.95) and prune threshold (0.1) for efficiency.
+- **Operation**:
+  - Appends experiences, synchronizing with training and scaffold systems.
+  - Updates token maps with confidence-weighted values for recall.
+  - Moves unused tensors to CPU for GPU optimization.
+- **Technical Details**:
+  - Configurable parameters (max length, decay rate) via `memory_config`.
+  - Thread-safe with `Lock`.
 
-class CuriosityEngine:
-    """Manages curiosity-driven exploration and learning."""
-    
-    def __init__(
-        self,
-        config_handler: ConfigHandler,
-        model_loader: ModelLoader,
-        state_tracker: StateTracker,
-        error_manager: ErrorManager,
-        logger: Logger,
-        device: str
-    ):
-        """
-        Initialize the curiosity engine with explicit dependencies.
-        
-        Args:
-            config_handler: Configuration handler
-            model_loader: Model loader instance
-            state_tracker: State tracker instance
-            error_manager: Error manager instance
-            logger: Logger instance
-            device: Device to use for tensor operations
-        """
-        self.config_handler = config_handler
-        self.model_loader = model_loader
-        self.state_tracker = state_tracker
-        self.error_manager = error_manager
-        self.logger = logger
-        self.device = device
-        
-        # Initialize components
-        self.curiosity_manager = self._create_curiosity_manager()
-        self.cycle_manager = self._create_training_cycle_manager()
-        
-        # Log initialization
-        self.logger.record_event(
-            event_type="curiosity_engine_initialized",
-            message="Curiosity engine initialized successfully",
-            level="info"
-        )
-        
-    def _create_curiosity_manager(self) -> CuriosityManager:
-        """Create and initialize the curiosity manager."""
-        try:
-            return CuriosityManager(
-                config_manager=self.config_handler.config_manager,
-                logger=self.logger,
-                device=self.device
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "manager_creation")
-            raise
-            
-    def _create_training_cycle_manager(self) -> TrainingCycleManager:
-        """Create and initialize the training cycle manager."""
-        try:
-            return TrainingCycleManager(
-                config=self.config_handler.config_manager.get_section("sovl_config"),
-                logger=self.logger,
-                device=self.device,
-                state_manager=self.state_tracker,
-                curiosity_manager=self.curiosity_manager
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "cycle_manager_creation")
-            raise
-            
-    def _validate_configuration(self) -> bool:
-        """Validate current configuration state."""
-        try:
-            if not self.config_handler.validate():
-                self.logger.record_event(
-                    event_type="config_validation_failed",
-                    message="Configuration validation failed, attempting recovery",
-                    level="error"
-                )
-                # Attempt to refresh configuration
-                self.config_handler._refresh_configs()
-                # Re-validate after refresh
-                if not self.config_handler.validate():
-                    self.logger.record_event(
-                        event_type="config_recovery_failed",
-                        message="Configuration recovery failed",
-                        level="error"
-                    )
-                    return False
-            return True
-        except Exception as e:
-            self.logger.record_event(
-                event_type="config_validation_error",
-                message=f"Error during configuration validation: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            return False
-            
-    def run_training_cycle(
-        self,
-        train_data: Optional[List] = None,
-        valid_data: Optional[List] = None,
-        epochs: Optional[int] = None,
-        batch_size: Optional[int] = None
-    ) -> None:
-        """Run a training cycle with configuration validation."""
-        try:
-            # Validate configuration before proceeding
-            if not self._validate_configuration():
-                raise RuntimeError("Invalid configuration state")
-                
-            # Validate DataManager state
-            if not hasattr(self.cycle_manager, 'data_manager'):
-                raise RuntimeError("DataManager not initialized in cycle manager")
-                
-            if not hasattr(self.cycle_manager.data_manager, 'provider'):
-                raise RuntimeError("DataManager provider not initialized")
-                
-            if not isinstance(self.cycle_manager.data_manager.provider, DataProvider):
-                raise RuntimeError(f"Invalid DataManager provider type: {type(self.cycle_manager.data_manager.provider)}")
-                
-            # Get current state
-            state = self.state_tracker.get_state()
-            
-            # Run training cycle through cycle manager
-            results = self.cycle_manager.run_training_cycle(
-                train_data=train_data,
-                valid_data=valid_data,
-                epochs=epochs,
-                batch_size=batch_size
-            )
-            
-            # Log training completion
-            self._log_event("training_complete", {
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "results": results,
-                "data_manager_state": {
-                    "provider_type": type(self.cycle_manager.data_manager.provider).__name__,
-                    "provider_initialized": hasattr(self.cycle_manager.data_manager.provider, '_initialized')
-                }
-            })
-            
-        except Exception as e:
-            self.error_manager.handle_training_error(e, batch_size or 1)
-            raise
-            
-    def _log_event(self, event: str, data: Optional[Dict] = None) -> None:
-        """Log an event with standardized fields."""
-        self.logger.record_event(
-            event_type=f"curiosity_{event}",
-            message=f"Curiosity event: {event}",
-            level="info",
-            additional_info=data
-        )
+### 4. Behavioral Drivers
 
-class SOVLSystem(SystemInterface):
-    """Main SOVL system class that manages all components and state."""
-    
-    def __init__(
-        self,
-        context: SystemContext,
-        config_handler: ConfigHandler,
-        model_loader: ModelLoader,
-        curiosity_engine: CuriosityEngine,
-        memory_monitor: MemoryMonitor,
-        state_tracker: StateTracker,
-        error_manager: ErrorManager
-    ):
-        """
-        Initialize the SOVL system with pre-initialized components.
-        
-        Args:
-            context: System context containing shared resources
-            config_handler: Configuration handler component
-            model_loader: Model loading component
-            curiosity_engine: Curiosity engine component
-            memory_monitor: Memory monitoring component
-            state_tracker: State tracking component
-            error_manager: Error management component
-        """
-        try:
-            # Validate required components
-            validate_components(
-                context=context,
-                config_handler=config_handler,
-                model_loader=model_loader,
-                curiosity_engine=curiosity_engine,
-                memory_monitor=memory_monitor,
-                state_tracker=state_tracker,
-                error_manager=error_manager
-            )
-            
-            # Store injected components
-            self.context = context
-            self.config_handler = config_handler
-            self.model_loader = model_loader
-            self.curiosity_engine = curiosity_engine
-            self.memory_monitor = memory_monitor
-            self.state_tracker = state_tracker
-            self.error_manager = error_manager
-            
-            # Initialize thread safety
-            self._lock = Lock()
-            
-            # Initialize component state
-            self._initialize_component_state()
-            
-            # Log successful initialization
-            self.context.logger.record_event(
-                event_type="system_initialized",
-                message="SOVL system initialized successfully with dependency injection",
-                level="info",
-                additional_info={
-                    "config_path": self.config_handler.config_path,
-                    "device": self.context.device,
-                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                }
-            )
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to initialize SOVL system: {str(e)}",
-                error_type="system_initialization_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_path": self.config_handler.config_path if hasattr(self, 'config_handler') else None,
-                    "device": self.context.device if hasattr(self, 'context') else None
-                }
-            )
-            raise
+#### 4.1 Curiosity Engine (`CuriosityManager`, `CuriosityEngine`)
 
-    def _initialize_component_state(self) -> None:
-        """Initialize state for all components."""
-        try:
-            components = [
-                self.curiosity_engine,
-                self.memory_monitor,
-                self.model_loader
-            ]
-            initialize_component_state(self.state_tracker, components)
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to initialize component state: {str(e)}",
-                error_type="component_state_initialization_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
+- **Function**: Drives exploration by quantifying curiosity based on ignorance and novelty.
+- **Key Features**:
+  - Computes curiosity scores (70% ignorance, 30% novelty) using confidence and cosine similarity.
+  - Triggers exploration when curiosity pressure exceeds thresholds, generating queries.
+  - Manages training cycles via `TrainingCycleManager`, integrating validated data.
+- **Operation**:
+  - Calculates ignorance from model confidence and novelty from memory embeddings.
+  - Generates exploration prompts, logged in memory.
+  - Executes training cycles with configurable epochs and batch sizes.
+- **Technical Details**:
+  - Configurable weights (ignorance: 0.7, novelty: 0.3) via `curiosity_config`.
+  - Thread-safe with locking.
+  - Integrates with `ConfidenceCalculator` and `TrainingCycleManager`.
 
-    @synchronized("_lock")
-    def toggle_memory(self, enable: bool) -> bool:
-        """Enable or disable memory management."""
-        try:
-            if not hasattr(self.memory_monitor, 'memory_manager'):
-                self.context.logger.record_event(
-                    event_type="memory_error",
-                    message="Memory manager not initialized",
-                    level="error"
-                )
-                return False
-                
-            self.memory_monitor.memory_manager.set_enabled(enable)
-            self.context.logger.record_event(
-                event_type="memory_toggle",
-                message=f"Memory management {'enabled' if enable else 'disabled'}",
-                level="info",
-                additional_info={
-                    "enabled": enable,
-                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                }
-            )
-            return True
-            
-        except Exception as e:
-            self.error_manager.handle_memory_error(e, 0)  # 0 for memory size since this is a toggle operation
-            self.context.logger.log_error(
-                error_msg=f"Failed to toggle memory management: {str(e)}",
-                error_type="memory_toggle_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "enabled": enable,
-                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                }
-            )
-            return False
+#### 4.2 Temperament System (`TemperamentSystem`)
 
-    def generate_curiosity_question(self) -> Optional[str]:
-        """Generate a curiosity-driven question."""
-        try:
-            if not hasattr(self.curiosity_engine, 'curiosity_manager'):
-                self.logger.record_event(
-                    event_type="curiosity_error",
-                    message="Curiosity manager not initialized",
-                    level="error"
-                )
-                return None
-                
-            question = self.curiosity_engine.curiosity_manager.generate_question()
-            self.logger.record_event(
-                event_type="curiosity_question_generated",
-                message="Generated curiosity question",
-                level="info",
-                additional_info={"question": question}
-            )
-            return question
-            
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "question_generation")
-            self.logger.record_event(
-                event_type="curiosity_question_error",
-                message="Failed to generate curiosity question",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            return None
+- **Function**: Models dynamic behavior via a temperament score, influencing generation and learning.
+- **Key Features**:
+  - Maintains temperament score (0.0–1.0): cautious (< 0.3), balanced (0.3–0.7), curious (> 0.7).
+  - Adjusts generation parameters (e.g., temperature) and learning rates (curious: 1.2x).
+  - Adapts based on lifecycle stage and confidence feedback.
+- **Operation**:
+  - Updates temperament using smoothed confidence and experience metrics.
+  - Applies temperament-driven adjustments, ensuring stable transitions.
+- **Technical Details**:
+  - Configurable thresholds via `controls_config`.
+  - Thread-safe with locking.
 
-    def dream(self) -> bool:
-        """Run a dream cycle to process and consolidate memories."""
-        try:
-            if not hasattr(self.curiosity_engine, 'run_dream_cycle'):
-                self.logger.record_event(
-                    event_type="dream_error",
-                    message="Dream cycle not supported",
-                    level="error"
-                )
-                return False
-                
-            self.curiosity_engine.run_dream_cycle()
-            self.logger.record_event(
-                event_type="dream_cycle_complete",
-                message="Dream cycle completed successfully",
-                level="info"
-            )
-            return True
-            
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "dream_cycle")
-            self.logger.record_event(
-                event_type="dream_cycle_error",
-                message="Failed to run dream cycle",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            return False
+#### 4.3 Confidence Tracker (`ConfidenceCalculator`)
 
-    def get_memory_stats(self) -> Dict[str, Any]:
-        """Get current memory statistics."""
-        try:
-            if not hasattr(self.memory_monitor, 'memory_manager'):
-                return {"error": "Memory manager not initialized"}
-                
-            stats = {
-                "total_allocated": self.memory_monitor.memory_manager.get_total_allocated(),
-                "peak_allocated": self.memory_monitor.memory_manager.get_peak_allocated(),
-                "current_usage": self.memory_monitor.memory_manager.get_current_usage(),
-                "available_memory": self.memory_monitor.memory_manager.get_available_memory(),
-                "fragmentation": self.memory_monitor.memory_manager.get_fragmentation(),
-                "gc_count": self.memory_monitor.memory_manager.get_gc_count()
-            }
-            
-            if torch.cuda.is_available():
-                stats.update({
-                    "gpu_allocated": torch.cuda.memory_allocated(),
-                    "gpu_cached": torch.cuda.memory_reserved(),
-                    "gpu_max_memory": torch.cuda.max_memory_allocated()
-                })
-                
-            return stats
-            
-        except Exception as e:
-            self.error_manager.handle_memory_error(e, 0)
-            return {"error": str(e)}
+- **Function**: Evaluates output reliability, guiding exploration and training.
+- **Key Features**:
+  - Computes confidence from softmax probabilities, adjusted by temperament (cautious: 0.8x, curious: 1.2x) and lifecycle (exploration: 1.1x).
+  - Maintains confidence history for error recovery.
+  - Clamps values between 0.0 and 1.0.
+- **Operation**:
+  - Processes model logits, applying modifiers.
+  - Triggers exploration or training at low confidence (threshold: 0.7).
+- **Technical Details**:
+  - Configurable parameters via `confidence_config`.
+  - Thread-safe.
 
-    def get_recent_errors(self) -> List[Dict[str, Any]]:
-        """Get list of recent errors from error manager."""
-        try:
-            if not hasattr(self, 'error_manager'):
-                return []
-                
-            return self.error_manager.get_recent_errors()
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get recent errors: {str(e)}",
-                error_type="error_retrieval_error",
-                stack_trace=traceback.format_exc()
-            )
-            return []
+### 5. Processing Systems
 
-    def get_component_status(self) -> Dict[str, bool]:
-        """Get status of all system components."""
-        try:
-            return {
-                "model_loader": hasattr(self, "model_loader"),
-                "curiosity_engine": hasattr(self, "curiosity_engine"),
-                "memory_monitor": hasattr(self, "memory_monitor"),
-                "state_tracker": hasattr(self, "state_tracker"),
-                "error_manager": hasattr(self, "error_manager"),
-                "config_handler": hasattr(self, "config_handler")
-            }
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get component status: {str(e)}",
-                error_type="component_status_error",
-                stack_trace=traceback.format_exc()
-            )
-            return {}
+#### 5.1 Scaffold Integration (`ScaffoldProvider`, `ScaffoldTokenMapper`, `CrossAttentionInjector`)
 
-    def get_system_state(self) -> Dict[str, Any]:
-        """Get current system state."""
-        try:
-            if not hasattr(self, 'state_tracker'):
-                return {"error": "State tracker not initialized"}
-                
-            state = self.state_tracker.get_state()
-            state.update({
-                "debug_mode": self.context.logger.is_debug_enabled(),
-                "last_error": self.error_manager.get_last_error() if hasattr(self, 'error_manager') else None,
-                "components": self.get_component_status(),
-                "memory_stats": self.get_memory_stats()
-            })
-            return state
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get system state: {str(e)}",
-                error_type="state_retrieval_error",
-                stack_trace=traceback.format_exc()
-            )
-            return {"error": str(e)}
+- **Function**: Enhances output quality by integrating scaffold model context.
+- **Key Features**:
+  - Aligns token spaces via `ScaffoldTokenMapper` with confidence-weighted updates (cap: 5.0).
+  - Injects scaffold context using cross-attention (`CrossAttentionInjector`).
+  - Adjusts scaffold influence based on confidence and temperament.
+- **Operation**:
+  - `ScaffoldProvider` generates context tensors.
+  - `CrossAttentionInjector` modifies base model attention layers.
+- **Technical Details**:
+  - Supports quantization (e.g., int8) via `core_config`.
+  - Uses `torch.nn` for cross-attention.
+  - Thread-safe.
 
-    def set_debug_mode(self, enabled: bool) -> None:
-        """Enable or disable debug mode."""
-        try:
-            if enabled:
-                self.context.logger.set_level(logging.DEBUG)
-                self.context.logger.record_event(
-                    event_type="debug_mode_change",
-                    message="Debug mode enabled",
-                    level="debug"
-                )
-            else:
-                self.context.logger.set_level(logging.INFO)
-                self.context.logger.record_event(
-                    event_type="debug_mode_change",
-                    message="Debug mode disabled",
-                    level="info"
-                )
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to set debug mode: {str(e)}",
-                error_type="debug_mode_error",
-                stack_trace=traceback.format_exc()
-            )
+#### 5.2 Training System (`SOVLTrainer`)
 
-    def get_execution_trace(self) -> List[Dict[str, Any]]:
-        """Get recent execution trace from logger."""
-        try:
-            if not hasattr(self.context, 'logger'):
-                return []
-                
-            return self.context.logger.get_recent_events()
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get execution trace: {str(e)}",
-                error_type="trace_retrieval_error",
-                stack_trace=traceback.format_exc()
-            )
-            return []
+- **Function**: Manages model training, including standard, sleep, and gestation cycles.
+- **Key Features**:
+  - Supports gradient accumulation and mixed-precision training.
+  - Replays dream memories during sleep, weighted by novelty.
+  - Uses LoRA adapters for scaffold updates (rank: 8, alpha: 16).
+  - Adjusts learning rates by temperament (curious: 1.2x).
+- **Operation**:
+  - Trains with scaffold-guided context.
+  - Performs gestation cycles with low learning rates (2e-5).
+- **Technical Details**:
+  - Configurable parameters (batch size: 2, learning rate: 2e-5) via `training_config`.
+  - Thread-safe.
 
-    def get_state(self) -> Dict[str, Any]:
-        """Get the current system state."""
-        with self._lock:
-            return self.state_tracker.get_state()
+#### 5.3 Memory Consolidation System (`DreamMemory`)
 
-    def update_state(self, state_dict: Dict[str, Any]) -> None:
-        """Update the system state with the provided dictionary."""
-        with self._lock:
-            try:
-                self.state_tracker.update_state(state_dict)
-                self.context.logger.record_event(
-                    event_type="state_updated",
-                    message="System state updated successfully",
-                    level="info",
-                    additional_info={
-                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                    }
-                )
-            except Exception as e:
-                self.context.logger.log_error(
-                    error_msg=f"Failed to update system state: {str(e)}",
-                    error_type="state_update_error",
-                    stack_trace=traceback.format_exc()
-                )
-                raise ValueError("Invalid state update") from e
+- **Function**: Consolidates knowledge through dreaming, enhancing learning and creativity.
+- **Key Features**:
+  - Stores 100 experiences as weighted tensors, with novelty boost (0.03).
+  - Applies decay (0.95) and prune threshold (0.1).
+  - Adds temperament-based noise (e.g., 0.02 for melancholy).
+- **Operation**:
+  - Appends experiences to a `deque`, pruning low-weight memories.
+  - Aggregates tensors during dreaming, synchronized with scaffold context.
+- **Technical Details**:
+  - Configurable parameters via `memory_config`.
+  - Thread-safe.
 
-    def shutdown(self) -> None:
-        """Shutdown the system, saving state and releasing resources."""
-        with self._lock:
-            try:
-                # Log shutdown start
-                self.context.logger.record_event(
-                    event_type="system_shutdown_start",
-                    message="Starting system shutdown process",
-                    level="info"
-                )
+### 6. User Interaction
 
-                # 1. Cleanup event dispatcher
-                self.context.event_dispatcher.cleanup()
-                self.context.logger.record_event(
-                    event_type="event_dispatcher_cleanup",
-                    message="Event dispatcher cleaned up",
-                    level="info"
-                )
+#### 6.1 Command Line Interface (CLI)
 
-                # 2. Save final state
-                self.state_tracker.state.save_state()
-                self.context.logger.record_event(
-                    event_type="state_saved",
-                    message="Final state saved",
-                    level="info"
-                )
+- **Function**: Provides robust system control via commands.
+- **Key Commands**:
+  - **Generation**: `generate`, `echo`, `mimic`.
+  - **Training**: `train`, `dream`.
+  - **Memory**: `memory`, `recall`, `recap`.
+  - **Interaction**: `muse`, `flare`, `debate`, `spark`, `reflect`.
+  - **Model Management**: `switch_model`, `set_quantization`.
+  - **System Control**: `status`, `save`, `reset`.
+- **Operation**:
+  - Commands dispatched by `SOVLOrchestrator`, synchronized via `StateManager`.
+- **Technical Details**:
+  - Configurable command history via `orchestrator_config`.
+  - Extensible via `PluginManager`.
 
-                # 3. Clear state history
-                self.state_tracker.clear_history()
-                self.context.logger.record_event(
-                    event_type="state_history_cleared",
-                    message="State history cleared",
-                    level="info"
-                )
+#### 6.2 Configuration Management (`SystemContext`, `ConfigManager`)
 
-                # 4. Clear error history
-                self.error_manager.clear_error_history()
-                self.context.logger.record_event(
-                    event_type="error_history_cleared",
-                    message="Error history cleared",
-                    level="info"
-                )
+- **Function**: Enables fine-grained control through modular configuration.
+- **Key Sections**:
+  - `core_config`: Model settings (e.g., base model: GPT-2, quantization: int8).
+  - `training_config`: Training parameters (e.g., learning rate: 2e-5, batch size: 2).
+  - `curiosity_config`: Curiosity weights (ignorance: 0.7, novelty: 0.3).
+  - `memory_config`: Memory parameters (decay: 0.95, prune threshold: 0.1).
+  - `controls_config`: Temperament thresholds (curious > 0.7).
+  - `lora_config`: LoRA settings (rank: 8, alpha: 16, dropout: 0.1).
+  - `orchestrator_config`: System settings (log size: 10 MB, save interval: 300 seconds).
+- **Operation**:
+  - Validates configurations, propagating updates via event dispatcher.
+  - Supports JSON-based files with backups.
+- **Technical Details**:
+  - Thread-safe with subscription-based notifications.
 
-                # 5. Release GPU memory if available
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    self.context.logger.record_event(
-                        event_type="gpu_memory_cleared",
-                        message="GPU memory cache cleared",
-                        level="info"
-                    )
+### 7. Resource Optimization
 
-                # 6. Final cleanup of logger
-                self.context.logger.clear_queues()
-                self.context.logger.record_event(
-                    event_type="system_shutdown_complete",
-                    message="System shutdown completed successfully",
-                    level="info"
-                )
+#### 7.1 Memory Monitoring (`MemoryMonitor`)
 
-            except Exception as e:
-                self.context.logger.log_error(
-                    error_msg=f"Failed to shutdown system: {str(e)}",
-                    error_type="shutdown_error",
-                    stack_trace=traceback.format_exc()
-                )
-                raise RuntimeError("Failed to shutdown system") from e
+- **Function**: Optimizes resource allocation by monitoring GPU/CPU usage.
+- **Key Features**:
+  - Tracks GPU statistics (allocated, cached, max memory) and fragmentation.
+  - Triggers cleanup when usage exceeds thresholds (e.g., 80%).
+  - Integrates with `MemoryManager` for health checks.
+- **Operation**:
+  - Retrieves statistics via `torch.cuda` and `MemoryManager`.
+  - Executes cleanup, moving tensors to CPU or clearing caches.
+- **Technical Details**:
+  - Configurable thresholds via `memory_config`.
+  - Thread-safe.
+
+#### 7.2 Plugin Management (`PluginManager`)
+
+- **Function**: Extends functionality through modular plugins.
+- **Key Features**:
+  - Supports dynamic plugin loading and execution.
+  - Integrates plugins with CLI and workflows.
+- **Operation**:
+  - Loads plugins specified in `orchestrator_config`.
+  - Dispatches plugin commands via `SOVLOrchestrator`.
+- **Technical Details**:
+  - Configurable plugin paths.
+  - Thread-safe.
+
+## Operational Workflow
+
+1. **Initialization**:
+   - `SOVLOrchestrator` initializes components, loading configurations and state.
+   - `ModelLoader` validates and loads models with LoRA adapters.
+
+2. **Exploration**:
+   - `CuriosityEngine` evaluates ignorance and novelty, triggering queries.
+   - Low confidence prompts exploration, logged in memory.
+
+3. **Generation**:
+   - Base model generates outputs, enhanced by scaffold context.
+   - Temperament adjusts tone; confidence validates reliability.
+
+4. **Learning**:
+   - `SOVLTrainer` updates models using data and dream replays.
+   - LoRA adapters optimize scaffold updates.
+
+5. **Consolidation**:
+   - `DreamMemory` replays memories during sleep, reinforcing patterns.
+   - `MemoryManager` stores experiences, pruning outdated tensors.
+
+6. **User Interaction**:
+   - CLI commands dispatch tasks, with state synchronized.
+
+## Memory Consolidation and Sleep Cycles
+
+- **Mechanism**:
+  - **Triggers**: Low confidence (0.7), compute intervals, or `dream` command.
+  - **Memory Replay**: Aggregates memories, weighted by novelty (0.03).
+  - **Optimization**: Fine-tunes parameters (learning rate: 2e-5, noise: 0.05).
+  - **Scaffold Integration**: Aligns memories with scaffold context.
+- **Outcomes**:
+  - Strengthened neural patterns and enhanced creativity.
+- **Technical Details**:
+  - Configurable parameters via `memory_config`.
+  - Thread-safe.
+
+## Example Workflow: Machine Learning Query
+
+1. **Initialization**:
+   - `SOVLOrchestrator` loads GPT-2 (base) and BERT (scaffold) via `ModelLoader`.
+   - State and memory initialized via `StateTracker` and `MemoryManager`.
+
+2. **Exploration**:
+   - `CuriosityEngine` detects low confidence (0.6) on “machine learning,” triggering: “What are key ML algorithms?”
+   - Query stored in memory.
+
+3. **Generation**:
+   - Base model generates response, scaffold adds depth.
+   - Balanced temperament ensures clarity; confidence (0.85) validates.
+
+4. **Memory Storage**:
+   - `MemoryManager` stores interaction (weight: 0.85).
+   - Token maps prioritize “regression,” “neural network.”
+
+5. **Consolidation and Training**:
+   - `DreamMemory` replays ML tensors, linking concepts.
+   - `SOVLTrainer` fine-tunes parameters, LoRA optimizes scaffold.
+
+6. **Subsequent Interaction**:
+   - Follow-up query retrieves tensors, enabling detailed response.
+
+## System Benefits
+
+- **Autonomous Learning**: Curiosity-driven exploration ensures continuous knowledge acquisition.
+- **Robust Consolidation**: Dream-based replay enhances learning and creativity.
+- **High-Quality Outputs**: Scaffold integration delivers coherent responses.
+- **Adaptive Behavior**: Temperament and confidence enable dynamic responses.
+- **Reliable Operation**: Sophisticated error handling ensures stability.
+- **Flexible Control**: CLI and plugins provide robust interaction.
+- **Optimized Performance**: LoRA and quantization reduce resource demands.
