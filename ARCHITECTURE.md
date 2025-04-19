@@ -146,18 +146,32 @@ SOVL’s modular architecture supports a cyclical workflow of initialization, ex
 
 #### 5.2 Training System (`SOVLTrainer`)
 
-- **Function**: Manages model training, including standard, sleep, and gestation cycles.
+- **Function**: Manages model training, including standard, sleep, and gestation cycles to refine the scaffold model.
 - **Key Features**:
-  - Supports gradient accumulation and mixed-precision training.
-  - Replays dream memories during sleep, weighted by novelty.
-  - Uses LoRA adapters for scaffold updates (rank: 8, alpha: 16).
-  - Adjusts learning rates by temperament (curious: 1.2x).
+  - Supports gradient accumulation and mixed-precision training for efficiency.
+  - Replays dream memories during sleep, weighted by novelty to enhance learning.
+  - Uses LoRA adapters for scaffold updates (rank: 8, alpha: 16, dropout: 0.1).
+  - Adjusts learning rates by temperament (curious: 1.2x, cautious: 0.8x).
 - **Operation**:
-  - Trains with scaffold-guided context.
-  - Performs gestation cycles with low learning rates (2e-5).
+  - Trains with scaffold-guided context, aligning outputs with base model stability.
+  - Performs gestation cycles with low learning rates (2e-5) for subtle refinements.
+- **Sleep and Gestation Cycles**:
+  - **Function**: Consolidates knowledge and sparks creativity by replaying dream memories, weaving experiences into the scaffold model’s patterns.
+  - **Triggers**:
+    - **Low Confidence**: Initiates sleep when `ConfidenceTracker` detects scores below 0.7, signaling uncertainty that prompts reflection.
+    - **Compute Intervals**: Triggers gestation after configurable cycles (e.g., every 1000 steps) to process accumulated experiences.
+    - **CLI Command**: Activates via `dream` command, allowing manual introspection.
+  - **Operation**:
+    - Replays up to 100 dream memories from `DreamMemory`, weighted by novelty (boost: 0.03), with temperament-based noise (e.g., 0.02 for melancholy) to inspire creative connections.
+    - Trains scaffold model with low learning rate (2e-5) and LoRA adapters, synchronizing with `CrossAttentionInjector`’s context.
+    - Prunes low-weight memories (threshold: 0.1) to optimize GPU usage, guided by `MemoryManager`.
+  - **Technical Details**:
+    - Configurable parameters (cycle interval: 1000 steps, novelty boost: 0.03) via `training_config` and `memory_config`.
+    - Thread-safe with `Lock` for memory access and training.
+    - Leverages `torch.cuda` for memory optimization during replay.
 - **Technical Details**:
   - Configurable parameters (batch size: 2, learning rate: 2e-5) via `training_config`.
-  - Thread-safe.
+  - Thread-safe with `Lock` for training operations.
 
 #### 5.3 Memory Consolidation System (`DreamMemory`)
 
@@ -210,66 +224,7 @@ SOVL’s modular architecture supports a cyclical workflow of initialization, ex
 
 ## Operational Workflow
 
-1. **Initialization**:
-   - `SOVLOrchestrator` initializes components, loading configurations and state.
-   - `ModelLoader` validates and loads models with LoRA adapters.
-
-2. **Exploration**:
-   - `CuriosityEngine` evaluates ignorance and novelty, triggering queries.
-   - Low confidence prompts exploration, logged in memory.
-
-3. **Generation**:
-   - Base model generates outputs, enhanced by scaffold context.
-   - Temperament adjusts tone; confidence validates reliability.
-
-4. **Learning**:
-   - `SOVLTrainer` updates models using data and dream replays.
-   - LoRA adapters optimize scaffold updates.
-
-5. **Consolidation**:
-   - `DreamMemory` replays memories during sleep, reinforcing patterns.
-   - `MemoryManager` stores experiences, pruning outdated tensors.
-
-6. **User Interaction**:
-   - CLI commands dispatch tasks, with state synchronized.
-
-## Memory Consolidation and Sleep Cycles
-
-- **Mechanism**:
-  - **Triggers**: Low confidence (0.7), compute intervals, or `dream` command.
-  - **Memory Replay**: Aggregates memories, weighted by novelty (0.03).
-  - **Optimization**: Fine-tunes parameters (learning rate: 2e-5, noise: 0.05).
-  - **Scaffold Integration**: Aligns memories with scaffold context.
-- **Outcomes**:
-  - Strengthened neural patterns and enhanced creativity.
-- **Technical Details**:
-  - Configurable parameters via `memory_config`.
-  - Thread-safe.
-
-## Example Workflow: Machine Learning Query
-
-1. **Initialization**:
-   - `SOVLOrchestrator` loads GPT-2 (base) and BERT (scaffold) via `ModelLoader`.
-   - State and memory initialized via `StateTracker` and `MemoryManager`.
-
-2. **Exploration**:
-   - `CuriosityEngine` detects low confidence (0.6) on “machine learning,” triggering: “What are key ML algorithms?”
-   - Query stored in memory.
-
-3. **Generation**:
-   - Base model generates response, scaffold adds depth.
-   - Balanced temperament ensures clarity; confidence (0.85) validates.
-
-4. **Memory Storage**:
-   - `MemoryManager` stores interaction (weight: 0.85).
-   - Token maps prioritize “regression,” “neural network.”
-
-5. **Consolidation and Training**:
-   - `DreamMemory` replays ML tensors, linking concepts.
-   - `SOVLTrainer` fine-tunes parameters, LoRA optimizes scaffold.
-
-6. **Subsequent Interaction**:
-   - Follow-up query retrieves tensors, enabling detailed response.
+`SOVLOrchestrator` sparks the system, awakening `CuriosityManager` to generate questions through `generate_question` when novelty or low confidence stirs exploration, as defined in `sovl_curiosity.py`. The base model crafts responses, enriched by the scaffold’s cross-attention whispers. `SOVLTrainer` refines the scaffold model with novel experiences, triggered by `ConfidenceTracker`. During sleep/gestation, `DreamMemory` weaves memories into lasting patterns, deepening SOVL’s understanding. `TemperamentManager` shapes the system’s mood, guiding its curious dance with the world.
   
 ## Conclusion
 
