@@ -84,19 +84,20 @@ SOVL’s modular architecture supports a cyclical workflow of initialization, ex
 
 #### 4.1 Curiosity Engine (`CuriosityManager`, `CuriosityEngine`)
 
-- **Function**: Drives exploration by quantifying curiosity based on ignorance and novelty.
+- **Function**: Fuels exploration by quantifying curiosity as a blend of ignorance and novelty, sparking questions that drive learning.
 - **Key Features**:
-  - Computes curiosity scores (70% ignorance, 30% novelty) using confidence and cosine similarity.
-  - Triggers exploration when curiosity pressure exceeds thresholds, generating queries.
-  - Manages training cycles via `TrainingCycleManager`, integrating validated data.
+  - Computes curiosity scores via `Curiosity.compute_curiosity` (70% ignorance, 30% novelty), using `ConfidenceCalculator`’s scores and `StateManager`’s memory embeddings, as implemented in `sovl_curiosity.py`.
+  - Triggers exploration with `CuriosityManager.generate_question` when curiosity pressure exceeds thresholds, crafting queries to probe unknown realms.
+  - Manages pressure via `CuriosityPressure`, adjusting based on confidence decay (rate: 0.95) and lifecycle stages.
+  - Integrates with `TrainingCycleManager` to initiate training on novel data.
 - **Operation**:
-  - Calculates ignorance from model confidence and novelty from memory embeddings.
-  - Generates exploration prompts, logged in memory.
-  - Executes training cycles with configurable epochs and batch sizes.
+  - Evaluates ignorance from low confidence (threshold: 0.7) and novelty via cosine similarity of memory embeddings.
+  - Generates questions by processing prompts through scaffold models, logged in `MemoryManager` for consolidation.
+  - Adapts exploration intensity with temperament (curious: 1.2x pressure) and lifecycle feedback.
 - **Technical Details**:
   - Configurable weights (ignorance: 0.7, novelty: 0.3) via `curiosity_config`.
-  - Thread-safe with locking.
-  - Integrates with `ConfidenceCalculator` and `TrainingCycleManager`.
+  - Thread-safe with `Lock` for pressure and queue management.
+  - Uses `torch.nn.CosineSimilarity` for novelty calculations.
 
 #### 4.2 Temperament System (`TemperamentSystem`)
 
