@@ -14,7 +14,7 @@ from sovl_logger import Logger
 
 class ModelManager:
     """
-    A robust module for managing model loading, initialization, and switching in the SOVL system.
+    A module for managing model loading, initialization, and switching in the SOVL system.
     Handles base model, scaffold models, tokenizers, and related configurations.
     """
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
