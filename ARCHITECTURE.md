@@ -2,7 +2,9 @@
 
 ## Overview
 
-The Self-Organizing Virtual Lifeform (SOVL) is an AI framework designed to emulate biologically inspired learning and adaptation. It integrates multiple language models via _scaffolded_ secondary language models to produce coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. Sanity is maintained by _freezing_ the base language model, and only training secondary language models. SOVL’s core capabilities include curiosity-driven exploration, dream-inspired memory consolidation, and scaffold-guided generation, orchestrated through a command-line interface (CLI) for precise control.
+The Self-Organizing Virtual Lifeform (SOVL) is an AI framework designed to emulate biologically inspired learning and adaptation. It integrates multiple language models via _scaffolded_ secondary language models to produce coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. Sanity is maintained through continuous learning by _freezing_ the base language model, and only training secondary language models. The dynamic scaffolded secondary model plugs into the hidden layers of the frozen base language model becomes an ever-evolving free-spirit, it influencing the base model's decisions through _whispering in it's ear_. Since the base model is frozen, it remains the rational core of the system while the scaffolded model is free to become whatever it wishes.
+
+SOVL’s core capabilities include curiosity-driven exploration, dream-inspired memory consolidation, and scaffold-guided generation, orchestrated through a command-line interface (CLI) for precise control.
 
 This specification details SOVL’s architecture, covering components, workflows, and configuration options. It is structured to reflect the system’s operational flow: orchestration, model management, state/memory management, behavioral drivers, processing systems, user interaction, and resource optimization.
 
