@@ -58,6 +58,17 @@ class ScaffoldTokenMapper:
             )
             raise
             
+    def _initialize_special_token_map(self):
+        """Initialize special token mapping."""
+        special_token_map = {
+            self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id if self.scaffold_tokenizer.pad_token_id is not None else self.scaffold_tokenizer.unk_token_id,
+            self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id if self.scaffold_tokenizer.eos_token_id is not None else self.scaffold_tokenizer.unk_token_id,
+            self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
+        }
+        
+        for base_id, scaffold_id in special_token_map.items():
+            self.token_map[base_id] = {'ids': [scaffold_id], 'weight': 1.0}
+            
     def _build_token_map(self):
         """Build main token mapping."""
         for base_token, base_id in self.base_tokenizer.get_vocab().items():
