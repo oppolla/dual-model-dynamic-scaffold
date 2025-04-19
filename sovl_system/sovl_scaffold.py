@@ -81,7 +81,16 @@ class ScaffoldTokenMapper:
             if not scaffold_ids or scaffold_ids == [self.scaffold_tokenizer.unk_token_id]:
                 scaffold_ids = [self.scaffold_tokenizer.unk_token_id]  # Fallback to unknown token
             
-            self.token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
+            # Check if base_token exists in the base tokenizer's vocabulary
+            if base_id in self.base_tokenizer.get_vocab().values():
+                self.token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
+            else:
+                self.logger.record_event(
+                    event_type="invalid_token_mapping",
+                    message=f"Base token '{base_token}' not found in base tokenizer vocabulary.",
+                    level="warning",
+                    additional_info={"timestamp": time.time()}
+                )
             
     def _initialize_special_token_map(self):
         """Initialize special token mapping."""
