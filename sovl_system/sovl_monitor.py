@@ -289,7 +289,7 @@ class SystemMonitor:
         state = self.state_manager.get_state()
         return {
             'confidence_history': list(state.get_confidence_history()),
-            'memory_usage': state._calculate_memory_usage(),
+            'memory_usage': state.get_memory_usage(),  # Use a public method to get memory usage
             'state_hash': state.state_hash(),
             'cache_size': len(state._cache),
             'dream_memory_size': len(state._dream_memory)

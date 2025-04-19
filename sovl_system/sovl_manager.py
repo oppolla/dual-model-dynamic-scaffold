@@ -45,107 +45,120 @@ class ModelManager:
         # Initialize models and tokenizers
         self.load_models()
 
-    def _initialize_config(self) -> None:
-        """Initialize and validate configuration parameters."""
+    def load_models(self):
+        """Load base and scaffold models along with their tokenizers."""
+        with self._memory_lock:
+            try:
+                # Clear existing models and memory first
+                self.cleanup()
+                
+                start_time = time.time()
+                self._load_base_model()
+                base_load_time = time.time() - start_time
+                
+                start_time = time.time()
+                self._load_scaffold_model()
+                scaffold_load_time = time.time() - start_time
+                
+                start_time = time.time()
+                self._load_tokenizers()
+                tokenizer_load_time = time.time() - start_time
+                
+                total_load_time = time.time() - start_time
+                
+                self._log_event(
+                    "models_loaded",
+                    "All models and tokenizers loaded successfully",
+                    level="info",
+                    additional_info={
+                        "base_model": self.base_model_name,
+                        "scaffold_model": self.scaffold_model_name,
+                        "quantization": self.quantization_mode,
+                        "load_times": {
+                            "base_model": base_load_time,
+                            "scaffold_model": scaffold_load_time,
+                            "tokenizers": tokenizer_load_time,
+                            "total": total_load_time
+                        },
+                        "memory_usage": {
+                            "base_model": self._get_model_memory_usage(self.base_model),
+                            "scaffold_model": self._get_model_memory_usage(self.scaffold_models[0]) if self.scaffold_models else None
+                        }
+                    }
+                )
+            except Exception as e:
+                # Clean up any partially loaded models
+                self.cleanup()
+                self._log_error(
+                    f"Model loading failed: {str(e)}",
+                    error_type="model_loading_error",
+                    stack_trace=traceback.format_exc(),
+                    additional_info={
+                        "base_model": self.base_model_name,
+                        "scaffold_model": self.scaffold_model_name
+                    }
+                )
+                raise
+
+    def _load_scaffold_model(self):
+        """Load the scaffold model, optionally with LoRA adapters."""
         try:
-            # Get core config section
-            core_config = self._config_manager.get_section("core_config", {})
+            start_time = time.time()
+            model_path = self.scaffold_model_path if self.scaffold_model_path else self.scaffold_model_name
+            self.scaffold_config = AutoConfig.from_pretrained(model_path)
+            config_load_time = time.time() - start_time
             
-            # Validate and set core config values
-            self.base_model_name = self._validate_config_value(
-                "base_model_name",
-                core_config.get("base_model_name", "gpt2"),
-                str
+            start_time = time.time()
+            quantization_config = self._get_quantization_config()
+            scaffold_model_raw = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                config=self.scaffold_config,
+                **quantization_config
             )
+            model_load_time = time.time() - start_time
             
-            self.base_model_path = self._validate_config_value(
-                "base_model_path",
-                core_config.get("base_model_path", None),
-                (str, type(None))
-            )
+            start_time = time.time()
+            if self.enable_lora:
+                lora_config = LoraConfig(
+                    r=self.lora_rank,
+                    lora_alpha=self.lora_alpha,
+                    target_modules=self._config_manager.get("lora_config.lora_target_modules", ["c_attn", "c_proj", "c_fc"]),
+                    lora_dropout=self.lora_dropout,
+                    bias="none",
+                    task_type=TaskType.CAUSAL_LM
+                )
+                self.scaffold_models = [get_peft_model(scaffold_model_raw, lora_config).to(self._device)]
+                lora_message = "LoRA adapters applied to scaffold model"
+            else:
+                self.scaffold_models = [scaffold_model_raw.to(self._device)]
+                lora_message = "Scaffold model loaded without LoRA adapters"
+            setup_time = time.time() - start_time
             
-            self.scaffold_model_name = self._validate_config_value(
-                "scaffold_model_name",
-                core_config.get("scaffold_model_name", "gpt2"),
-                str
-            )
-            
-            self.scaffold_model_path = self._validate_config_value(
-                "scaffold_model_path",
-                core_config.get("scaffold_model_path", None),
-                (str, type(None))
-            )
-            
-            self.quantization_mode = self._validate_config_value(
-                "quantization",
-                core_config.get("quantization", "fp16"),
-                str,
-                valid_values=["fp16", "int8", "int4"]
-            )
-            
-            # Get LoRA config section
-            lora_config = self._config_manager.get_section("lora_config", {})
-            
-            # Validate and set LoRA config values
-            self.enable_lora = self._validate_config_value(
-                "enable_lora_adapters",
-                lora_config.get("enable_lora_adapters", True),
-                bool
-            )
-            
-            self.lora_rank = self._validate_config_value(
-                "lora_rank",
-                lora_config.get("lora_rank", 8),
-                int,
-                valid_range=(1, 32)
-            )
-            
-            self.lora_alpha = self._validate_config_value(
-                "lora_alpha",
-                lora_config.get("lora_alpha", 16),
-                int,
-                valid_range=(1, 64)
-            )
-            
-            self.lora_dropout = self._validate_config_value(
-                "lora_dropout",
-                lora_config.get("lora_dropout", 0.1),
-                float,
-                valid_range=(0.0, 0.5)
-            )
-            
-            # Update config with validated values
-            core_config.update({
-                "base_model_name": self.base_model_name,
-                "base_model_path": self.base_model_path,
-                "scaffold_model_name": self.scaffold_model_name,
-                "scaffold_model_path": self.scaffold_model_path,
-                "quantization": self.quantization_mode
-            })
-            
-            lora_config.update({
-                "enable_lora_adapters": self.enable_lora,
-                "lora_rank": self.lora_rank,
-                "lora_alpha": self.lora_alpha,
-                "lora_dropout": self.lora_dropout
-            })
-            
-            self._config_manager.update_section("core_config", core_config)
-            self._config_manager.update_section("lora_config", lora_config)
-            
-            # Log successful initialization
             self._log_event(
-                "model_config_initialized",
-                "Model configuration initialized successfully",
-                level="info"
+                "scaffold_model_loaded",
+                f"{lora_message} from {'local path' if self.scaffold_model_path else 'Hugging Face hub'}: {model_path}",
+                level="info",
+                additional_info={
+                    "model_path": model_path,
+                    "lora_enabled": self.enable_lora,
+                    "load_times": {
+                        "config": config_load_time,
+                        "model": model_load_time,
+                        "setup": setup_time,
+                        "total": config_load_time + model_load_time + setup_time
+                    },
+                    "memory_usage": self._get_model_memory_usage(self.scaffold_models[0]) if self.scaffold_models else None
+                }
             )
-            
         except Exception as e:
             self._log_error(
-                f"Failed to initialize model config: {str(e)}",
-                error_type="config_error",
+                f"Failed to load scaffold model: {str(e)}",
+                error_type="scaffold_model_loading_error",
                 stack_trace=traceback.format_exc(),
-                context="config_initialization"
+                additional_info={
+                    "model_path": model_path,
+                    "lora_enabled": self.enable_lora
+                }
             )
             raise
 

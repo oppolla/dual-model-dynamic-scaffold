@@ -1570,6 +1570,8 @@ def adjust_temperature(
         
         # Calculate temperature adjustment
         temp_adjustment = mood_influence * 0.3 * temperament_score
+        
+        # Check if curiosity_pressure is valid before using it
         if curiosity_pressure is not None:
             curiosity_pressure = max(0.0, min(1.0, curiosity_pressure))
             temp_adjustment += curiosity_pressure * 0.1
