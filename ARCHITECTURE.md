@@ -1,4 +1,4 @@
-# SOVL System Architecture Specification
+# SOVL System Architecture
 
 ## Overview
 
