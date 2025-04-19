@@ -28,3 +28,59 @@ flowchart TD
     AuxSystem -->|Memory Updates| TokenMap
     AuxSystem --> Dreaming
     CuriositySystem --> AuxSystem
+
+
+graph TD
+    SysContext[SystemContext] -->|Logger, Config, Events| System[SOVLSystem]
+    System --> Engine[CuriosityEngine]
+    System --> MemMonitor[MemoryMonitor]
+    System --> StateMan[StateTracker]
+    System --> ModMan[ModelLoader]
+    System --> ConfMan[ConfigHandler]
+    System --> PlugMan[PluginManager]
+    System --> ErrMan[ErrorManager]
+    System -->|Dream Cycle| Engine
+
+    SysContext -->|Logger| Engine
+    SysContext -->|Logger| MemMonitor
+    SysContext -->|Logger| StateMan
+    SysContext -->|Logger| ModMan
+    SysContext -->|Logger| ErrMan
+    SysContext --> EventDisp[EventDispatcher]
+    EventDisp -->|Config Changes| ConfMan
+
+    Engine --> CurMan[CuriosityManager]
+    Engine --> TrainCycleMan[TrainingCycleManager]
+    CurMan --> StateMan
+    CurMan --> ScaffoldProv[ScaffoldProvider]
+    ScaffoldProv --> CrossAttn[CrossAttentionInjector]
+    ScaffoldProv --> TokenMapper[ScaffoldTokenMapper]
+    CrossAttn --> ModMan
+    TokenMapper --> MemMan[MemoryManager]
+
+    MemMonitor --> MemMan
+    MemMan --> Engine
+    MemMan --> DreamMem[DreamMemory]
+    DreamMem --> MemMan
+
+    StateMan --> Engine
+    StateMan --> CurMan
+    StateMan --> ConfTrk[ConfidenceTracker]
+    StateMan --> TempMan[TemperamentManager]
+    ConfTrk --> CurMan
+    TempMan --> CurMan
+
+    ModMan --> CurMan
+    ModMan --> ScaffoldProv
+
+    ErrMan --> System
+    ErrMan --> Engine
+    ErrMan --> MemMonitor
+    ErrMan --> MemMan
+
+    ConfMan --> System
+    ConfMan --> ModMan
+    ConfMan --> StateMan
+    ConfMan --> MemMan
+    ConfMan --> Engine
+    ConfMan --> ErrMan

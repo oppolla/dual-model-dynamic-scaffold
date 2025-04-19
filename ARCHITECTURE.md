@@ -1,260 +1,233 @@
-# SOVL System Architecture Overview
+# SOVL System Architecture
 
-## Introduction
+## Overview
 
-The Self-Organizing Virtual Lifeform (SOVL) system is an autonomous, curiosity-driven AI framework that integrates multiple language models with dynamic state tracking. At its core, SOVL uses interconnected systems—including confidence metrics, curiosity impulses, and temperament modulation—to guide its exploration, learning, and knowledge consolidation. A key feature is its sleep/gestation cycle, where the system pauses active exploration to focus on internal processing, memory consolidation, and adaptive retraining, mirroring biological learning patterns.
+The Self-Organizing Virtual Lifeform (SOVL) is an AI agent designed to emulate biologically inspired learning and adaptation. A static base language model anchors vast knowledge, while a dynamic scaffold model, fine-tuned via Low-Rank Adaptation (LoRA), captures user-specific contexts. Together, they produce flavourful, coherent, and contextually rich outputs, refined by the system’s self-directed exploration through questions that spark its curiosity.
 
-During active phases, the system explores, gathers information, and generates responses using scaffolded model interactions. In sleep/gestation phases, it consolidates memories, optimizes neural architecture, and recalibrates parameters—mirroring the cognitive benefits of biological sleep. This cyclical process, governed by confidence levels, accumulated experience, and temperament, enables stable long-term learning and adaptation.
+The dynamic scaffold model is periodically trained during sleep/gestation phases. The system finds a quiet moment to take a nap, training the scaffold on insights from the recent active period. Memory consolidation occurs here, with dreaming weaving deeper or stranger connections from past moments.
 
-The architecture orchestrates these behaviors through interconnected systems managing curiosity, confidence, temperament, and memory. Cross-attention mechanisms and scaffolded model interactions provide structured guidance throughout both phases, while a comprehensive CLI allows for human oversight without compromising the system's autonomous operation.
+SOVL’s curiosity-driven exploration, shaped by confidence and temperament, and its sleep-inspired memory consolidation enable autonomous learning, rich responses, and knowledge refinement through questioning and dreaming. Sanity is maintained as only the scaffold model evolves, the frozen base model serving as the rational anchor. The scaffold, an ever-shifting free-spirit, whispers into the base model’s hidden layers, guiding its responses. 
 
-## System Organization
+## System Architecture
 
-The system is organized around a central `SystemContext` that manages shared resources and coordinates component interactions:
+SOVL’s modular architecture supports a cyclical workflow of initialization, exploration, generation, learning, and consolidation, ensuring scalability and efficiency.
 
-*   **`SystemContext`**: Core container for system-wide resources and configuration
-    * Manages configuration validation and updates
-    * Coordinates event dispatching
-    * Provides shared logging and error handling
-    * Maintains system-wide state synchronization
+### 1. System Orchestration (`SOVLOrchestrator`, `SOVLSystem`)
 
-*   **`ErrorManager`**: Comprehensive error handling and recovery system
-    * Handles training, curiosity, memory, generation, and data errors
-    * Implements automatic recovery strategies
-    * Adjusts system parameters in response to errors
-    * Maintains error history and statistics
+- **Function**: Coordinates initialization, execution, and shutdown, integrating components via dependency injection.
+- **Key Features**:
+  - Initializes components (`ConfigManager`, `StateManager`, `PluginManager`) with validated configurations.
+  - Executes CLI workflows, dispatching commands to components.
+  - Manages state persistence (save interval: 300 seconds, max backups: 5) and resource cleanup (e.g., GPU memory).
+  - Provides system-wide methods (`generate_curiosity_question`, `dream`, `shutdown`) for operational control.
+- **Operation**:
+  - Loads configuration sections (`core_config`, `training_config`, etc.), validating completeness.
+  - Synchronizes state via `StateManager`, logging state hashes.
+  - Handles shutdown by saving state, clearing histories, and releasing resources.
+- **Technical Details**:
+  - Configurable parameters (log size: 10 MB, save suffix: `_final.json`) via `sovl_config.json`.
+  - Thread-safe with `Lock` for state and resource management.
+  - Integrates with `PluginManager` for extensibility.
 
-*   **`MemoryMonitor`**: System resource management
-    * Monitors memory health and usage
-    * Coordinates with training and generation components
-    * Implements memory optimization strategies
+### 2. Model Management (`ModelManager`, `ModelLoader`)
 
-## Core Components
+- **Function**: Manages loading, configuration, and switching of base and scaffold models.
+- **Key Features**:
+  - Supports dynamic model switching (e.g., GPT-2, BERT) for task-specific performance.
+  - Applies LoRA adapters to scaffold models (rank: 8, alpha: 16, dropout: 0.1) for efficient updates.
+  - Supports quantization modes (fp16, int8, int4) to optimize resources.
+  - Validates model configurations (e.g., model path, type, quantization mode) before loading.
+- **Operation**:
+  - Loads models and tokenizers from local paths or Hugging Face, ensuring configuration validity.
+  - Configures LoRA adapters for scaffold models, targeting attention and projection layers.
+  - Switches models via CLI, clearing memory to prevent conflicts.
+- **Technical Details**:
+  - Configurable parameters via `core_config` and `lora_config`.
+  - Uses `transformers` and `bitsandbytes` for model management and quantization.
+  - Thread-safe with `Lock` for model operations.
 
-*   **`SOVLOrchestrator`**: Central coordination system
-    * Manages system initialization and shutdown
-    * Coordinates component interactions
-    * Handles state synchronization
-    * Implements error recovery strategies
-    * Manages configuration updates
-    * Provides CLI interface for system interaction
-    * Handles system state persistence and recovery
+### 3. State and Memory Management
 
-*   **`GenerationManager`**: Text generation and scaffold integration
-    * Manages base and scaffold model interactions
-    * Implements dynamic parameter adjustment
-    * Handles memory optimization during generation
-    * Manages temperament and confidence-based generation
-    * Implements repetition detection and handling
-    * Provides context-aware generation parameters
-    * Manages cross-attention mechanisms
+#### 3.1 State Management (`StateManager`, `StateTracker`)
 
-*   **`ModelManager`**: Loads, configures, and provides access to the base and scaffold language models.
-*   **`Scaffold Components` (`ScaffoldProvider`, `ScaffoldTokenMapper`, `CrossAttentionInjector`)**: Facilitate the interaction between the scaffold model and the base model, typically guiding the base model's generation via cross-attention mechanisms.
-*   **`StateManager` (`SOVLState`)**: Tracks and manages the system's dynamic internal state, including metrics like novelty, confidence, and temperament, which influence overall behavior.
-*   **`MemoryManager`**: Stores, retrieves, and manages the system's experiences or memories, playing a key role in learning, consolidation, and novelty detection.
-*   **`CuriosityEngine` (`sovl_curiosity`)**: Calculates the system's curiosity based on internal state (novelty, ignorance). High curiosity drives exploration by triggering targeted learning cycles or generating probing questions, making the system dynamically seek new information.
-*   **`ConfidenceTracker` (`sovl_confidence`)**: Monitors the confidence of the model's outputs. Low confidence can dynamically trigger learning, influence curiosity, or adjust generation parameters (like temperature) to promote exploration or caution.
-*   **`TemperamentManager` (`sovl_temperament`)**: Models the system's internal "mood" (e.g., eager, sluggish). Temperament dynamically influences other systems, potentially affecting learning rate, curiosity thresholds, dream patterns, or generation temperature, adding another layer of behavioral variability.
-*   **`SOVLTrainer` (`sovl_trainer`)**: Executes model training steps with advanced lifecycle management:
-    * **Sleep/Gestation System**: 
-      * Implements biologically-inspired learning cycles with distinct active and dormant phases
-      * During sleep phases, performs memory consolidation and neural optimization
-      * Gestation phases focus on internal processing and parameter recalibration
-      * Dynamically triggered by confidence levels, accumulated experience, or explicit commands
-    * **Training Workflow**:
-      * Manages standard training cycles with scaffold model integration
-      * Handles specialized sleep training for memory consolidation
-      * Implements dream cycles for experience replay and novelty reinforcement
-      * Coordinates with CuriosityEngine for exploration-driven learning
-    * **Lifecycle Management**:
-      * Tracks data exposure and model capacity
-      * Adjusts learning intensity based on lifecycle stage
-      * Implements sigmoid-based lifecycle weighting for gradual transitions
-    * **Dynamic Adaptation**:
-      * Adjusts training parameters based on confidence and temperament
-      * Modifies learning rates and warmup periods according to system mood
-      * Implements memory-aware batch sizing and gradient accumulation
+- **Function**: Tracks and persists system state, including curiosity, confidence, and temperament.
+- **Key Features**:
+  - Maintains state history (max: 100 states) and changes (max: 50) for diagnostics.
+  - Provides debug tools (`get_debug_info`) for state analysis (e.g., memory usage, recent changes).
+  - Supports persistent storage with configurable save intervals and backups (max: 5).
+- **Operation**:
+  - Serializes state to JSON (`_final.json` suffix), validating state hashes.
+  - Updates state with thread-safe operations, logging changes.
+  - Clears history during shutdown to optimize resources.
+- **Technical Details**:
+  - Configurable parameters (save interval, backup limit) via `orchestrator_config`.
+  - Thread-safe with reentrant locking.
 
-## Training Subsystems
+#### 3.2 Memory Management (`MemoryManager`)
 
-*   **Dream Memory System**:
-    * Thread-safe memory management for storing and retrieving dream experiences
-    * Implements novelty-based memory weighting and automatic pruning
-    * Applies temperament-adjusted noise to stored memories
-    * Maintains memory decay and capacity limits
+- **Function**: Organizes experiences, including dream memories, conversation histories, and scaffold context.
+- **Key Features**:
+  - Stores experiences as tensors with metadata (e.g., timestamps), weighted by confidence.
+  - Manages dream memories (max: 100), conversation histories (max: 50), and token maps.
+  - Applies decay (0.95) and prune threshold (0.1) for efficiency.
+- **Operation**:
+  - Appends experiences, synchronizing with training and scaffold systems.
+  - Updates token maps with confidence-weighted values for recall.
+  - Moves unused tensors to CPU for GPU optimization.
+- **Technical Details**:
+  - Configurable parameters (max length, decay rate) via `memory_config`.
+  - Thread-safe with `Lock`.
 
-*   **Lifecycle Manager**:
-    * Tracks model exposure to data and compute resources
-    * Calculates lifecycle weights using configurable curves (sigmoid/exponential)
-    * Adjusts training intensity based on lifecycle stage
-    * Coordinates with temperament system for mood-aware learning
+### 4. Behavioral Drivers
 
-*   **Training Workflow Manager**:
-    * Orchestrates standard training, sleep training, and gestation cycles
-    * Handles event logging and state updates for each cycle type
-    * Manages batch preparation and scaffold integration
-    * Implements dry-run capabilities for testing
+#### 4.1 Curiosity Engine (`CuriosityManager`, `CuriosityEngine`)
 
-## Sleep/Gestation Mechanics
+- **Function**: Fuels exploration by quantifying curiosity as a blend of ignorance and novelty, sparking questions that drive learning.
+- **Key Features**:
+  - Computes curiosity scores via `Curiosity.compute_curiosity` (70% ignorance, 30% novelty), using `ConfidenceCalculator`’s scores and `StateManager`’s memory embeddings, as implemented in `sovl_curiosity.py`.
+  - Triggers exploration with `CuriosityManager.generate_question` when curiosity pressure exceeds thresholds, crafting queries to probe unknown realms.
+  - Manages pressure via `CuriosityPressure`, adjusting based on confidence decay (rate: 0.95) and lifecycle stages.
+  - Integrates with `TrainingCycleManager` to initiate training on novel data.
+- **Operation**:
+  - Evaluates ignorance from low confidence (threshold: 0.7) and novelty via cosine similarity of memory embeddings.
+  - Generates questions by processing prompts through scaffold models, logged in `MemoryManager` for consolidation.
+  - Adapts exploration intensity with temperament (curious: 1.2x pressure) and lifecycle feedback.
+- **Technical Details**:
+  - Configurable weights (ignorance: 0.7, novelty: 0.3) via `curiosity_config`.
+  - Thread-safe with `Lock` for pressure and queue management.
+  - Uses `torch.nn.CosineSimilarity` for novelty calculations.
 
-The sleep/gestation system implements several key mechanisms:
+#### 4.2 Temperament System (`TemperamentSystem`)
 
-1. **Phase Triggers**:
-   * Automatic triggering based on confidence thresholds
-   * Manual triggering via CLI commands
-   * Scheduled triggering after specific compute intervals
+- **Function**: Models dynamic behavior via a temperament score, influencing generation and learning.
+- **Key Features**:
+  - Maintains temperament score (0.0–1.0): cautious (< 0.3), balanced (0.3–0.7), curious (> 0.7).
+  - Adjusts generation parameters (e.g., temperature) and learning rates (curious: 1.2x).
+  - Adapts based on lifecycle stage and confidence feedback.
+- **Operation**:
+  - Updates temperament using smoothed confidence and experience metrics.
+  - Applies temperament-driven adjustments, ensuring stable transitions.
+- **Technical Details**:
+  - Configurable thresholds via `controls_config`.
+  - Thread-safe with locking.
 
-2. **Memory Processing**:
-   * Experience replay from dream memory
-   * Novelty reinforcement through weighted sampling
-   * Memory pruning and optimization
+#### 4.3 Confidence Tracker (`ConfidenceCalculator`)
 
-3. **Neural Optimization**:
-   * Parameter recalibration with reduced learning rates
-   * Gradient noise injection for regularization
-   * Attention pattern refinement
+- **Function**: Evaluates output reliability, guiding exploration and training.
+- **Key Features**:
+  - Computes confidence from softmax probabilities, adjusted by temperament (cautious: 0.8x, curious: 1.2x) and lifecycle (exploration: 1.1x).
+  - Maintains confidence history for error recovery.
+  - Clamps values between 0.0 and 1.0.
+- **Operation**:
+  - Processes model logits, applying modifiers.
+  - Triggers exploration or training at low confidence (threshold: 0.7).
+- **Technical Details**:
+  - Configurable parameters via `confidence_config`.
+  - Thread-safe.
 
-4. **State Synchronization**:
-   * Coordinated pausing of active components
-   * Resource reallocation for consolidation
-   * Gradual reactivation with updated parameters
+### 5. Processing Systems
 
-## Command Line Interface (CLI)
+#### 5.1 Scaffold Integration (`ScaffoldProvider`, `ScaffoldTokenMapper`, `CrossAttentionInjector`)
 
-The system provides a comprehensive CLI for interaction and control:
+- **Function**: Enhances output quality by integrating scaffold model context.
+- **Key Features**:
+  - Aligns token spaces via `ScaffoldTokenMapper` with confidence-weighted updates (cap: 5.0).
+  - Injects scaffold context using cross-attention (`CrossAttentionInjector`).
+  - Adjusts scaffold influence based on confidence and temperament.
+- **Operation**:
+  - `ScaffoldProvider` generates context tensors.
+  - `CrossAttentionInjector` modifies base model attention layers.
+- **Technical Details**:
+  - Supports quantization (e.g., int8) via `core_config`.
+  - Uses `torch.nn` for cross-attention.
+  - Thread-safe.
 
-*   **`CommandHandler`**: Manages user commands and system responses
-    * Provides command history and search functionality
-    * Implements command validation and execution
-    * Handles system status and configuration display
-    * Manages debug and monitoring commands
+#### 5.2 Training System (`SOVLTrainer`)
 
-*   **Command Categories**:
-    * System: quit, exit, save, load, reset, status, help, monitor
-    * Training: train, dream
-    * Generation: generate, echo, mimic
-    * Memory: memory, recall, forget, recap
-    * Interaction: muse, flare, debate, spark, reflect
-    * Debug: log, config, panic, glitch
-    * Advanced: tune, rewind
-    * History: history
+- **Function**: Manages model training, including standard, sleep, and gestation cycles to refine the scaffold model.
+- **Key Features**:
+  - Supports gradient accumulation and mixed-precision training for efficiency.
+  - Replays dream memories during sleep, weighted by novelty to enhance learning.
+  - Uses LoRA adapters for scaffold updates (rank: 8, alpha: 16, dropout: 0.1).
+  - Adjusts learning rates by temperament (curious: 1.2x, cautious: 0.8x).
+- **Operation**:
+  - Trains with scaffold-guided context, aligning outputs with base model stability.
+  - Performs gestation cycles with low learning rates (2e-5) for subtle refinements.
+- **Sleep and Gestation Cycles**:
+  - **Function**: Consolidates knowledge and sparks creativity by replaying dream memories, weaving experiences into the scaffold model’s patterns.
+  - **Triggers**:
+    - **Low Confidence**: Initiates sleep when `ConfidenceTracker` detects scores below 0.7, signaling uncertainty that prompts reflection.
+    - **Compute Intervals**: Triggers gestation after configurable cycles (e.g., every 1000 steps) to process accumulated experiences.
+    - **CLI Command**: Activates via `dream` command, allowing manual introspection.
+  - **Operation**:
+    - Replays up to 100 dream memories from `DreamMemory`, weighted by novelty (boost: 0.03), with temperament-based noise (e.g., 0.02 for melancholy) to inspire creative connections.
+    - Trains scaffold model with low learning rate (2e-5) and LoRA adapters, synchronizing with `CrossAttentionInjector`’s context.
+    - Prunes low-weight memories (threshold: 0.1) to optimize GPU usage, guided by `MemoryManager`.
+  - **Technical Details**:
+    - Configurable parameters (cycle interval: 1000 steps, novelty boost: 0.03) via `training_config` and `memory_config`.
+    - Thread-safe with `Lock` for memory access and training.
+    - Leverages `torch.cuda` for memory optimization during replay.
+- **Technical Details**:
+  - Configurable parameters (batch size: 2, learning rate: 2e-5) via `training_config`.
+  - Thread-safe with `Lock` for training operations.
 
-## Configuration Management
+#### 5.3 Memory Consolidation System (`DreamMemory`)
 
-The system uses a robust configuration management system:
+- **Function**: Consolidates knowledge through dreaming, enhancing learning and creativity.
+- **Key Features**:
+  - Stores 100 experiences as weighted tensors, with novelty boost (0.03).
+  - Applies decay (0.95) and prune threshold (0.1).
+  - Adds temperament-based noise (e.g., 0.02 for melancholy).
+- **Operation**:
+  - Appends experiences to a `deque`, pruning low-weight memories.
+  - Aggregates tensors during dreaming, synchronized with scaffold context.
+- **Technical Details**:
+  - Configurable parameters via `memory_config`.
+  - Thread-safe.
 
-*   **`ConfigManager`**: Central configuration management
-    * Validates configuration values and ranges
-    * Manages configuration updates and persistence
-    * Provides type-safe configuration access
-    * Implements configuration change notifications
-    * Handles configuration profiles and tuning
+### 6. User Interaction
 
-*   **Configuration Sections**:
-    * core_config: Base system configuration
-    * training_config: Training parameters and settings
-    * curiosity_config: Curiosity engine settings
-    * cross_attn_config: Cross-attention mechanism settings
-    * controls_config: System control parameters
-    * lora_config: LoRA adapter settings
-    * orchestrator_config: Orchestrator-specific settings
+#### 6.1 Command Line Interface (CLI)
 
-## Core Workflow & Dynamic Interactions
+- **Function**: Provides robust system control via commands.
+- **Key Commands**:
+  - **Generation**: `generate`, `echo`, `mimic`.
+  - **Training**: `train`, `dream`.
+  - **Memory**: `memory`, `recall`, `recap`.
+  - **Interaction**: `muse`, `flare`, `debate`, `spark`, `reflect`.
+  - **Model Management**: `switch_model`, `set_quantization`.
+  - **System Control**: `status`, `save`, `reset`.
+- **Operation**:
+  - Commands dispatched by `SOVLOrchestrator`, synchronized via `StateManager`.
+- **Technical Details**:
+  - Configurable command history via `orchestrator_config`.
+  - Extensible via `PluginManager`.
 
-The system operates through a layered architecture:
+#### 6.2 Configuration Management (`SystemContext`, `ConfigManager`)
 
-1. **Initialization Layer**:
-   * `SystemContext` initializes and validates configuration
-   * Components are initialized with shared resources
-   * Event dispatcher establishes communication channels
-   * `SOVLOrchestrator` coordinates component setup
+- **Function**: Enables fine-grained control through modular configuration.
+- **Key Sections**:
+  - `core_config`: Model settings (e.g., base model: GPT-2, quantization: int8).
+  - `training_config`: Training parameters (e.g., learning rate: 2e-5, batch size: 2).
+  - `curiosity_config`: Curiosity weights (ignorance: 0.7, novelty: 0.3).
+  - `memory_config`: Memory parameters (decay: 0.95, prune threshold: 0.1).
+  - `controls_config`: Temperament thresholds (curious > 0.7).
+  - `lora_config`: LoRA settings (rank: 8, alpha: 16, dropout: 0.1).
+  - `orchestrator_config`: System settings (log size: 10 MB, save interval: 300 seconds).
+- **Operation**:
+  - Validates configurations, propagating updates via event dispatcher.
+  - Supports JSON-based files with backups.
+- **Technical Details**:
+  - Thread-safe with subscription-based notifications.
 
-2. **Operation Layer**:
-   * `SOVLOrchestrator` directs system operation using models from `ModelManager`
-   * `GenerationManager` handles text generation with scaffold integration
-   * `ConfidenceTracker` assesses output confidence
-   * `TemperamentManager` updates system mood based on activity
-   * `MemoryMonitor` ensures resource availability
+## Operational Workflow
 
-3. **Learning Layer**:
-   * High curiosity or low confidence triggers `SOVLTrainer`
-   * Sleep/Gestation phases enable focused training
-   * Temperament modulates learning intensity
-   * Error handling and recovery maintain system stability
-   * Memory consolidation occurs during dream cycles
+`SOVLOrchestrator` sparks the system, awakening `CuriosityManager` to generate questions through `generate_question` when novelty or low confidence stirs exploration, as defined in `sovl_curiosity.py`. 
 
-4. **Memory Layer**:
-   * Experiences stored in `MemoryManager`
-   * Dream cycles consolidate memories
-   * Novelty detection influences curiosity
-   * State history informs future decisions
-   * Memory optimization strategies are applied
+The base model crafts responses, enriched by the scaffold’s cross-attention whispers. 
 
-## Core Interaction Diagram
+`SOVLTrainer` refines the scaffold model with novel experiences, triggered by `ConfidenceTracker`. 
 
-```mermaid
-graph TD
-    SystemContext[SystemContext] --> Orchestrator[SOVLOrchestrator]
-    SystemContext --> ErrorMan(ErrorManager)
-    SystemContext --> MemMon(MemoryMonitor)
-    
-    Orchestrator --> GenMan(GenerationManager)
-    Orchestrator --> Engine(CuriosityEngine)
-    Orchestrator --> MemMan(MemoryManager)
-    Orchestrator --> StateMan(StateManager)
-    Orchestrator --> Trainer(SOVLTrainer)
-    Orchestrator --> ModMan(ModelManager)
-    Orchestrator --> ConfTrk(ConfidenceTracker)
-    Orchestrator --> TempMan(TemperamentManager)
+During sleep/gestation, `DreamMemory` weaves memories into lasting patterns, deepening SOVL’s understanding. 
 
-    ErrorMan --> Engine
-    ErrorMan --> Trainer
-    ErrorMan --> MemMan
-    ErrorMan --> GenMan
-
-    MemMon --> Trainer
-    MemMon --> MemMan
-    MemMon --> GenMan
-
-    GenMan --> StateMan
-    GenMan --> MemMan
-    GenMan --> ModMan
-    GenMan --> ConfTrk
-    GenMan --> TempMan
-
-    Engine --> StateMan
-    Engine --> MemMan
-    Engine --> Trainer
-    Engine --> TempMan
-
-    ConfTrk --> StateMan
-    ConfTrk --> Engine
-    ConfTrk --> Trainer
-    ConfTrk --> GenMan
-
-    TempMan --> StateMan
-    TempMan --> Engine
-    TempMan --> Trainer
-    TempMan --> GenMan
-
-    Trainer --> MemMan
-    Trainer --> StateMan
-
-    MemMan --> Engine
-
-    StateMan -- Feeds --> Engine
-    StateMan -- Feeds --> ConfTrk
-    StateMan -- Feeds --> TempMan
-
-    ModMan -- Provides Models --> Orchestrator
-    ModMan -- Provides Models --> Trainer
-    ModMan -- Provides Models --> GenMan
-
-    subgraph Model Interaction
-        ModMan --> BaseModel[Base Model]
-        ModMan --> ScaffoldModel[Scaffold Model]
-        ScaffoldModel --> ScaffoldComponents[Scaffold Components]
-        ScaffoldComponents --> BaseModel
-    end
-```
+`TemperamentManager` shapes the system’s mood, guiding its curious dance with the world.
