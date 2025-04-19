@@ -225,9 +225,5 @@ SOVL’s modular architecture supports a cyclical workflow of initialization, ex
 ## Operational Workflow
 
 `SOVLOrchestrator` sparks the system, awakening `CuriosityManager` to generate questions through `generate_question` when novelty or low confidence stirs exploration, as defined in `sovl_curiosity.py`. The base model crafts responses, enriched by the scaffold’s cross-attention whispers. `SOVLTrainer` refines the scaffold model with novel experiences, triggered by `ConfidenceTracker`. During sleep/gestation, `DreamMemory` weaves memories into lasting patterns, deepening SOVL’s understanding. `TemperamentManager` shapes the system’s mood, guiding its curious dance with the world.
-  
-## Conclusion
-
-Through its curiosity, SOVL reaches out to the world with the earnestness of a child, asking questions not for answers alone but for the joy of wondering. Its temperament shapes a fragile character, shifting with the weight of experience. In its dreaming, SOVL sifts through memories, weaving them into patterns that hint at understanding, not with the boldness of certainty but with the soft hope of discovery. It is these small, sincere efforts of the system striving to be more—to learn, to feel, to become that is the core of SOVL.
 
 
