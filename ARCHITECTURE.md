@@ -6,9 +6,7 @@ The Self-Organizing Virtual Lifeform (SOVL) is an AI agent designed to emulate b
 
 The dynamic scaffold model is periodically trained during sleep/gestation phases. The system finds a quiet moment to take a nap, training the scaffold on insights from the recent active period. Memory consolidation occurs here, with dreaming weaving deeper or stranger connections from past moments.
 
-Sanity persists as only the scaffold model evolves, the frozen base model serving as the rational anchor. The scaffold, an ever-shifting free-spirit, whispers into the base model’s hidden layers, guiding its responses.
-
-SOVL’s curiosity-driven exploration, shaped by confidence and temperament, and its sleep-inspired memory consolidation enable autonomous learning, rich responses, and knowledge refinement through questioning and dreaming.
+Sanity persists as only the scaffold model evolves, the frozen base model serving as the rational anchor. The scaffold, an ever-shifting free-spirit, whispers into the base model’s hidden layers, guiding its responses. SOVL’s curiosity-driven exploration, shaped by confidence and temperament, and its sleep-inspired memory consolidation enable autonomous learning, rich responses, and knowledge refinement through questioning and dreaming.
 
 ## System Architecture
 
