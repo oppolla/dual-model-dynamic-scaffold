@@ -135,6 +135,15 @@ def dynamic_batch_size(
     if not torch.cuda.is_available():
         return base_size
     
+    # Check if base_size is a positive integer
+    if base_size <= 0:
+        if logger:
+            logger.log_error(
+                error_msg="Base batch size must be a positive integer.",
+                error_type="batch_size_error"
+            )
+        return 1  # Default to 1 if base_size is invalid
+    
     try:
         memory_threshold = config_manager.get("memory_config.memory_threshold", 0.8)
         safety_factor = config_manager.get("memory_config.safety_factor", 0.9)
@@ -164,6 +173,19 @@ def dynamic_batch_size(
                 }
             )
         return adjusted
+    
+    except Exception as e:
+        if logger:
+            logger.log_error(
+                error_msg=f"Dynamic batch size failed: {str(e)}",
+                error_type="batch_size_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "base_size": base_size,
+                    "error": str(e)
+                }
+            )
+        return max(1, base_size // 4)
     
     except Exception as e:
         if logger:

@@ -83,11 +83,6 @@ class CommandHandler(cmd.Cmd):
         print("SOVL Interactive CLI")
         print("Type 'help' for available commands")
         
-    def postcmd(self, stop, line):
-        """Called after each command execution."""
-        self.current_index = -1
-        return stop
-        
     def do_help(self, arg):
         """Show help for commands."""
         if arg:
@@ -109,15 +104,9 @@ class CommandHandler(cmd.Cmd):
             # Show all commands
             print("\nAvailable commands:")
             print("------------------")
-            print("help [command]    - Show help for commands")
-            print("status           - Show system status")
-            print("pause            - Pause the current operation")
-            print("resume           - Resume the current operation")
-            print("metrics          - Show current metrics")
-            print("config           - Show current configuration")
-            print("exit             - Exit the CLI")
-            print("history          - Show command history")
-            print("search <query>   - Search command history")
+            for category, commands in COMMAND_CATEGORIES.items():
+                print(f"{category}: {', '.join(commands)}")
+            print("Type 'help [command]' for more information on a specific command.")
             
     def do_status(self, arg):
         """Show system status."""

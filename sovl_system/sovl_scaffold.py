@@ -64,7 +64,12 @@ class ScaffoldTokenMapper:
             normalized = base_token.replace("Ġ", "").replace("##", "")
             scaffold_ids = self.scaffold_tokenizer.encode(
                 normalized, add_special_tokens=False, max_length=3, truncation=True
-            ) or [self.scaffold_tokenizer.unk_token_id]
+            )
+            
+            # Ensure scaffold_ids is not empty and contains valid tokens
+            if not scaffold_ids or scaffold_ids == [self.scaffold_tokenizer.unk_token_id]:
+                scaffold_ids = [self.scaffold_tokenizer.unk_token_id]  # Fallback to unknown token
+            
             self.token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
             
     def _initialize_special_token_map(self):
@@ -1115,15 +1120,24 @@ class ScaffoldProvider:
                 tokenizer_path = self._config_manager.get("scaffold_config.tokenizer_path")
                 quantization_mode = self._config_manager.get("scaffold_config.quantization_mode")
                 
-                self._scaffold_state["scaffold_model"] = self._load_model(
+                # Load the scaffold model
+                scaffold_model = self._load_model(
                     model_path=model_path,
                     model_type=model_type,
                     quantization_mode=quantization_mode
                 )
+                if scaffold_model is None:
+                    raise RuntimeError("Failed to load scaffold model.")
                 
+                # Load the tokenizer
+                scaffold_tokenizer = self._load_tokenizer(tokenizer_path)
+                if scaffold_tokenizer is None:
+                    raise RuntimeError("Failed to load scaffold tokenizer.")
+                
+                self._scaffold_state["scaffold_model"] = scaffold_model
                 self._scaffold_state["token_map"] = self._build_token_map(
-                    base_tokenizer=self._scaffold_state["scaffold_model"].tokenizer,
-                    scaffold_tokenizer=self._load_tokenizer(tokenizer_path)
+                    base_tokenizer=scaffold_model.tokenizer,
+                    scaffold_tokenizer=scaffold_tokenizer
                 )
                 
                 self._scaffold_state["is_initialized"] = True

@@ -694,7 +694,7 @@ class SOVLState(StateBase):
             self.temperament_score = 0.0
             self.last_temperament_score = 0.0
             self.temperament_history = deque(maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5))
-            self.dream_memory = deque(maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10))
+            self.dream_memory = deque(maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10))  # Ensure maxlen is set correctly
             self.total_dream_memory_mb = 0.0
             self.history = ConversationHistory(
                 maxlen=self.config_manager.get("controls_config.max_messages", 100),

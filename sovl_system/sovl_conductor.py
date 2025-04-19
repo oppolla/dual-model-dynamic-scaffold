@@ -416,6 +416,11 @@ class SOVLOrchestrator(OrchestratorInterface):
             
             self.mediator.register_system(system)
             
+            # Load state from file if exists, otherwise initialize new state
+            self.state = self.state_manager.load_state()
+            if self.state is None:
+                raise RuntimeError("Failed to load state. System cannot proceed without a valid state.")
+            
             # Generate a wake-up greeting
             if hasattr(system, 'generate'):
                 wake_seed = (int(time.time() * 1000) + random.randint(0, 100)) % 10000
