@@ -58,6 +58,7 @@ class Curiosity:
                 self.memory_usage = sum(
                     tensor.element_size() * tensor.nelement() / (1024 * 1024)
                     for tensor in self.embedding_cache.values()
+                    if isinstance(tensor, torch.Tensor)  # Ensure tensor is valid
                 )
         except Exception as e:
             self._log_error(f"Memory usage tracking failed: {str(e)}")

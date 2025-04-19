@@ -66,12 +66,14 @@ class ErrorManager:
         
         # Subscribe to configuration changes
         self.config_manager.subscribe(self._on_config_change)
-        
+
     def _initialize_config(self) -> None:
         """Initialize error handling configuration from ConfigManager."""
         try:
             # Load error handling configuration
             error_config = self.config_manager.get_section("error_config")
+            if not error_config:
+                raise ValueError("Error configuration section is missing or empty.")
             
             # Set error cooldown with validation
             self.error_cooldown = float(error_config.get("error_cooldown", 1.0))
