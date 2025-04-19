@@ -27,7 +27,7 @@ SOVL’s modular architecture supports a cyclical workflow of initialization, ex
   - Implements recovery actions, such as reducing batch sizes for training errors or resetting curiosity parameters.
   - Logs errors with context (e.g., batch size, pressure) for diagnostics.
 - **Technical Details**:
-  - Configurable parameters (log size: 10 MB, save suffix: `_final.json`) via `orchestrator_config`.
+  - Configurable parameters (log size: 10 MB, save suffix: `_final.json`) via `sovl_config.json`.
   - Thread-safe with `Lock` for state and resource management.
   - Integrates with `PluginManager` for extensibility.
 
