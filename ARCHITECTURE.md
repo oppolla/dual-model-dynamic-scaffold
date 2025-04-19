@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Self-Organizing Virtual Lifeform (SOVL) is an advanced AI framework designed to emulate biologically inspired learning and adaptation. It integrates multiple language models to produce coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. SOVL’s core capabilities include curiosity-driven exploration, dream-inspired memory consolidation, and scaffold-guided generation, orchestrated through a robust command-line interface (CLI) for precise control.
+The Self-Organizing Virtual Lifeform (SOVL) is an AI framework designed to emulate biologically inspired learning and adaptation. It integrates multiple language models via _scaffolds_ to produce coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. SOVL’s core capabilities include curiosity-driven exploration, dream-inspired memory consolidation, and scaffold-guided generation, orchestrated through a robust command-line interface (CLI) for precise control.
 
 This specification details SOVL’s architecture, covering components, workflows, and configuration options. It is structured to reflect the system’s operational flow: orchestration, model management, state/memory management, behavioral drivers, processing systems, user interaction, and resource optimization. The document is intended for developers, researchers, and architects seeking a comprehensive understanding of SOVL’s design.
 
