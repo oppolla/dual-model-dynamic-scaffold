@@ -2,308 +2,299 @@
 
 ## Overview
 
-The Self-Organizing Virtual Lifeform (SOVL) is an advanced AI framework engineered to emulate biologically inspired learning and adaptation. It integrates multiple language models to deliver coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. SOVL’s core capabilities include curiosity-driven exploration, a dream-inspired memory consolidation process, and scaffold-guided generation, all orchestrated through a robust command-line interface (CLI) for precise system control.
+The Self-Organizing Virtual Lifeform (SOVL) is an advanced AI framework designed to emulate biologically inspired learning and adaptation. It integrates multiple language models to produce coherent, contextually accurate outputs while autonomously refining its knowledge through exploration and memory consolidation. SOVL’s core capabilities include curiosity-driven exploration, dream-inspired memory consolidation, and scaffold-guided generation, orchestrated through a robust command-line interface (CLI) for precise control.
 
-This specification provides a technical overview of SOVL’s architecture, detailing its components, workflows, and configuration options. It is intended for developers, researchers, and system architects seeking a comprehensive understanding of SOVL’s design. The document is structured to reflect the system’s logical architecture, presenting components in a sequence that mirrors their operational flow: orchestration, model management, state and memory management, behavioral drivers, processing systems, and user interaction.
+This specification details SOVL’s architecture, covering components, workflows, and configuration options. It is structured to reflect the system’s operational flow: orchestration, model management, state/memory management, behavioral drivers, processing systems, user interaction, and resource optimization. The document is intended for developers, researchers, and architects seeking a comprehensive understanding of SOVL’s design.
 
 ## System Architecture
 
-SOVL’s architecture is a modular, interconnected system designed for scalability and efficiency. The components are organized to support a cyclical workflow of initialization, exploration, generation, learning, and consolidation, orchestrated to ensure seamless operation.
+SOVL’s modular architecture supports a cyclical workflow of initialization, exploration, generation, learning, and consolidation, ensuring scalability and efficiency.
 
-### 1. System Orchestration (`SOVLOrchestrator`)
+### 1. System Orchestration (`SOVLOrchestrator`, `SOVLSystem`)
 
-- **Function**: Serves as the central coordinator, managing initialization, execution, and shutdown of the SOVL system.
+- **Function**: Coordinates initialization, execution, and shutdown, integrating components via dependency injection.
 - **Key Features**:
-  - Initializes core components (`ConfigManager`, `StateManager`, `PluginManager`) with validated configurations.
-  - Executes CLI-based workflows, dispatching commands to relevant components.
-  - Manages state persistence with configurable save intervals (default: 300 seconds) and backup limits (max: 5).
-  - Ensures resource cleanup (e.g., GPU memory release) during shutdown.
+  - Initializes components (`ConfigManager`, `StateManager`, `PluginManager`) with validated configurations.
+  - Executes CLI workflows, dispatching commands to components.
+  - Manages state persistence (save interval: 300 seconds, max backups: 5) and resource cleanup (e.g., GPU memory).
+  - Provides system-wide methods (`generate_curiosity_question`, `dream`, `shutdown`) for operational control.
 - **Operation**:
-  - Loads configuration sections (`core_config`, `training_config`, etc.) at startup, validating for completeness.
-  - Synchronizes system state with `StateManager`, logging state hashes for consistency.
-  - Handles errors via `ErrorHandler`, with fallback actions for recovery.
+  - Loads configuration sections (`core_config`, `training_config`, etc.), validating completeness.
+  - Synchronizes state via `StateManager`, logging state hashes.
+  - Handles shutdown by saving state, clearing histories, and releasing resources.
+- **Error Handling (`ErrorManager`)**:
+  - Categorizes errors by severity (warning: 3.0, error: 5.0, critical: 10.0) and detects duplicates within a cooldown period (1.0 seconds).
+  - Implements recovery actions, such as reducing batch sizes for training errors or resetting curiosity parameters.
+  - Logs errors with context (e.g., batch size, pressure) for diagnostics.
 - **Technical Details**:
   - Configurable parameters (log size: 10 MB, save suffix: `_final.json`) via `orchestrator_config`.
   - Thread-safe with `Lock` for state and resource management.
-  - Integrates with `PluginManager` for extensible functionality.
+  - Integrates with `PluginManager` for extensibility.
 
-### 2. Model Management (`ModelManager`)
+### 2. Model Management (`ModelManager`, `ModelLoader`)
 
-- **Function**: Manages the loading, configuration, and dynamic switching of base and scaffold models.
+- **Function**: Manages loading, configuration, and switching of base and scaffold models.
 - **Key Features**:
-  - Supports switching between models (e.g., GPT-2, BERT) for task-specific performance.
-  - Applies LoRA adapters to scaffold models for efficient updates (rank: 8, alpha: 16, dropout: 0.1).
-  - Supports quantization modes (fp16, int8, int4) to optimize resource usage.
+  - Supports dynamic model switching (e.g., GPT-2, BERT) for task-specific performance.
+  - Applies LoRA adapters to scaffold models (rank: 8, alpha: 16, dropout: 0.1) for efficient updates.
+  - Supports quantization modes (fp16, int8, int4) to optimize resources.
+  - Validates model configurations (e.g., model path, type, quantization mode) before loading.
 - **Operation**:
-  - Loads models and tokenizers from local paths or Hugging Face, validating configurations.
+  - Loads models and tokenizers from local paths or Hugging Face, ensuring configuration validity.
   - Configures LoRA adapters for scaffold models, targeting attention and projection layers.
-  - Switches models via CLI commands, ensuring memory cleanup to prevent resource conflicts.
+  - Switches models via CLI, clearing memory to prevent conflicts.
 - **Technical Details**:
-  - Configurable model parameters via `core_config` and `lora_config`.
-  - Uses `transformers` library for model and tokenizer management.
+  - Configurable parameters via `core_config` and `lora_config`.
+  - Uses `transformers` and `bitsandbytes` for model management and quantization.
   - Thread-safe with `Lock` for model operations.
 
 ### 3. State and Memory Management
 
-#### 3.1 State Management (`StateManager`)
+#### 3.1 State Management (`StateManager`, `StateTracker`)
 
-- **Function**: Tracks and persists system state, including curiosity, confidence, and temperament metrics.
+- **Function**: Tracks and persists system state, including curiosity, confidence, and temperament.
 - **Key Features**:
-  - Maintains a consistent system state with persistent storage and state hash validation.
-  - Supports state loading and saving with configurable intervals and backup management.
-  - Provides thread-safe access to state data for component synchronization.
+  - Maintains state history (max: 100 states) and changes (max: 50) for diagnostics.
+  - Provides debug tools (`get_debug_info`) for state analysis (e.g., memory usage, recent changes).
+  - Supports persistent storage with configurable save intervals and backups (max: 5).
 - **Operation**:
-  - Serializes state to JSON with a `_final.json` suffix, maintaining up to 5 backups.
-  - Synchronizes state across components via `SOVLOrchestrator`.
-  - Logs state changes for debugging and recovery.
+  - Serializes state to JSON (`_final.json` suffix), validating state hashes.
+  - Updates state with thread-safe operations, logging changes.
+  - Clears history during shutdown to optimize resources.
 - **Technical Details**:
-  - Configurable save intervals and backup limits via `orchestrator_config`.
-  - Thread-safe with reentrant locking for concurrent access.
+  - Configurable parameters (save interval, backup limit) via `orchestrator_config`.
+  - Thread-safe with reentrant locking.
 
 #### 3.2 Memory Management (`MemoryManager`)
 
-- **Function**: Organizes and stores system experiences, including dream memories, conversation histories, and scaffold context.
+- **Function**: Organizes experiences, including dream memories, conversation histories, and scaffold context.
 - **Key Features**:
   - Stores experiences as tensors with metadata (e.g., timestamps), weighted by confidence.
-  - Manages dream memories (max: 100), conversation histories (max: 50), and token maps for scaffold integration.
-  - Applies a decay rate (0.95) and prune threshold (0.1) for efficient storage.
+  - Manages dream memories (max: 100), conversation histories (max: 50), and token maps.
+  - Applies decay (0.95) and prune threshold (0.1) for efficiency.
 - **Operation**:
-  - Appends experiences to memory, synchronizing with training and scaffold systems.
-  - Updates token maps with confidence-weighted values for accurate context recall.
-  - Optimizes resource usage by moving unused tensors to CPU.
+  - Appends experiences, synchronizing with training and scaffold systems.
+  - Updates token maps with confidence-weighted values for recall.
+  - Moves unused tensors to CPU for GPU optimization.
 - **Technical Details**:
-  - Configurable memory parameters (max length, decay rate) via `memory_config`.
-  - Thread-safe with `Lock` for concurrent access.
-  - Integrates with `HardwareManager` for GPU memory optimization.
+  - Configurable parameters (max length, decay rate) via `memory_config`.
+  - Thread-safe with `Lock`.
 
 ### 4. Behavioral Drivers
 
-#### 4.1 Curiosity Engine (`CuriosityManager`)
+#### 4.1 Curiosity Engine (`CuriosityManager`, `CuriosityEngine`)
 
-- **Function**: Drives autonomous exploration by quantifying curiosity based on ignorance and novelty.
+- **Function**: Drives exploration by quantifying curiosity based on ignorance and novelty.
 - **Key Features**:
-  - Computes curiosity scores using a weighted formula: 70% ignorance (from confidence scores) and 30% novelty (from cosine similarity of embeddings).
-  - Initiates exploration when curiosity pressure exceeds a configurable threshold, generating queries or seeking data.
-  - Adapts curiosity based on lifecycle stage (e.g., higher curiosity during early phases).
+  - Computes curiosity scores (70% ignorance, 30% novelty) using confidence and cosine similarity.
+  - Triggers exploration when curiosity pressure exceeds thresholds, generating queries.
+  - Manages training cycles via `TrainingCycleManager`, integrating validated data.
 - **Operation**:
-  - Calculates ignorance from base and scaffold model confidence outputs.
-  - Assesses novelty by comparing query embeddings against memory embeddings.
-  - Triggers exploration prompts, logged for analysis.
+  - Calculates ignorance from model confidence and novelty from memory embeddings.
+  - Generates exploration prompts, logged in memory.
+  - Executes training cycles with configurable epochs and batch sizes.
 - **Technical Details**:
   - Configurable weights (ignorance: 0.7, novelty: 0.3) via `curiosity_config`.
-  - Thread-safe with locking for state updates.
-  - Integrates with `ConfidenceCalculator` and `MemoryManager`.
+  - Thread-safe with locking.
+  - Integrates with `ConfidenceCalculator` and `TrainingCycleManager`.
 
 #### 4.2 Temperament System (`TemperamentSystem`)
 
-- **Function**: Models dynamic system behavior through a temperament score, influencing generation and learning.
+- **Function**: Models dynamic behavior via a temperament score, influencing generation and learning.
 - **Key Features**:
-  - Maintains a temperament score (0.0–1.0), mapped to states: cautious (< 0.3), balanced (0.3–0.7), curious (> 0.7).
-  - Modifies generation parameters (e.g., temperature) and learning rates (e.g., 1.2x for curious) based on temperament.
-  - Adapts temperament based on lifecycle stage and confidence feedback.
+  - Maintains temperament score (0.0–1.0): cautious (< 0.3), balanced (0.3–0.7), curious (> 0.7).
+  - Adjusts generation parameters (e.g., temperature) and learning rates (curious: 1.2x).
+  - Adapts based on lifecycle stage and confidence feedback.
 - **Operation**:
-  - Updates temperament using a smoothed average of confidence and experience metrics.
-  - Applies temperament-driven adjustments to model outputs and training intensity.
-  - Ensures stable transitions with reentrant locking.
+  - Updates temperament using smoothed confidence and experience metrics.
+  - Applies temperament-driven adjustments, ensuring stable transitions.
 - **Technical Details**:
-  - Configurable mood thresholds and decay rates via `controls_config`.
-  - Integrates with `ConfidenceCalculator` for feedback-driven updates.
+  - Configurable thresholds via `controls_config`.
+  - Thread-safe with locking.
 
 #### 4.3 Confidence Tracker (`ConfidenceCalculator`)
 
-- **Function**: Evaluates the reliability of model outputs, guiding exploration and training decisions.
+- **Function**: Evaluates output reliability, guiding exploration and training.
 - **Key Features**:
-  - Computes confidence from softmax probabilities, adjusted by temperament (cautious: 0.8x, curious: 1.2x) and lifecycle stage (exploration: 1.1x).
-  - Maintains a history of confidence scores for error recovery and trend analysis.
-  - Clamps confidence values between 0.0 and 1.0 for consistency.
+  - Computes confidence from softmax probabilities, adjusted by temperament (cautious: 0.8x, curious: 1.2x) and lifecycle (exploration: 1.1x).
+  - Maintains confidence history for error recovery.
+  - Clamps values between 0.0 and 1.0.
 - **Operation**:
-  - Processes model logits to derive base confidence scores.
-  - Applies modifiers based on temperament, lifecycle, and curiosity pressure.
-  - Triggers exploration or training when confidence falls below a threshold (e.g., 0.7).
+  - Processes model logits, applying modifiers.
+  - Triggers exploration or training at low confidence (threshold: 0.7).
 - **Technical Details**:
-  - Configurable recovery weights and history length via `confidence_config`.
-  - Thread-safe with locking for concurrent access.
+  - Configurable parameters via `confidence_config`.
+  - Thread-safe.
 
 ### 5. Processing Systems
 
 #### 5.1 Scaffold Integration (`ScaffoldProvider`, `ScaffoldTokenMapper`, `CrossAttentionInjector`)
 
-- **Function**: Enhances output quality by integrating contextual guidance from a scaffold model into the base model.
+- **Function**: Enhances output quality by integrating scaffold model context.
 - **Key Features**:
-  - Employs token mapping to align base and scaffold token spaces.
-  - Implements cross-attention mechanisms to inject scaffold context, improving coherence.
-  - Dynamically adjusts scaffold influence based on confidence and temperament metrics.
+  - Aligns token spaces via `ScaffoldTokenMapper` with confidence-weighted updates (cap: 5.0).
+  - Injects scaffold context using cross-attention (`CrossAttentionInjector`).
+  - Adjusts scaffold influence based on confidence and temperament.
 - **Operation**:
-  - `ScaffoldTokenMapper` constructs token mappings with confidence-weighted updates (weight cap: 5.0).
-  - `ScaffoldProvider` generates context tensors from scaffold inputs.
-  - `CrossAttentionInjector` modifies the base model with attention layers.
+  - `ScaffoldProvider` generates context tensors.
+  - `CrossAttentionInjector` modifies base model attention layers.
 - **Technical Details**:
-  - Supports quantization modes (e.g., int8) via `core_config`.
-  - Uses `torch.nn` for cross-attention implementation.
-  - Thread-safe with state management.
+  - Supports quantization (e.g., int8) via `core_config`.
+  - Uses `torch.nn` for cross-attention.
+  - Thread-safe.
 
 #### 5.2 Training System (`SOVLTrainer`)
 
-- **Function**: Manages model training, including standard, sleep, and gestation cycles, to refine performance.
+- **Function**: Manages model training, including standard, sleep, and gestation cycles.
 - **Key Features**:
-  - Supports gradient accumulation and mixed-precision training for efficiency.
-  - Incorporates dream memory replays during sleep cycles, weighted by novelty.
-  - Uses LoRA adapters for efficient scaffold model updates (rank: 8, alpha: 16).
-  - Adjusts learning rates based on confidence and temperament (curious: 1.2x).
+  - Supports gradient accumulation and mixed-precision training.
+  - Replays dream memories during sleep, weighted by novelty.
+  - Uses LoRA adapters for scaffold updates (rank: 8, alpha: 16).
+  - Adjusts learning rates by temperament (curious: 1.2x).
 - **Operation**:
-  - Executes training with scaffold-guided context for coherence.
-  - Replays dream memories during sleep to reinforce learned patterns.
+  - Trains with scaffold-guided context.
   - Performs gestation cycles with low learning rates (2e-5).
 - **Technical Details**:
-  - Configurable training parameters (batch size: 2, learning rate: 2e-5) via `training_config`.
-  - Thread-safe with error recovery mechanisms.
+  - Configurable parameters (batch size: 2, learning rate: 2e-5) via `training_config`.
+  - Thread-safe.
 
 #### 5.3 Memory Consolidation System (`DreamMemory`)
 
-- **Function**: Facilitates knowledge consolidation through a dreaming process, enhancing learning and creativity.
+- **Function**: Consolidates knowledge through dreaming, enhancing learning and creativity.
 - **Key Features**:
-  - Stores up to 100 experiences as weighted tensors, with a novelty boost factor of 0.03.
-  - Applies a decay rate of 0.95, pruning memories below a 0.1 weight threshold.
-  - Incorporates temperament-based noise (e.g., 0.02 for melancholy) for creative associations.
+  - Stores 100 experiences as weighted tensors, with novelty boost (0.03).
+  - Applies decay (0.95) and prune threshold (0.1).
+  - Adds temperament-based noise (e.g., 0.02 for melancholy).
 - **Operation**:
   - Appends experiences to a `deque`, pruning low-weight memories.
-  - Aggregates tensors during dreaming for training input, synchronized with scaffold context.
+  - Aggregates tensors during dreaming, synchronized with scaffold context.
 - **Technical Details**:
-  - Configurable parameters (decay: 0.95, prune threshold: 0.1) via `memory_config`.
-  - Thread-safe with `Lock` for concurrent access.
+  - Configurable parameters via `memory_config`.
+  - Thread-safe.
 
 ### 6. User Interaction
 
 #### 6.1 Command Line Interface (CLI)
 
-- **Function**: Provides a robust interface for system interaction and control.
+- **Function**: Provides robust system control via commands.
 - **Key Commands**:
-  - **Generation**: `generate` (text generation), `echo` (styled repetition), `mimic` (tone adoption).
-  - **Training**: `train` (model training), `dream` (sleep cycle initiation).
-  - **Memory**: `memory` (view memories), `recall` (retrieve data), `recap` (summarize interactions).
-  - **Interaction**: `muse` (deep analysis), `flare` (creative generation), `debate` (argumentation), `spark` (brainstorming), `reflect` (self-analysis).
-  - **Model Management**: `switch_model` (change base/scaffold model), `set_quantization` (adjust efficiency).
-  - **System Control**: `status` (system state), `save` (persist state), `reset` (clear state).
+  - **Generation**: `generate`, `echo`, `mimic`.
+  - **Training**: `train`, `dream`.
+  - **Memory**: `memory`, `recall`, `recap`.
+  - **Interaction**: `muse`, `flare`, `debate`, `spark`, `reflect`.
+  - **Model Management**: `switch_model`, `set_quantization`.
+  - **System Control**: `status`, `save`, `reset`.
 - **Operation**:
-  - Commands are dispatched by `SOVLOrchestrator` to relevant components.
-  - State changes are logged and synchronized via `StateManager`.
+  - Commands dispatched by `SOVLOrchestrator`, synchronized via `StateManager`.
 - **Technical Details**:
-  - Configurable command history and validation via `orchestrator_config`.
-  - Integrates with `PluginManager` for extensible command support.
+  - Configurable command history via `orchestrator_config`.
+  - Extensible via `PluginManager`.
 
-#### 6.2 Configuration Management
+#### 6.2 Configuration Management (`SystemContext`, `ConfigManager`)
 
-- **Function**: Enables fine-grained control over system behavior through modular configuration.
+- **Function**: Enables fine-grained control through modular configuration.
 - **Key Sections**:
-  - **`core_config`**: Model settings (e.g., base model: GPT-2, quantization: int8).
-  - **`training_config`**: Training parameters (e.g., learning rate: 2e-5, batch size: 2).
-  - **`curiosity_config`**: Curiosity weights (ignorance: 0.7, novelty: 0.3).
-  - **`memory_config`**: Memory parameters (decay: 0.95, prune threshold: 0.1).
-  - **`controls_config`**: Temperament thresholds (e.g., curious > 0.7).
-  - **`lora_config`**: LoRA settings (rank: 8, alpha: 16, dropout: 0.1).
-  - **`orchestrator_config`**: System settings (log size: 10 MB, save interval: 300 seconds).
+  - `core_config`: Model settings (e.g., base model: GPT-2, quantization: int8).
+  - `training_config`: Training parameters (e.g., learning rate: 2e-5, batch size: 2).
+  - `curiosity_config`: Curiosity weights (ignorance: 0.7, novelty: 0.3).
+  - `memory_config`: Memory parameters (decay: 0.95, prune threshold: 0.1).
+  - `controls_config`: Temperament thresholds (curious > 0.7).
+  - `lora_config`: LoRA settings (rank: 8, alpha: 16, dropout: 0.1).
+  - `orchestrator_config`: System settings (log size: 10 MB, save interval: 300 seconds).
 - **Operation**:
-  - Configurations are validated and updated via `ConfigManager`, with defaults for missing sections.
-  - Changes are propagated to components, logged for traceability.
+  - Validates configurations, propagating updates via event dispatcher.
+  - Supports JSON-based files with backups.
 - **Technical Details**:
-  - Thread-safe configuration updates with subscription-based notifications.
-  - Supports JSON-based configuration files with backup management.
+  - Thread-safe with subscription-based notifications.
 
 ### 7. Resource Optimization
 
 #### 7.1 Memory Monitoring (`MemoryMonitor`)
 
-- **Function**: Optimizes resource allocation by monitoring GPU and CPU usage.
+- **Function**: Optimizes resource allocation by monitoring GPU/CPU usage.
 - **Key Features**:
-  - Tracks memory statistics (allocated, reserved, available) in real-time.
-  - Triggers memory cleanup when usage exceeds thresholds (e.g., 80%).
-  - Logs resource usage for performance analysis.
+  - Tracks GPU statistics (allocated, cached, max memory) and fragmentation.
+  - Triggers cleanup when usage exceeds thresholds (e.g., 80%).
+  - Integrates with `MemoryManager` for health checks.
 - **Operation**:
-  - Integrates with `HardwareManager` to retrieve memory statistics.
-  - Executes cleanup operations, moving tensors to CPU or clearing caches.
+  - Retrieves statistics via `torch.cuda` and `MemoryManager`.
+  - Executes cleanup, moving tensors to CPU or clearing caches.
 - **Technical Details**:
-  - Configurable thresholds and check intervals via `memory_config`.
-  - Thread-safe with locking for resource access.
+  - Configurable thresholds via `memory_config`.
+  - Thread-safe.
 
 #### 7.2 Plugin Management (`PluginManager`)
 
-- **Function**: Extends system functionality through modular plugins.
+- **Function**: Extends functionality through modular plugins.
 - **Key Features**:
-  - Supports dynamic loading and execution of custom plugins.
-  - Integrates plugins with CLI commands and system workflows.
-  - Ensures plugin compatibility with system state and configuration.
+  - Supports dynamic plugin loading and execution.
+  - Integrates plugins with CLI and workflows.
 - **Operation**:
   - Loads plugins specified in `orchestrator_config`.
-  - Dispatches plugin-specific commands via `SOVLOrchestrator`.
+  - Dispatches plugin commands via `SOVLOrchestrator`.
 - **Technical Details**:
-  - Configurable plugin paths and validation rules.
-  - Thread-safe with state synchronization.
+  - Configurable plugin paths.
+  - Thread-safe.
 
 ## Operational Workflow
 
-SOVL’s workflow integrates its components into a cohesive cycle:
-
 1. **Initialization**:
    - `SOVLOrchestrator` initializes components, loading configurations and state.
-   - `ModelManager` loads base and scaffold models with LoRA adapters.
+   - `ModelLoader` validates and loads models with LoRA adapters.
 
 2. **Exploration**:
-   - `CuriosityManager` evaluates ignorance and novelty, triggering queries when curiosity exceeds thresholds.
+   - `CuriosityEngine` evaluates ignorance and novelty, triggering queries.
    - Low confidence prompts exploration, logged in memory.
 
 3. **Generation**:
-   - Base model generates outputs, enhanced by scaffold context via cross-attention.
+   - Base model generates outputs, enhanced by scaffold context.
    - Temperament adjusts tone; confidence validates reliability.
 
 4. **Learning**:
-   - `SOVLTrainer` updates models using data and dream memory replays.
-   - LoRA adapters enable efficient scaffold updates.
+   - `SOVLTrainer` updates models using data and dream replays.
+   - LoRA adapters optimize scaffold updates.
 
 5. **Consolidation**:
-   - `DreamMemory` replays memories during sleep cycles, reinforcing patterns.
+   - `DreamMemory` replays memories during sleep, reinforcing patterns.
    - `MemoryManager` stores experiences, pruning outdated tensors.
 
 6. **User Interaction**:
-   - CLI commands (`generate`, `dream`) dispatch tasks to components.
-   - State and memory are synchronized, with changes logged.
+   - CLI commands dispatch tasks, with state synchronized.
 
 ## Memory Consolidation and Sleep Cycles
 
-SOVL’s memory consolidation process enhances learning:
-
 - **Mechanism**:
-  - **Triggers**: Low confidence (threshold: 0.7), compute intervals, or CLI `dream` command.
-  - **Memory Replay**: Aggregates dream memories, weighted by novelty (boost: 0.03).
-  - **Optimization**: Fine-tunes parameters with low learning rates (2e-5) and noise (scale: 0.05).
+  - **Triggers**: Low confidence (0.7), compute intervals, or `dream` command.
+  - **Memory Replay**: Aggregates memories, weighted by novelty (0.03).
+  - **Optimization**: Fine-tunes parameters (learning rate: 2e-5, noise: 0.05).
   - **Scaffold Integration**: Aligns memories with scaffold context.
 - **Outcomes**:
   - Strengthened neural patterns and enhanced creativity.
 - **Technical Details**:
-  - Configurable sleep parameters via `memory_config`.
-  - Thread-safe with logging.
+  - Configurable parameters via `memory_config`.
+  - Thread-safe.
 
 ## Example Workflow: Machine Learning Query
 
 1. **Initialization**:
-   - `SOVLOrchestrator` loads GPT-2 (base) and BERT (scaffold) models via `ModelManager`.
-   - State and memory are initialized via `StateManager` and `MemoryManager`.
+   - `SOVLOrchestrator` loads GPT-2 (base) and BERT (scaffold) via `ModelLoader`.
+   - State and memory initialized via `StateTracker` and `MemoryManager`.
 
 2. **Exploration**:
-   - `CuriosityManager` detects low confidence (0.6) on “machine learning,” triggering: “What are key ML algorithms?”
-   - Query is stored in memory.
+   - `CuriosityEngine` detects low confidence (0.6) on “machine learning,” triggering: “What are key ML algorithms?”
+   - Query stored in memory.
 
 3. **Generation**:
-   - Base model generates a response, with scaffold adding technical depth.
-   - Balanced temperament ensures clarity; confidence (0.85) validates output.
+   - Base model generates response, scaffold adds depth.
+   - Balanced temperament ensures clarity; confidence (0.85) validates.
 
 4. **Memory Storage**:
-   - `MemoryManager` stores the interaction as a tensor (weight: 0.85).
-   - Token maps prioritize terms like “regression.”
+   - `MemoryManager` stores interaction (weight: 0.85).
+   - Token maps prioritize “regression,” “neural network.”
 
 5. **Consolidation and Training**:
-   - `DreamMemory` replays ML tensors during sleep, linking concepts.
-   - `SOVLTrainer` fine-tunes parameters, with LoRA optimizing scaffold updates.
+   - `DreamMemory` replays ML tensors, linking concepts.
+   - `SOVLTrainer` fine-tunes parameters, LoRA optimizes scaffold.
 
 6. **Subsequent Interaction**:
-   - A follow-up query retrieves tensors, enabling a detailed response on ML applications.
-
+   - Follow-up query retrieves tensors, enabling detailed response.
