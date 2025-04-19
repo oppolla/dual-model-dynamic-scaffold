@@ -26,10 +26,6 @@ SOVL’s modular architecture supports a cyclical workflow of initialization, ex
   - Loads configuration sections (`core_config`, `training_config`, etc.), validating completeness.
   - Synchronizes state via `StateManager`, logging state hashes.
   - Handles shutdown by saving state, clearing histories, and releasing resources.
-- **Error Handling (`ErrorManager`)**:
-  - Categorizes errors by severity (warning: 3.0, error: 5.0, critical: 10.0) and detects duplicates within a cooldown period (1.0 seconds).
-  - Implements recovery actions, such as reducing batch sizes for training errors or resetting curiosity parameters.
-  - Logs errors with context (e.g., batch size, pressure) for diagnostics.
 - **Technical Details**:
   - Configurable parameters (log size: 10 MB, save suffix: `_final.json`) via `sovl_config.json`.
   - Thread-safe with `Lock` for state and resource management.
@@ -210,35 +206,6 @@ SOVL’s modular architecture supports a cyclical workflow of initialization, ex
   - Supports JSON-based files with backups.
 - **Technical Details**:
   - Thread-safe with subscription-based notifications.
-
-### 7. Resource Optimization
-
-#### 7.1 Memory Monitoring (`MemoryMonitor`)
-
-- **Function**: Optimizes resource allocation by monitoring GPU/CPU usage.
-- **Key Features**:
-  - Tracks GPU statistics (allocated, cached, max memory) and fragmentation.
-  - Triggers cleanup when usage exceeds thresholds (e.g., 80%).
-  - Integrates with `MemoryManager` for health checks.
-- **Operation**:
-  - Retrieves statistics via `torch.cuda` and `MemoryManager`.
-  - Executes cleanup, moving tensors to CPU or clearing caches.
-- **Technical Details**:
-  - Configurable thresholds via `memory_config`.
-  - Thread-safe.
-
-#### 7.2 Plugin Management (`PluginManager`)
-
-- **Function**: Extends functionality through modular plugins.
-- **Key Features**:
-  - Supports dynamic plugin loading and execution.
-  - Integrates plugins with CLI and workflows.
-- **Operation**:
-  - Loads plugins specified in `orchestrator_config`.
-  - Dispatches plugin commands via `SOVLOrchestrator`.
-- **Technical Details**:
-  - Configurable plugin paths.
-  - Thread-safe.
 
 ## Operational Workflow
 
